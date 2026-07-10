@@ -4,7 +4,7 @@ import os
 import PeekabooFoundation
 
 /// Dock-specific errors
-public enum DockError: Error {
+public nonisolated enum DockError: StandardizedError {
     case dockNotFound
     case dockListNotFound
     case itemNotFound(String)
@@ -12,6 +12,55 @@ public enum DockError: Error {
     case positionNotFound
     case launchFailed(String)
     case scriptError(String)
+
+    public var code: StandardErrorCode {
+        switch self {
+        case .dockNotFound:
+            .dockNotFound
+        case .dockListNotFound:
+            .dockListNotFound
+        case .itemNotFound:
+            .dockItemNotFound
+        case .menuItemNotFound:
+            .menuItemNotFound
+        case .positionNotFound:
+            .positionNotFound
+        case .launchFailed:
+            .interactionFailed
+        case .scriptError:
+            .scriptError
+        }
+    }
+
+    public var userMessage: String {
+        switch self {
+        case .dockNotFound:
+            "Dock not found"
+        case .dockListNotFound:
+            "Dock items list not found"
+        case let .itemNotFound(name):
+            "Dock item '\(name)' not found"
+        case let .menuItemNotFound(name):
+            "Dock menu item '\(name)' not found"
+        case .positionNotFound:
+            "Dock position not found"
+        case let .launchFailed(message):
+            message
+        case let .scriptError(message):
+            message
+        }
+    }
+
+    public var context: [String: String] {
+        switch self {
+        case let .itemNotFound(name), let .menuItemNotFound(name):
+            ["name": name]
+        case let .launchFailed(message), let .scriptError(message):
+            ["message": message]
+        default:
+            [:]
+        }
+    }
 }
 
 /// Default implementation of Dock interaction operations using AXorcist

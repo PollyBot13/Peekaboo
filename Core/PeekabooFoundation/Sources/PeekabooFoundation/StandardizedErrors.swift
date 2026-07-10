@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Error Code Protocol
 
 /// Standard error codes used across Peekaboo
-public enum StandardErrorCode: String, Sendable {
+public enum StandardErrorCode: String, Sendable, Equatable {
     // Permission errors
     case screenRecordingPermissionDenied = "PERMISSION_DENIED_SCREEN_RECORDING"
     case accessibilityPermissionDenied = "PERMISSION_DENIED_ACCESSIBILITY"
@@ -17,6 +17,11 @@ public enum StandardErrorCode: String, Sendable {
     case snapshotNotFound = "SNAPSHOT_NOT_FOUND"
     case fileNotFound = "FILE_NOT_FOUND"
     case menuNotFound = "MENU_NOT_FOUND"
+    case menuItemNotFound = "MENU_ITEM_NOT_FOUND"
+    case dockNotFound = "DOCK_NOT_FOUND"
+    case dockListNotFound = "DOCK_LIST_NOT_FOUND"
+    case dockItemNotFound = "DOCK_ITEM_NOT_FOUND"
+    case positionNotFound = "POSITION_NOT_FOUND"
 
     // Operation errors
     case captureFailed = "CAPTURE_FAILED"
@@ -34,6 +39,7 @@ public enum StandardErrorCode: String, Sendable {
     // System errors
     case fileIOError = "FILE_IO_ERROR"
     case configurationError = "CONFIGURATION_ERROR"
+    case scriptError = "SCRIPT_ERROR"
     case unknownError = "UNKNOWN_ERROR"
 
     // AI errors

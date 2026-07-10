@@ -1007,6 +1007,99 @@ struct PeekabooBridgeTests {
     }
 
     @Test
+    func `bridge preserves actionable operation error message and classification`() async throws {
+        let stub = await MainActor.run { StubServices() }
+        await MainActor.run {
+            stub.automationStub.clickError = PeekabooError.operationError(
+                message: "No actionable accessibility element found at (120, 80); try a visible control")
+        }
+        let server = await MainActor.run {
+            PeekabooBridgeServer(
+                services: stub,
+                hostKind: .gui,
+                allowlistedTeams: [],
+                allowlistedBundles: [],
+                permissionStatusEvaluator: { _ in
+                    PermissionsStatus(
+                        screenRecording: true,
+                        accessibility: true,
+                        appleScript: true,
+                        postEvent: true)
+                })
+        }
+
+        let request = PeekabooBridgeRequest.click(PeekabooBridgeClickRequest(
+            target: .coordinates(CGPoint(x: 120, y: 80)),
+            clickType: .single,
+            snapshotId: nil))
+        let responseData = await server.decodeAndHandle(
+            try JSONEncoder.peekabooBridgeEncoder().encode(request),
+            peer: nil)
+        let response = try self.decode(responseData)
+
+        guard case let .error(envelope) = response else {
+            Issue.record("Expected error response, got \(response)")
+            return
+        }
+
+        #expect(envelope.code == .internalError)
+        #expect(envelope.classification == .interactionFailed)
+        #expect(envelope.message == "No actionable accessibility element found at (120, 80); try a visible control")
+        #expect(envelope.details?.contains("No actionable accessibility element found") == true)
+    }
+
+    @Test
+    func `bridge preserves Dock menu not found message and classification`() async throws {
+        let services = await MainActor.run {
+            StubServices(dock: StubFailingDockService(error: .menuItemNotFound("New Finder Window")))
+        }
+        let server = await MainActor.run {
+            PeekabooBridgeServer(
+                services: services,
+                hostKind: .gui,
+                allowlistedTeams: [],
+                allowlistedBundles: [],
+                permissionStatusEvaluator: { _ in
+                    PermissionsStatus(
+                        screenRecording: true,
+                        accessibility: true,
+                        appleScript: true,
+                        postEvent: true)
+                })
+        }
+        let request = PeekabooBridgeRequest.rightClickDockItem(
+            PeekabooBridgeDockRightClickRequest(appName: "Finder", menuItem: "New Finder Window"))
+        let responseData = await server.decodeAndHandle(
+            try JSONEncoder.peekabooBridgeEncoder().encode(request),
+            peer: nil)
+        let response = try self.decode(responseData)
+
+        guard case let .error(envelope) = response else {
+            Issue.record("Expected error response, got \(response)")
+            return
+        }
+
+        #expect(envelope.code == .notFound)
+        #expect(envelope.classification == .menuItemNotFound)
+        #expect(envelope.message == "Dock menu item 'New Finder Window' not found")
+        #expect(envelope.details?.contains("menuItemNotFound") == true)
+    }
+
+    @Test
+    func `bridge error classification is optional and forward compatible`() throws {
+        let decoder = JSONDecoder.peekabooBridgeDecoder()
+        let legacy = try decoder.decode(
+            PeekabooBridgeErrorEnvelope.self,
+            from: Data(#"{"code":"internalError","message":"legacy"}"#.utf8))
+        let future = try decoder.decode(
+            PeekabooBridgeErrorEnvelope.self,
+            from: Data(#"{"code":"internalError","message":"future","classification":"FUTURE_ERROR"}"#.utf8))
+
+        #expect(legacy.classification == nil)
+        #expect(future.classification == nil)
+    }
+
+    @Test
     func `targeted hotkey is disabled when post event access is missing`() async throws {
         let server = await MainActor.run {
             PeekabooBridgeServer(
@@ -1400,7 +1493,7 @@ final class StubServices: PeekabooBridgeServiceProviding {
     let applications: any ApplicationServiceProtocol
     let windows: any WindowManagementServiceProtocol = StubWindowService()
     let menu: any MenuServiceProtocol = UnimplementedMenuService()
-    let dock: any DockServiceProtocol = UnimplementedDockService()
+    let dock: any DockServiceProtocol
     let dialogs: any DialogServiceProtocol = UnimplementedDialogService()
     let snapshots: any SnapshotManagerProtocol
     let desktopObservationStub: StubDesktopObservationService
@@ -1412,12 +1505,14 @@ final class StubServices: PeekabooBridgeServiceProviding {
     init(
         applications: any ApplicationServiceProtocol = StubApplicationService(),
         snapshots: any SnapshotManagerProtocol = SnapshotManager(),
-        desktopObservation: (any DesktopObservationServiceProtocol)? = nil)
+        desktopObservation: (any DesktopObservationServiceProtocol)? = nil,
+        dock: (any DockServiceProtocol)? = nil)
     {
         let desktopObservationStub = StubDesktopObservationService()
         self.screenCapture = self.screenCaptureStub
         self.automation = self.automationStub
         self.applications = applications
+        self.dock = dock ?? UnimplementedDockService()
         self.snapshots = snapshots
         self.desktopObservationStub = desktopObservationStub
         self.desktopObservation = desktopObservation ?? desktopObservationStub
@@ -1886,6 +1981,51 @@ private final class UnimplementedDockService: DockServiceProtocol {
 
     func addToDock(path _: String, persistent _: Bool) async throws {}
     func removeFromDock(appName _: String) async throws {}
+    func isDockAutoHidden() async -> Bool {
+        false
+    }
+}
+
+@MainActor
+private final class StubFailingDockService: DockServiceProtocol {
+    private let error: DockError
+
+    init(error: DockError) {
+        self.error = error
+    }
+
+    func launchFromDock(appName _: String) async throws {
+        throw self.error
+    }
+
+    func findDockItem(name _: String) async throws -> DockItem {
+        throw self.error
+    }
+
+    func rightClickDockItem(appName _: String, menuItem _: String?) async throws {
+        throw self.error
+    }
+
+    func hideDock() async throws {
+        throw self.error
+    }
+
+    func showDock() async throws {
+        throw self.error
+    }
+
+    func listDockItems(includeAll _: Bool) async throws -> [DockItem] {
+        throw self.error
+    }
+
+    func addToDock(path _: String, persistent _: Bool) async throws {
+        throw self.error
+    }
+
+    func removeFromDock(appName _: String) async throws {
+        throw self.error
+    }
+
     func isDockAutoHidden() async -> Bool {
         false
     }

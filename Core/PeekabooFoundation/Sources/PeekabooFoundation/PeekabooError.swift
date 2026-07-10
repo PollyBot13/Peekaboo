@@ -174,7 +174,7 @@ public nonisolated enum PeekabooError: LocalizedError, StandardizedError, Peekab
         case .menuNotFound:
             .menuNotFound
         case .menuItemNotFound:
-            .menuNotFound
+            .menuItemNotFound
         case .sessionNotFound:
             .sessionNotFound
         case .snapshotNotFound:

@@ -77,14 +77,51 @@ struct FocusErrorMappingTests {
     func `bridge envelope details preserve bridge details and permission`() {
         let envelope = PeekabooBridgeErrorEnvelope(
             code: .internalError,
-            message: "Bridge operation failed",
+            message: "No actionable accessibility element found at (120, 80)",
             details: "Screen capture service rejected the request",
-            permission: .screenRecording
+            classification: .interactionFailed,
+            permission: .screenRecording,
+            kind: .elementNotFound,
+            context: "B404",
+            operationMayHaveCompleted: true
         )
 
         let details = errorDetails(for: envelope)
+        #expect(errorCode(for: envelope) == .INTERACTION_FAILED)
+        #expect(errorMessage(for: envelope) == "No actionable accessibility element found at (120, 80)")
         #expect(details?.contains("Screen capture service rejected the request") == true)
         #expect(details?.contains("permission: screenRecording") == true)
+        #expect(details?.contains("kind: elementNotFound") == true)
+        #expect(details?.contains("context: B404") == true)
+        #expect(details?.contains("operationMayHaveCompleted: true") == true)
+    }
+
+    @Test
+    func `bridge Dock menu classification maps to menu item not found`() {
+        let envelope = PeekabooBridgeErrorEnvelope(
+            code: .notFound,
+            message: "Dock menu item 'New Finder Window' not found",
+            details: "menuItemNotFound(\"New Finder Window\")",
+            classification: .menuItemNotFound
+        )
+
+        #expect(errorCode(for: envelope) == .MENU_ITEM_NOT_FOUND)
+        #expect(errorMessage(for: envelope) == "Dock menu item 'New Finder Window' not found")
+        #expect(errorDetails(for: envelope)?.contains("New Finder Window") == true)
+    }
+
+    @Test
+    func `generic error info preserves bridge message code and details`() {
+        let envelope = PeekabooBridgeErrorEnvelope(
+            code: .notFound,
+            message: "Dock menu item 'New Finder Window' not found",
+            details: "menuItemNotFound(\"New Finder Window\")",
+            classification: .menuItemNotFound)
+
+        let info = genericErrorInfo(for: envelope)
+        #expect(info.message == envelope.message)
+        #expect(info.code == .MENU_ITEM_NOT_FOUND)
+        #expect(info.details?.contains("New Finder Window") == true)
     }
 
     @Test

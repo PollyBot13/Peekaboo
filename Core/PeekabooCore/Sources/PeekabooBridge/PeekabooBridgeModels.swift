@@ -304,6 +304,7 @@ public struct PeekabooBridgeErrorEnvelope: Codable, Sendable, LocalizedError {
     public let code: PeekabooBridgeErrorCode
     public let message: String
     public let details: String?
+    public let classification: StandardErrorCode?
     public let permission: PeekabooBridgePermissionKind?
     public let kind: PeekabooBridgeErrorKind?
     public let context: String?
@@ -313,6 +314,7 @@ public struct PeekabooBridgeErrorEnvelope: Codable, Sendable, LocalizedError {
         case code
         case message
         case details
+        case classification
         case permission
         case kind
         case context
@@ -323,6 +325,7 @@ public struct PeekabooBridgeErrorEnvelope: Codable, Sendable, LocalizedError {
         code: PeekabooBridgeErrorCode,
         message: String,
         details: String? = nil,
+        classification: StandardErrorCode? = nil,
         permission: PeekabooBridgePermissionKind? = nil,
         kind: PeekabooBridgeErrorKind? = nil,
         context: String? = nil,
@@ -331,6 +334,7 @@ public struct PeekabooBridgeErrorEnvelope: Codable, Sendable, LocalizedError {
         self.code = code
         self.message = message
         self.details = details
+        self.classification = classification
         self.permission = permission
         self.kind = kind
         self.context = context
@@ -342,6 +346,8 @@ public struct PeekabooBridgeErrorEnvelope: Codable, Sendable, LocalizedError {
         self.code = try container.decode(PeekabooBridgeErrorCode.self, forKey: .code)
         self.message = try container.decode(String.self, forKey: .message)
         self.details = try container.decodeIfPresent(String.self, forKey: .details)
+        let rawClassification = try container.decodeIfPresent(String.self, forKey: .classification)
+        self.classification = rawClassification.flatMap(StandardErrorCode.init(rawValue:))
         self.permission = try container.decodeIfPresent(PeekabooBridgePermissionKind.self, forKey: .permission)
         self.context = try container.decodeIfPresent(String.self, forKey: .context)
         let rawKind = try container.decodeIfPresent(String.self, forKey: .kind)
@@ -356,6 +362,7 @@ public struct PeekabooBridgeErrorEnvelope: Codable, Sendable, LocalizedError {
         try container.encode(self.code, forKey: .code)
         try container.encode(self.message, forKey: .message)
         try container.encodeIfPresent(self.details, forKey: .details)
+        try container.encodeIfPresent(self.classification?.rawValue, forKey: .classification)
         try container.encodeIfPresent(self.permission, forKey: .permission)
         try container.encodeIfPresent(self.kind?.rawValue, forKey: .kind)
         try container.encodeIfPresent(self.context, forKey: .context)

@@ -166,34 +166,40 @@ public final class PeekabooBridgeServer {
                     throw PeekabooBridgeErrorEnvelope(
                         code: .invalidRequest,
                         message: message,
-                        details: "\(error)")
+                        details: "\(error)",
+                        classification: error.code)
                 case .permissionDeniedAccessibility, .permissionDeniedScreenRecording,
                      .permissionDeniedEventSynthesizing:
                     throw PeekabooBridgeErrorEnvelope(
                         code: .permissionDenied,
                         message: error.localizedDescription,
                         details: "\(error)",
+                        classification: error.code,
                         permission: Self.bridgePermission(for: error))
                 case let .serviceUnavailable(message):
                     throw PeekabooBridgeErrorEnvelope(
                         code: .operationNotSupported,
                         message: message,
-                        details: "\(error)")
+                        details: "\(error)",
+                        classification: error.code)
                 case let .notImplemented(message):
                     throw PeekabooBridgeErrorEnvelope(
                         code: .operationNotSupported,
                         message: "Operation \(op.rawValue) is not supported: \(message)",
-                        details: "\(error)")
+                        details: "\(error)",
+                        classification: error.code)
                 case .appNotFound, .notFound:
                     throw PeekabooBridgeErrorEnvelope(
                         code: .notFound,
                         message: error.localizedDescription,
-                        details: "\(error)")
+                        details: "\(error)",
+                        classification: error.code)
                 case let .elementNotFound(identifier):
                     throw PeekabooBridgeErrorEnvelope(
                         code: .notFound,
                         message: error.localizedDescription,
                         details: "\(error)",
+                        classification: error.code,
                         kind: .elementNotFound,
                         context: identifier)
                 case let .snapshotNotFound(snapshotId):
@@ -201,6 +207,7 @@ public final class PeekabooBridgeServer {
                         code: .notFound,
                         message: error.localizedDescription,
                         details: "\(error)",
+                        classification: error.code,
                         kind: .snapshotNotFound,
                         context: snapshotId)
                 case let .snapshotStale(reason):
@@ -208,22 +215,58 @@ public final class PeekabooBridgeServer {
                         code: .invalidRequest,
                         message: error.localizedDescription,
                         details: "\(error)",
+                        classification: error.code,
                         kind: .snapshotStale,
                         context: reason)
                 case .timeout, .captureTimeout:
                     throw PeekabooBridgeErrorEnvelope(
                         code: .timeout,
                         message: error.localizedDescription,
-                        details: "\(error)")
+                        details: "\(error)",
+                        classification: error.code)
+                case .operationError:
+                    throw PeekabooBridgeErrorEnvelope(
+                        code: .internalError,
+                        message: error.localizedDescription,
+                        details: "\(error)",
+                        classification: .interactionFailed)
                 default:
                     break
                 }
             }
 
+            if let standardizedError = error as? any StandardizedError {
+                throw PeekabooBridgeErrorEnvelope(
+                    code: Self.bridgeErrorCode(for: standardizedError.code),
+                    message: standardizedError.userMessage,
+                    details: "\(error)",
+                    classification: standardizedError.code)
+            }
+
             throw PeekabooBridgeErrorEnvelope(
                 code: .internalError,
-                message: "Bridge operation failed",
+                message: error.localizedDescription,
                 details: "\(error)")
+        }
+    }
+
+    private static func bridgeErrorCode(for classification: StandardErrorCode) -> PeekabooBridgeErrorCode {
+        switch classification {
+        case .screenRecordingPermissionDenied, .accessibilityPermissionDenied,
+             .eventSynthesizingPermissionDenied:
+            .permissionDenied
+        case .applicationNotFound, .windowNotFound, .elementNotFound, .sessionNotFound,
+             .snapshotNotFound, .fileNotFound, .menuNotFound, .menuItemNotFound, .dockNotFound,
+             .dockListNotFound,
+             .dockItemNotFound, .positionNotFound:
+            .notFound
+        case .timeout:
+            .timeout
+        case .invalidInput, .invalidCoordinates, .invalidDisplayIndex, .invalidWindowIndex,
+             .ambiguousAppIdentifier:
+            .invalidRequest
+        default:
+            .internalError
         }
     }
 

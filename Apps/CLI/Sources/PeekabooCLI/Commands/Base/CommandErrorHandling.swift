@@ -252,6 +252,15 @@ func errorDetails(for error: any Error) -> String? {
     if let permission = bridgeError.permission {
         details.append("permission: \(permission.rawValue)")
     }
+    if let kind = bridgeError.kind {
+        details.append("kind: \(kind.rawValue)")
+    }
+    if let context = bridgeError.context {
+        details.append("context: \(context)")
+    }
+    if bridgeError.operationMayHaveCompleted {
+        details.append("operationMayHaveCompleted: true")
+    }
     return details.isEmpty ? nil : details.joined(separator: "\n")
 }
 
@@ -267,6 +276,10 @@ func errorCode(for focusError: FocusError) -> ErrorCode {
 }
 
 func errorCode(for bridgeError: PeekabooBridgeErrorEnvelope) -> ErrorCode {
+    if let classification = bridgeError.classification {
+        return errorCode(for: classification)
+    }
+
     switch bridgeError.code {
     case .permissionDenied:
         switch bridgeError.permission {
@@ -290,6 +303,58 @@ func errorCode(for bridgeError: PeekabooBridgeErrorEnvelope) -> ErrorCode {
     case .notFound:
         .UNKNOWN_ERROR
     case .versionMismatch, .unauthorizedClient, .decodingFailed, .internalError, .serverBusy:
+        .UNKNOWN_ERROR
+    }
+}
+
+private func errorCode(for classification: StandardErrorCode) -> ErrorCode {
+    switch classification {
+    case .screenRecordingPermissionDenied:
+        .PERMISSION_ERROR_SCREEN_RECORDING
+    case .accessibilityPermissionDenied:
+        .PERMISSION_ERROR_ACCESSIBILITY
+    case .eventSynthesizingPermissionDenied:
+        .PERMISSION_ERROR_EVENT_SYNTHESIZING
+    case .applicationNotFound:
+        .APP_NOT_FOUND
+    case .windowNotFound:
+        .WINDOW_NOT_FOUND
+    case .elementNotFound:
+        .ELEMENT_NOT_FOUND
+    case .sessionNotFound:
+        .SESSION_NOT_FOUND
+    case .snapshotNotFound:
+        .SNAPSHOT_NOT_FOUND
+    case .menuNotFound:
+        .MENU_BAR_NOT_FOUND
+    case .menuItemNotFound:
+        .MENU_ITEM_NOT_FOUND
+    case .dockNotFound:
+        .DOCK_NOT_FOUND
+    case .dockListNotFound:
+        .DOCK_LIST_NOT_FOUND
+    case .dockItemNotFound:
+        .DOCK_ITEM_NOT_FOUND
+    case .positionNotFound:
+        .POSITION_NOT_FOUND
+    case .captureFailed:
+        .CAPTURE_FAILED
+    case .interactionFailed:
+        .INTERACTION_FAILED
+    case .timeout:
+        .TIMEOUT
+    case .invalidInput:
+        .INVALID_INPUT
+    case .invalidCoordinates:
+        .INVALID_COORDINATES
+    case .ambiguousAppIdentifier:
+        .AMBIGUOUS_APP_IDENTIFIER
+    case .fileIOError, .fileNotFound:
+        .FILE_IO_ERROR
+    case .scriptError:
+        .SCRIPT_ERROR
+    case .cancelled, .invalidDisplayIndex, .invalidWindowIndex, .configurationError,
+         .unknownError, .aiProviderUnavailable, .aiAnalysisFailed:
         .UNKNOWN_ERROR
     }
 }
