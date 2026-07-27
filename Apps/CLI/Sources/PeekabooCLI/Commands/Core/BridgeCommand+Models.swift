@@ -9,12 +9,23 @@ struct BridgeStatusReport: Codable {
     let candidates: [BridgeCandidateReport]
     let client: BridgeClientReport
 
-    var bridgeScreenRecordingHint: String? {
-        guard let candidate = self.candidates.first(where: { $0.screenRecordingDenied }) else { return nil }
-        let hostKind = candidate.hostKind ?? "Bridge host"
-        return "Hint: \(hostKind) at \(candidate.socketPath) does not have Screen Recording. Grant it to " +
-            "the host app, or run capture commands with --no-remote --capture-engine cg when the caller " +
-            "process already has permission."
+    /// Every candidate summary prints `perm: SR=… AX=… AS=… ES=…`, so a denial is visible but its remedy
+    /// is not: the grant belongs to the host app behind that socket, never the CLI or terminal. One hint
+    /// per denied candidate — a single first-match hint leaves the other probed hosts unexplained.
+    var bridgeDeniedPermissionsHints: [String] {
+        self.candidates.compactMap { candidate in
+            let denied = candidate.deniedPermissionNames
+            guard !denied.isEmpty else { return nil }
+            let hostKind = candidate.hostKind ?? "Bridge host"
+            var hint = "Hint: \(hostKind) at \(candidate.socketPath) does not have " +
+                "\(denied.joined(separator: ", ")). Grant it to that host app — granting the CLI or your " +
+                "terminal will not change this status."
+            if denied.contains("Screen Recording") {
+                hint += " For capture, --no-remote --capture-engine cg works when the caller process " +
+                    "already has permission."
+            }
+            return hint
+        }
     }
 }
 
@@ -49,11 +60,27 @@ struct BridgeCandidateReport: Codable {
         return nil
     }
 
-    var screenRecordingDenied: Bool {
-        if case let .success(handshake) = self.result {
-            return handshake.permissions?.screenRecording == false
+    /// Covers every permission `humanSummary` reports as SR/AX/AS/ES, so no denial the summary shows
+    /// can appear without a matching grant hint. Names match the `peekaboo permissions` labels where
+    /// they exist; AppleScript has no entry there and uses its System Settings name.
+    var deniedPermissionNames: [String] {
+        guard case let .success(handshake) = self.result, let status = handshake.permissions else {
+            return []
         }
-        return false
+        var denied: [String] = []
+        if !status.screenRecording {
+            denied.append("Screen Recording")
+        }
+        if !status.accessibility {
+            denied.append("Accessibility")
+        }
+        if !status.appleScript {
+            denied.append("Automation (AppleScript)")
+        }
+        if !status.postEvent {
+            denied.append("Event Synthesizing")
+        }
+        return denied
     }
 
     var humanSummary: String {
@@ -137,8 +164,7 @@ struct BridgeCandidateErrorReport: Codable {
             code: envelope.code.rawValue,
             message: envelope.message,
             details: envelope.details,
-            hint: hint
-        )
+            hint: hint)
     }
 
     static func other(_ error: any Error) -> BridgeCandidateErrorReport {
@@ -147,8 +173,7 @@ struct BridgeCandidateErrorReport: Codable {
             code: nil,
             message: error.localizedDescription,
             details: String(describing: error),
-            hint: nil
-        )
+            hint: nil)
     }
 
     var humanSummary: String {
