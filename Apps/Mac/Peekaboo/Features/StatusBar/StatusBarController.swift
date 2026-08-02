@@ -312,9 +312,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return menu
     }
 
-    // AppKit forbids mutating menu items from menuWillOpen/menuDidClose; the status line is
-    // populated in showContextMenu before the menu is attached. Only image stripping (a
-    // presentation concern AppKit itself introduces late) happens here.
+    /// AppKit forbids mutating menu items from menuWillOpen/menuDidClose; the status line is
+    /// populated in showContextMenu before the menu is attached. Only image stripping (a
+    /// presentation concern AppKit itself introduces late) happens here.
     func menuWillOpen(_ menu: NSMenu) {
         Self.stripMenuItemImages(menu)
     }
