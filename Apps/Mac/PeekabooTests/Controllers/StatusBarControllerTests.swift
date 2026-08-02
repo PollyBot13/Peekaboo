@@ -130,8 +130,9 @@ struct StatusBarControllerTests {
 
         #expect(!disabledMenu.items.contains(where: { $0.title == "Recent Sessions" }))
         #expect(!emptyMenu.items.contains(where: { $0.title == "Recent Sessions" }))
-        #expect(!disabledMenu.items.contains(where: { $0.title == "Open Peekaboo" }),
-                "Open Peekaboo no-ops without agent mode, so it must be hidden")
+        #expect(
+            !disabledMenu.items.contains(where: { $0.title == "Open Peekaboo" }),
+            "Open Peekaboo no-ops without agent mode, so it must be hidden")
         #expect(disabledMenu.items.contains(where: { $0.title == "Inspector" }))
         #expect(emptyMenu.items.contains(where: { $0.title == "Open Peekaboo" }))
     }
