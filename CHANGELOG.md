@@ -1,5 +1,7 @@
 # Changelog
 
+## [3.9.10] - Unreleased
+
 ## [3.9.9] - 2026-08-02
 
 ### Changed
