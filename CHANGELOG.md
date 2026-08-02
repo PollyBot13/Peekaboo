@@ -9,6 +9,8 @@
 - Restructure the Mac app's status bar menu with a live permission status, primary destinations first, one Permissions entry, housekeeping grouped at the bottom, and context menus anchored beneath the status item.
 
 ### Fixed
+- Bound Dock helper process waits so wedged `defaults`, `killall`, and `osascript` children fail with a timeout instead of hanging CLI and MCP operations indefinitely. Thanks @SebTardif for #303.
+- Stop element detection before another accessibility-tree collection when cancellation arrives during the sparse-web retry delay. Thanks @SebTardif for #304.
 - OpenAI OAuth (ChatGPT login) sessions with an expired access token but valid refresh token are no longer reported unavailable; vision/`--analyze` now routes through the Codex Responses OAuth transport. Thanks @scotthuang for #293.
 - MCP shell commands now support an opt-in timeout that safely terminates the launch-owned process group and bounds pipe draining without changing the legacy unlimited default. Thanks @SebTardif for #298.
 - Publish the Ollama provider guides referenced throughout the generated documentation instead of emitting broken links.
