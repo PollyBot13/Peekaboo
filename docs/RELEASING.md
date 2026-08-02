@@ -52,9 +52,11 @@ Load release credentials through the maintainer 1Password workflow, then run int
 
 The script runs release preparation, builds the universal CLI and npm package, signs/notarizes/staples the macOS app
 and branded DMG, generates checksums and Sparkle metadata, and uploads a draft GitHub release. Install `create-dmg`
-with Homebrew before running it. When it pauses at the npm confirmation,
-leave the process waiting, inspect the draft assets and notes, then answer `y` to publish npm. The signing identity must
-be:
+with Homebrew before running it. The npm step requires either an authenticated npm session or `NPM_TOKEN`; the
+maintainer release command provides `NPM_TOKEN` automatically through the manifest's credential pass. A 404 response
+to a registry PUT means npm authentication is missing or invalid, not that the package is missing. When the script
+pauses at the npm confirmation, leave the process waiting, inspect the draft assets and notes, then answer `y` to
+publish npm. The signing identity must be:
 
 ```text
 Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)

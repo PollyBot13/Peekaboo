@@ -663,7 +663,22 @@ if [ "$PUBLISH_NPM" = true ]; then
     if [[ "$VERSION" == *"-"* ]]; then
         NPM_TAG="beta"
     fi
-    
+
+    # Never expose registry credentials if this script was invoked with xtrace enabled.
+    set +x
+    if [ -n "${NPM_TOKEN:-}" ]; then
+        NPM_USERCONFIG=$(mktemp "${TMPDIR:-/tmp}/peekaboo-npmrc.XXXXXX")
+        trap 'rm -f "${NPM_USERCONFIG:-}"' EXIT
+        chmod 600 "$NPM_USERCONFIG"
+        printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$NPM_USERCONFIG"
+        export NPM_CONFIG_USERCONFIG="$NPM_USERCONFIG"
+    fi
+    # Validate whichever auth is in effect (token npmrc or ambient session) before
+    # the interactive prompt, so a bad token fails here and not mid-publish.
+    if ! npm whoami --registry https://registry.npmjs.org >/dev/null 2>&1; then
+        fail "npm authentication missing or invalid. The maintainer release flow exports NPM_TOKEN automatically; otherwise set NPM_TOKEN or run 'npm login' first. A bare 404 on PUT to the registry means missing or invalid authentication, not a missing package."
+    fi
+
     # Confirm before publishing
     if [ -n "$NPM_TAG" ]; then
         echo -e "${YELLOW}About to publish @steipete/peekaboo@${VERSION} to npm (tag: ${NPM_TAG})${NC}"
