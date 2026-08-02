@@ -1,6 +1,6 @@
 # Changelog
 
-## [3.9.9] - Unreleased
+## [3.9.9] - 2026-08-02
 
 ### Changed
 - Refresh Swift package locks, AXorcist, Tachikoma, and the pnpm toolchain to their latest compatible releases.

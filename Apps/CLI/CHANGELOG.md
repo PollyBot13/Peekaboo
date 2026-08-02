@@ -5,7 +5,11 @@ All notable changes to Peekaboo CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.9.9] - Unreleased
+## [3.9.9] - 2026-08-02
+
+### Fixed
+- OpenAI OAuth (ChatGPT login) sessions with an expired access token but valid refresh token are no longer reported unavailable; `see --analyze`, `image --analyze`, and agent vision route through the Codex Responses OAuth transport. Thanks @scotthuang for #293.
+- MCP shell commands now support an opt-in timeout that safely terminates the launch-owned process group and bounds pipe draining without changing the legacy unlimited default. Thanks @SebTardif for #298.
 
 ## [3.9.8] - 2026-07-23
 
