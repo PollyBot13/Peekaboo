@@ -93,10 +93,9 @@ extension ConfigurationManager {
             let expiryKey = "\(prefix)_ACCESS_EXPIRES"
 
             if let environmentToken = self.environmentValue(for: tokenKey),
-                self.isOAuthAccessTokenValid(
+               self.isOAuthAccessTokenValid(
                    environmentToken,
-                   expiry: self.environmentValue(for: expiryKey),
-               )
+                   expiry: self.environmentValue(for: expiryKey))
             {
                 return environmentToken
             }

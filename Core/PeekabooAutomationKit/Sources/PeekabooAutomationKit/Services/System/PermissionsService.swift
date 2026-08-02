@@ -73,7 +73,7 @@ public final class PermissionsService {
             }
 
             if let joinedProbeTask = screenRecordingProbeTask {
-                let joined = self.recordScreenRecordingAuthorization(await joinedProbeTask.value)
+                let joined = await self.recordScreenRecordingAuthorization(joinedProbeTask.value)
                 // Waiters can resume in any order, so every joiner clears the completed task if
                 // it is still the one it awaited; otherwise a forced call below could re-join the
                 // same stale probe instead of starting a fresh one.

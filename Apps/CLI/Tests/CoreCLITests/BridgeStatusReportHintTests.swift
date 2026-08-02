@@ -7,17 +7,19 @@ struct BridgeStatusReportHintTests {
     private func candidate(
         socketPath: String,
         hostKind: PeekabooBridgeHostKind,
-        permissions: PermissionsStatus) -> BridgeCandidateReport
-    {
+        permissions: PermissionsStatus
+    ) -> BridgeCandidateReport {
         let handshake = PeekabooBridgeHandshakeResponse(
             negotiatedVersion: PeekabooBridgeProtocolVersion(major: 1, minor: 1),
             hostKind: hostKind,
             build: nil,
             supportedOperations: [],
-            permissions: permissions)
+            permissions: permissions
+        )
         return BridgeCandidateReport(
             socketPath: socketPath,
-            result: .success(BridgeHandshakeReport(from: handshake)))
+            result: .success(BridgeHandshakeReport(from: handshake))
+        )
     }
 
     private func report(candidates: [BridgeCandidateReport]) -> BridgeStatusReport {
@@ -30,7 +32,9 @@ struct BridgeStatusReportHintTests {
                 bundleIdentifier: nil,
                 teamIdentifier: nil,
                 processIdentifier: 1,
-                hostname: nil)))
+                hostname: nil
+            ))
+        )
     }
 
     @Test
@@ -43,7 +47,9 @@ struct BridgeStatusReportHintTests {
                     screenRecording: true,
                     accessibility: true,
                     appleScript: true,
-                    postEvent: false)),
+                    postEvent: false
+                )
+            ),
             self.candidate(
                 socketPath: "/tmp/helper.sock",
                 hostKind: .helper,
@@ -51,7 +57,9 @@ struct BridgeStatusReportHintTests {
                     screenRecording: false,
                     accessibility: true,
                     appleScript: true,
-                    postEvent: true)),
+                    postEvent: true
+                )
+            ),
         ])
 
         // `bridge status` prints a perm line per candidate, so a first-match-only hint would leave the
@@ -76,7 +84,9 @@ struct BridgeStatusReportHintTests {
                     screenRecording: true,
                     accessibility: true,
                     appleScript: true,
-                    postEvent: true)),
+                    postEvent: true
+                )
+            ),
         ])
 
         #expect(status.bridgeDeniedPermissionsHints.isEmpty)

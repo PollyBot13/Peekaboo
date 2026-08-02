@@ -164,7 +164,8 @@ struct BridgeCandidateErrorReport: Codable {
             code: envelope.code.rawValue,
             message: envelope.message,
             details: envelope.details,
-            hint: hint)
+            hint: hint
+        )
     }
 
     static func other(_ error: any Error) -> BridgeCandidateErrorReport {
@@ -173,7 +174,8 @@ struct BridgeCandidateErrorReport: Codable {
             code: nil,
             message: error.localizedDescription,
             details: String(describing: error),
-            hint: nil)
+            hint: nil
+        )
     }
 
     var humanSummary: String {
