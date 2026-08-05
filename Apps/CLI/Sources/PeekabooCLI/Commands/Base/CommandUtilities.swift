@@ -11,25 +11,40 @@ func withTimeout<T: Sendable>(
     seconds: TimeInterval,
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
-    let task = Task {
-        try await operation()
-    }
-
-    let timeoutTask = Task {
-        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-        task.cancel()
-    }
-
-    do {
-        let result = try await task.value
-        timeoutTask.cancel()
-        return result
-    } catch {
-        timeoutTask.cancel()
-        if task.isCancelled {
-            throw CaptureError.captureFailure("Operation timed out after \(seconds) seconds")
+    let race = TimeoutRace()
+    let workTask = Task {
+        do {
+            let value = try await operation()
+            race.resume(with: .success(value))
+        } catch {
+            race.resume(with: Result<T, any Error>.failure(error))
         }
-        throw error
+    }
+
+    let timeoutTask = Task.detached {
+        do {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        } catch {
+            return
+        }
+        race.resume(with: Result<T, any Error>.failure(
+            CaptureError.captureFailure("Operation timed out after \(seconds) seconds")
+        ))
+        workTask.cancel()
+    }
+
+    defer {
+        workTask.cancel()
+        timeoutTask.cancel()
+    }
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+            race.setContinuation(continuation)
+        }
+    } onCancel: {
+        race.resume(with: Result<T, any Error>.failure(CancellationError()))
+        workTask.cancel()
+        timeoutTask.cancel()
     }
 }
 
