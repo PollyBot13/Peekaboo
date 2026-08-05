@@ -1,12 +1,12 @@
 # Changelog
 
-## [3.9.11] - Unreleased
+## [3.10.0] - 2026-08-02
 
 ### Added
 - Add reference-bound image-pixel and normalized MCP click coordinates, building on capture context from @scotthuang in #310.
 
 ### Fixed
-- Honor cancellation promptly and deterministically in daemon polling and CLI timeout helpers. Thanks @SebTardif in #311.
+- Honor cancellation promptly and deterministically in daemon polling and CLI timeout helpers. Thanks @SebTardif for #311.
 - Avoid a Swift 6.3 release-compiler crash by reusing the shared timeout race for provider commands.
 
 ### Changed
