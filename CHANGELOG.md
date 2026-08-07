@@ -2,6 +2,9 @@
 
 ## [3.10.1] - Unreleased
 
+### Changed
+- Remove the obsolete scoped-commit helper now that agent work uses isolated worktrees.
+
 ## [3.10.0] - 2026-08-02
 
 ### Added

@@ -125,4 +125,3 @@ git status
 
 - [Claude Code Hooks Documentation](https://docs.claude.com/claude-code/hooks)
 - Blog post: [Preventing git commit --amend with Claude Code Hooks](https://kreako.fr/blog/20250920-claude-code-commit-amend/)
-- Git hooks: `scripts/git-policy.ts` (lines 28-159)

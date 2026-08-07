@@ -37,7 +37,7 @@ run the repository autoreview workflow until no accepted actionable findings rem
 
 ## 3. Commit and push
 
-Use `./scripts/committer` with Conventional Commits. Push `main`, pull with `--ff-only`, and confirm a clean tree
+Use standard Git commands with Conventional Commits. Push `main`, pull with `--ff-only`, and confirm a clean tree
 before building release artifacts; dirty trees produce invalid version metadata.
 
 ## 4. Publish

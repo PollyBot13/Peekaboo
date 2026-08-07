@@ -93,7 +93,7 @@ If both `history` and non-S3 `submit` fail, suspect wrong access level or stale 
 3. Date `CHANGELOG.md` and `Apps/CLI/CHANGELOG.md` for the release.
 4. Run focused proof or release script preflight. Release gates must be warning-free.
 5. Use `$autoreview` before commit unless the change is trivial/docs-only.
-6. Commit release prep with `committer`.
+6. Stage the intended release files and commit with standard Git.
 7. Push `main`.
 8. Run:
 
@@ -133,7 +133,7 @@ Confirm:
 ## Closeout
 
 1. Add next patch `Unreleased` section to root and CLI changelogs.
-2. Commit with `committer "docs(changelog): open <next-version>" CHANGELOG.md Apps/CLI/CHANGELOG.md`.
+2. Stage both changelogs and commit with `git commit -m "docs(changelog): open <next-version>"`.
 3. Push.
 4. Watch release/homebrew/CI workflows if triggered.
 5. `git checkout main && git pull --ff-only && git status --short --branch`.
