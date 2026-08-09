@@ -82,31 +82,33 @@ extension UIAutomationService {
         typingDelay: Int,
         snapshotId: String?) async throws
     {
-        self.logger.debug("Delegating type to TypeService")
-        defer { self.elementDetectionService.invalidateCache() }
-        // For targeted typing the resolved destination element is
-        // authoritative; focus sampling can miss it entirely (the target is
-        // focused only mid-flow, and a trailing {return} can move focus away
-        // again). Untargeted typing goes to the current focus, so sample that
-        // before typing for the same trailing-submit reason.
-        let secureBeforeTyping: Bool = if let target {
-            await self.typeService.typingTargetIsSecureField(target: target, snapshotId: snapshotId)
-        } else {
-            TypeService.focusedElementIsSecureField()
-        }
-        _ = try await self.normalizingSnapshotErrors {
-            try await self.typeService.type(
-                text: text,
-                target: target,
-                clearExisting: clearExisting,
-                typingDelay: typingDelay,
-                snapshotId: snapshotId)
-        }
+        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
+            self.logger.debug("Delegating type to TypeService")
+            defer { self.elementDetectionService.invalidateCache() }
+            // For targeted typing the resolved destination element is
+            // authoritative; focus sampling can miss it entirely (the target is
+            // focused only mid-flow, and a trailing {return} can move focus away
+            // again). Untargeted typing goes to the current focus, so sample that
+            // before typing for the same trailing-submit reason.
+            let secureBeforeTyping: Bool = if let target {
+                await self.typeService.typingTargetIsSecureField(target: target, snapshotId: snapshotId)
+            } else {
+                TypeService.focusedElementIsSecureField()
+            }
+            _ = try await self.normalizingSnapshotErrors {
+                try await self.typeService.type(
+                    text: text,
+                    target: target,
+                    clearExisting: clearExisting,
+                    typingDelay: typingDelay,
+                    snapshotId: snapshotId)
+            }
 
-        await self.visualizeTyping(
-            keys: Array(text).map { String($0) },
-            cadence: .fixed(milliseconds: typingDelay),
-            typedIntoSecureField: secureBeforeTyping)
+            await self.visualizeTyping(
+                keys: Array(text).map { String($0) },
+                cadence: .fixed(milliseconds: typingDelay),
+                typedIntoSecureField: secureBeforeTyping)
+        }
     }
 
     public func typeActions(
@@ -114,20 +116,22 @@ extension UIAutomationService {
         cadence: TypingCadence,
         snapshotId: String?) async throws -> TypeResult
     {
-        self.logger.debug("Delegating typeActions to TypeService")
-        defer { self.elementDetectionService.invalidateCache() }
-        let summary = try await self.normalizingSnapshotErrors {
-            try await self.typeService.typeActionsTrackingSecureInput(
+        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
+            self.logger.debug("Delegating typeActions to TypeService")
+            defer { self.elementDetectionService.invalidateCache() }
+            let summary = try await self.normalizingSnapshotErrors {
+                try await self.typeService.typeActionsTrackingSecureInput(
+                    actions,
+                    cadence: cadence,
+                    snapshotId: snapshotId,
+                    targetProcessIdentifier: nil)
+            }
+            await self.visualizeTypeActions(
                 actions,
                 cadence: cadence,
-                snapshotId: snapshotId,
-                targetProcessIdentifier: nil)
+                typedIntoSecureField: summary.typedIntoSecureField)
+            return summary.result
         }
-        await self.visualizeTypeActions(
-            actions,
-            cadence: cadence,
-            typedIntoSecureField: summary.typedIntoSecureField)
-        return summary.result
     }
 
     public func typeActions(
@@ -137,21 +141,26 @@ extension UIAutomationService {
         expectedWindowIdentity: WindowMutationIdentity,
         expectedWindowBounds: CGRect) async throws -> TypeResult
     {
-        let validator: @MainActor @Sendable () async throws -> Void = {
-            try await self.requireExactWindowKeyboardFocus(
-                expectedWindowIdentity: expectedWindowIdentity,
-                expectedWindowBounds: expectedWindowBounds)
+        let processIdentity = ApplicationProcessIdentity(
+            processIdentifier: expectedWindowIdentity.ownerProcessIdentifier,
+            processStartIdentity: expectedWindowIdentity.ownerProcessStartIdentity)
+        return try await self.operationLaneCoordinator.run(scope: .process(processIdentity), access: .write) {
+            let validator: @MainActor @Sendable () async throws -> Void = {
+                try await self.requireExactWindowKeyboardFocus(
+                    expectedWindowIdentity: expectedWindowIdentity,
+                    expectedWindowBounds: expectedWindowBounds)
+            }
+            defer { self.elementDetectionService.invalidateCache() }
+            let summary = try await self.normalizingSnapshotErrors {
+                try await self.typeService.typeActionsTrackingSecureInput(
+                    actions,
+                    cadence: cadence,
+                    snapshotId: snapshotId,
+                    targetProcessIdentifier: expectedWindowIdentity.ownerProcessIdentifier,
+                    deliveryValidator: validator)
+            }
+            return summary.result
         }
-        defer { self.elementDetectionService.invalidateCache() }
-        let summary = try await self.normalizingSnapshotErrors {
-            try await self.typeService.typeActionsTrackingSecureInput(
-                actions,
-                cadence: cadence,
-                snapshotId: snapshotId,
-                targetProcessIdentifier: expectedWindowIdentity.ownerProcessIdentifier,
-                deliveryValidator: validator)
-        }
-        return summary.result
     }
 
     public func typeActions(
@@ -160,22 +169,27 @@ extension UIAutomationService {
         snapshotId: String?,
         target: ExactWindowKeyboardTarget) async throws -> TypeResult
     {
-        let validator: @MainActor @Sendable () async throws -> Void = {
-            try await self.requireExactWindowKeyboardFocus(
-                expectedWindowIdentity: target.windowIdentity,
-                expectedWindowBounds: target.windowBounds,
-                expectedFocusedElement: target.focusedElement)
+        let processIdentity = ApplicationProcessIdentity(
+            processIdentifier: target.windowIdentity.ownerProcessIdentifier,
+            processStartIdentity: target.windowIdentity.ownerProcessStartIdentity)
+        return try await self.operationLaneCoordinator.run(scope: .process(processIdentity), access: .write) {
+            let validator: @MainActor @Sendable () async throws -> Void = {
+                try await self.requireExactWindowKeyboardFocus(
+                    expectedWindowIdentity: target.windowIdentity,
+                    expectedWindowBounds: target.windowBounds,
+                    expectedFocusedElement: target.focusedElement)
+            }
+            defer { self.elementDetectionService.invalidateCache() }
+            let summary = try await self.normalizingSnapshotErrors {
+                try await self.typeService.typeActionsTrackingSecureInput(
+                    actions,
+                    cadence: cadence,
+                    snapshotId: snapshotId,
+                    targetProcessIdentifier: target.windowIdentity.ownerProcessIdentifier,
+                    deliveryValidator: validator)
+            }
+            return summary.result
         }
-        defer { self.elementDetectionService.invalidateCache() }
-        let summary = try await self.normalizingSnapshotErrors {
-            try await self.typeService.typeActionsTrackingSecureInput(
-                actions,
-                cadence: cadence,
-                snapshotId: snapshotId,
-                targetProcessIdentifier: target.windowIdentity.ownerProcessIdentifier,
-                deliveryValidator: validator)
-        }
-        return summary.result
     }
 
     public func typeActions(
@@ -184,21 +198,23 @@ extension UIAutomationService {
         snapshotId: String?,
         targetProcessIdentifier: pid_t) async throws -> TypeResult
     {
-        self.logger.debug("Delegating targeted typeActions to TypeService")
-        defer { self.elementDetectionService.invalidateCache() }
-        let summary = try await self.normalizingSnapshotErrors {
-            try await self.typeService.typeActionsTrackingSecureInput(
+        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
+            self.logger.debug("Delegating targeted typeActions to TypeService")
+            defer { self.elementDetectionService.invalidateCache() }
+            let summary = try await self.normalizingSnapshotErrors {
+                try await self.typeService.typeActionsTrackingSecureInput(
+                    actions,
+                    cadence: cadence,
+                    snapshotId: snapshotId,
+                    targetProcessIdentifier: targetProcessIdentifier)
+            }
+            await self.visualizeTypeActions(
                 actions,
                 cadence: cadence,
-                snapshotId: snapshotId,
+                typedIntoSecureField: summary.typedIntoSecureField,
                 targetProcessIdentifier: targetProcessIdentifier)
+            return summary.result
         }
-        await self.visualizeTypeActions(
-            actions,
-            cadence: cadence,
-            typedIntoSecureField: summary.typedIntoSecureField,
-            targetProcessIdentifier: targetProcessIdentifier)
-        return summary.result
     }
 
     // MARK: - Typing Visualization Helpers

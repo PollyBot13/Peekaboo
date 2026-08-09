@@ -17,6 +17,10 @@ public protocol PeekabooBridgeServiceProviding: AnyObject, Sendable {
     var snapshots: any SnapshotManagerProtocol { get }
     var desktopObservation: any DesktopObservationServiceProtocol { get }
 
+    /// Whether the concrete native service owns the lane for this exact operation.
+    /// Test doubles and older hosts default to Bridge-owned conservative coordination.
+    func ownsDesktopOperationLane(for operation: PeekabooBridgeOperation) -> Bool
+
     func browserStatus(channel: String?) async throws -> PeekabooBridgeBrowserStatus
     func browserConnect(channel: String?) async throws -> PeekabooBridgeBrowserStatus
     func browserDisconnect() async throws
@@ -26,6 +30,10 @@ public protocol PeekabooBridgeServiceProviding: AnyObject, Sendable {
 
 @MainActor
 extension PeekabooBridgeServiceProviding {
+    public func ownsDesktopOperationLane(for _: PeekabooBridgeOperation) -> Bool {
+        false
+    }
+
     public func browserStatus(channel _: String?) async throws -> PeekabooBridgeBrowserStatus {
         throw PeekabooBridgeErrorEnvelope(
             code: .operationNotSupported,

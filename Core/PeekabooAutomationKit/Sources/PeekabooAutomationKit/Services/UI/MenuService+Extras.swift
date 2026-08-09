@@ -25,6 +25,12 @@ extension MenuService {
     }
 
     public func clickMenuExtra(title: String) async throws {
+        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
+            try await self.clickMenuExtraWithOwnedLane(title: title)
+        }
+    }
+
+    func clickMenuExtraWithOwnedLane(title: String) async throws {
         let systemWide = Element.systemWide()
 
         guard let menuBar = systemWide.menuBar() else {
@@ -43,7 +49,7 @@ extension MenuService {
 
         let extras = menuExtrasGroup.children(strict: true) ?? []
         let normalizedTarget = normalizedMenuTitle(title)
-        func candidates(for element: Element) -> [String?] {
+        @MainActor func candidates(for element: Element) -> [String?] {
             [
                 element.title(),
                 element.help(),
@@ -196,8 +202,14 @@ extension MenuService {
     }
 
     public func clickMenuBarItem(named name: String) async throws -> ClickResult {
+        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
+            try await self.clickMenuBarItemWithOwnedLane(named: name)
+        }
+    }
+
+    func clickMenuBarItemWithOwnedLane(named name: String) async throws -> ClickResult {
         do {
-            try await self.clickMenuExtra(title: name)
+            try await self.clickMenuExtraWithOwnedLane(title: name)
             return ClickResult(
                 elementDescription: "Menu bar item: \(name)",
                 location: nil)
@@ -208,11 +220,11 @@ extension MenuService {
             if let item = items.first(where: {
                 titlesMatch(candidate: $0.title, target: name, normalizedTarget: normalizedName)
             }) {
-                return try await self.clickMenuBarItem(at: item.index)
+                return try await self.clickMenuBarItemWithOwnedLane(at: item.index)
             }
 
             if let item = items.first(where: { menuExtraTitlesMatch(candidate: $0.title, target: name) }) {
-                return try await self.clickMenuBarItem(at: item.index)
+                return try await self.clickMenuBarItemWithOwnedLane(at: item.index)
             }
 
             if partialMatchEnabled,
@@ -221,7 +233,7 @@ extension MenuService {
                    target: name,
                    normalizedTarget: normalizedName) })
             {
-                return try await self.clickMenuBarItem(at: item.index)
+                return try await self.clickMenuBarItemWithOwnedLane(at: item.index)
             }
 
             throw NotFoundError(
@@ -232,6 +244,12 @@ extension MenuService {
     }
 
     public func clickMenuBarItem(at index: Int) async throws -> ClickResult {
+        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
+            try await self.clickMenuBarItemWithOwnedLane(at: index)
+        }
+    }
+
+    func clickMenuBarItemWithOwnedLane(at index: Int) async throws -> ClickResult {
         let extras = try await listMenuExtras()
 
         guard index >= 0, index < extras.count else {
