@@ -8,8 +8,13 @@ import Testing
 struct PermissionCommandTests {
     @Test
     func `permissions includes accessibility request`() {
-        let names = PermissionsCommand.commandDescription.subcommands.compactMap(\.commandDescription.commandName)
-        #expect(names.contains("request-accessibility"))
+        // Key-path map over existential metatypes trips SILGen; keep the loop.
+        var names: [String] = []
+        for descriptor in PermissionsCommand.commandDescription.subcommands {
+            guard let name = descriptor.commandDescription.commandName else { continue }
+            names.append(name)
+        }
+        #expect(names.contains("request"))
     }
 
     @Test
@@ -105,7 +110,8 @@ struct PermissionCommandTests {
 
         let result = try await InProcessCommandRunner.run([
             "permissions",
-            "request-event-synthesizing",
+            "request",
+            "event-synthesizing",
             "--json",
         ], services: services)
 
