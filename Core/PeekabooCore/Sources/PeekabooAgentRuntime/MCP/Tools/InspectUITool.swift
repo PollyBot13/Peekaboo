@@ -86,6 +86,7 @@ public struct InspectUITool: MCPTool {
 
             let result = try await self.context.automation.inspectAccessibilityTree(
                 windowContext: windowContext)
+            try Self.requireUsableAXOnlyEvidence(result)
             let snapshotResult = self.bindResult(result, to: snapshot.id)
 
             try await self.context.snapshots.storeDetectionResult(
@@ -145,17 +146,28 @@ public struct InspectUITool: MCPTool {
 
     // MARK: - Private Helpers
 
+    private static func requireUsableAXOnlyEvidence(_ result: ElementDetectionResult) throws {
+        guard result.elements.all.isEmpty,
+              let truncationInfo = result.metadata.truncationInfo,
+              truncationInfo.isTruncated
+        else { return }
+
+        throw PeekabooError.operationError(
+            message: truncationInfo.automationToolRemediationMessage(
+                budget: result.metadata.windowContext?.traversalBudget))
+    }
+
     private func getOrCreateSnapshot(snapshotId: String?) async throws -> (snapshot: UISnapshot, isNew: Bool) {
         if let snapshotId {
             let hostHasSnapshot = try await self.context.snapshots.listSnapshots().contains { $0.id == snapshotId }
             guard hostHasSnapshot else {
                 throw PeekabooError.snapshotNotFound(
-                    "Snapshot '\(snapshotId)' was not found. Omit --snapshot and run inspect-ui again.")
+                    "Snapshot '\(snapshotId)' was not found. Omit the `snapshot` argument and run `inspect_ui` again.")
             }
             guard let existingSnapshot = await UISnapshotManager.shared.getSnapshot(id: snapshotId) else {
                 throw PeekabooError.snapshotNotFound(
                     "Snapshot '\(snapshotId)' is not available in this process. " +
-                        "Omit --snapshot and run inspect-ui again.")
+                        "Omit the `snapshot` argument and run `inspect_ui` again.")
             }
             return (existingSnapshot, false)
         }

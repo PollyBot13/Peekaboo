@@ -33,7 +33,26 @@ struct DetachedAXObservationRequest: Sendable {
     let includeMenuBarElements: Bool
     let appIsActive: Bool
     let traversalBudget: AXTraversalBudget
-    let timeoutSeconds: TimeInterval
+    let timing: DetachedAXObservationTiming
+}
+
+struct DetachedAXObservationTiming: Sendable, Equatable {
+    // AX calls are not cooperatively cancellable. Stop traversal early enough for one bounded
+    // native call plus result publication before the caller's hard timeout abandons the lane.
+    private static let maximumCompletionGrace: TimeInterval = 0.25
+    private static let minimumCompletionGrace: TimeInterval = 0.01
+
+    let cooperativeDeadlineSeconds: TimeInterval
+    let hardTimeoutSeconds: TimeInterval
+
+    init(hardTimeoutSeconds: TimeInterval) {
+        let proportionalGrace = hardTimeoutSeconds * 0.1
+        let completionGrace = min(
+            Self.maximumCompletionGrace,
+            max(Self.minimumCompletionGrace, proportionalGrace))
+        self.cooperativeDeadlineSeconds = max(0.001, hardTimeoutSeconds - completionGrace)
+        self.hardTimeoutSeconds = hardTimeoutSeconds
+    }
 }
 
 struct DetachedAXObservationResult: Sendable {
@@ -176,17 +195,45 @@ enum DetachedAXObservationWorker {
     }
 
     static func inspect(_ request: DetachedAXObservationRequest) throws -> DetachedAXObservationResult {
-        try self.validateIdentity(request)
-        let deadline = ContinuousClock.now.advanced(by: .seconds(request.timeoutSeconds))
+        try self.inspect(
+            request,
+            resolveWindow: { application, request, deadline in
+                try self.resolveWindow(application: application, request: request, deadline: deadline)
+            },
+            exactWindowUnavailableResult: { request, deadlineReached in
+                self.exactWindowUnavailableResult(request, deadlineReached: deadlineReached)
+            },
+            validateIdentity: { request in
+                try self.validateIdentity(request)
+            })
+    }
+
+    static func inspect(
+        _ request: DetachedAXObservationRequest,
+        resolveWindow: (
+            _ application: AXUIElement,
+            _ request: DetachedAXObservationRequest,
+            _ deadline: ContinuousClock.Instant) throws -> AXUIElement,
+        exactWindowUnavailableResult: (
+            _ request: DetachedAXObservationRequest,
+            _ deadlineReached: Bool) -> DetachedAXObservationResult?,
+        validateIdentity: (_ request: DetachedAXObservationRequest) throws -> Void) throws
+        -> DetachedAXObservationResult
+    {
+        try validateIdentity(request)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(request.timing.cooperativeDeadlineSeconds))
         let application = AXUIElementCreateApplication(request.processIdentifier)
         self.prepare(application, deadline: deadline)
 
         let window: AXUIElement
         do {
-            window = try self.resolveWindow(application: application, request: request, deadline: deadline)
+            window = try resolveWindow(application, request, deadline)
         } catch {
-            if let fallback = self.exactWindowUnavailableResult(request) {
-                try self.validateIdentity(request)
+            if let fallback = exactWindowUnavailableResult(
+                request,
+                ContinuousClock.now >= deadline)
+            {
+                try validateIdentity(request)
                 return fallback
             }
             throw error
@@ -225,7 +272,7 @@ enum DetachedAXObservationWorker {
             windowBounds: bounds,
             isDialog: ["AXDialog", "AXSystemDialog", "AXSheet"].contains(subrole) || self.isFileDialogTitle(title),
             truncationInfo: state.truncationInfo)
-        try self.validateIdentity(request)
+        try validateIdentity(request)
         return result
     }
 
@@ -271,7 +318,8 @@ enum DetachedAXObservationWorker {
     }
 
     private static func exactWindowUnavailableResult(
-        _ request: DetachedAXObservationRequest) -> DetachedAXObservationResult?
+        _ request: DetachedAXObservationRequest,
+        deadlineReached: Bool) -> DetachedAXObservationResult?
     {
         guard let requestedID = request.windowID,
               let windowID = CGWindowID(exactly: requestedID),
@@ -286,7 +334,17 @@ enum DetachedAXObservationWorker {
             windowTitle: identity.title,
             windowBounds: identity.bounds,
             isDialog: self.isFileDialogTitle(identity.title),
-            truncationInfo: DetectionTruncationInfo(deadlineReached: true))
+            truncationInfo: self.exactWindowResolutionFailureTruncation(
+                deadlineReached: deadlineReached))
+    }
+
+    static func exactWindowResolutionFailureTruncation(
+        deadlineReached: Bool) -> DetectionTruncationInfo
+    {
+        if deadlineReached {
+            return DetectionTruncationInfo(deadlineReached: true)
+        }
+        return DetectionTruncationInfo(incompleteAccessibilityRead: true)
     }
 
     private static func resolveWindow(

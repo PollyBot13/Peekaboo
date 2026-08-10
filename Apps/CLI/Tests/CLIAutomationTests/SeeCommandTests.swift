@@ -21,6 +21,59 @@ struct SeeCommandTests {
 
         #expect(summary.deadline_reached)
         #expect(summary.warning.contains("deadline"))
+        #expect(!summary.warning.contains("larger AX traversal limits"))
+    }
+
+    @Test
+    func `CLI deadline warning mentions larger traversal limits only for reported structural caps`() throws {
+        let metadata = DetectionMetadata(
+            detectionTime: 0,
+            elementCount: 0,
+            method: "accessibility",
+            truncationInfo: DetectionTruncationInfo(
+                maxDepthReached: true,
+                deadlineReached: true
+            )
+        )
+
+        let summary = try #require(SeeTruncationSummary(metadata: metadata))
+
+        #expect(summary.warning.contains("--depth"))
+        #expect(summary.warning.contains("larger AX traversal limits"))
+        #expect(!summary.warning.contains("--max-elements"))
+        #expect(!summary.warning.contains("--max-children"))
+    }
+
+    @Test
+    func `CLI structural warning uses the current depth flag`() throws {
+        let metadata = DetectionMetadata(
+            detectionTime: 0,
+            elementCount: 1,
+            method: "accessibility",
+            truncationInfo: DetectionTruncationInfo(maxDepthReached: true)
+        )
+
+        let summary = try #require(SeeTruncationSummary(metadata: metadata))
+
+        #expect(summary.warning.contains("--depth"))
+        #expect(!summary.warning.contains("--max-depth"))
+    }
+
+    @Test
+    func `CLI incomplete AX warning does not promise that a longer timeout fixes app refusal`() throws {
+        let metadata = DetectionMetadata(
+            detectionTime: 0,
+            elementCount: 0,
+            method: "accessibility",
+            truncationInfo: DetectionTruncationInfo(incompleteAccessibilityRead: true)
+        )
+
+        let summary = try #require(SeeTruncationSummary(metadata: metadata))
+
+        #expect(!summary.deadline_reached)
+        #expect(summary.incomplete_accessibility_read)
+        #expect(summary.warning.contains("may not expose a readable Accessibility tree"))
+        #expect(summary.warning.contains("increase the timeout only when the app is slow"))
     }
 
     @Test
@@ -63,6 +116,18 @@ struct SeeCommandTests {
         let command = try SeeCommand.parse(["--app", "Safari"])
         #expect(command.app == "Safari")
         #expect(command.mode == nil) // Mode not explicitly set
+    }
+
+    @Test
+    func `See observation request preserves explicit timeout above twenty seconds`() throws {
+        let command = try SeeCommand.parse(["--app", "Safari", "--timeout", "60s"])
+
+        let request = try command.makeObservationRequest(
+            target: .app(identifier: "Safari", window: .automatic)
+        )
+
+        #expect(request.timeout.overall == 60)
+        #expect(request.timeout.detection == 60)
     }
 
     @Test
@@ -171,6 +236,134 @@ struct SeeCommandTests {
 
 @Suite(.serialized, .tags(.fast))
 struct SeeCommandRuntimeTests {
+    @Test
+    @MainActor
+    func `tree only See propagates its remaining timeout to accessibility inspection`() async throws {
+        try await self.withTempConfigEnv { _ in
+            let fixture = Self.makeSeeCommandRuntimeFixture()
+            let automation = StubAutomationService()
+            automation.inspectAccessibilityTreeHandler = { _ in fixture.detectionResult }
+            let (context, _) = Self.makeSeeCommandRuntimeContext(
+                automation: automation,
+                screenCapture: fixture.screenCapture,
+                applicationInfo: fixture.applicationInfo,
+                windowInfo: fixture.windowInfo
+            )
+
+            let result = try await InProcessCommandRunner.run(
+                [
+                    "see",
+                    "--app", fixture.applicationInfo.name,
+                    "--tree",
+                    "--no-screenshot",
+                    "--timeout", "60s",
+                    "--json",
+                ],
+                services: context.services
+            )
+
+            #expect(result.exitStatus == 0)
+            let inspectionContext = try #require(automation.inspectAccessibilityTreeCalls.compactMap(\.self).first)
+            let timeout = try #require(inspectionContext.accessibilityTimeoutSeconds)
+            #expect(timeout > 50)
+            #expect(timeout < 60)
+        }
+    }
+
+    @Test
+    @MainActor
+    func `tree only See fails instead of publishing an empty deadline result`() async throws {
+        try await self.withTempConfigEnv { _ in
+            let fixture = Self.makeSeeCommandRuntimeFixture()
+            let automation = StubAutomationService()
+            automation.inspectAccessibilityTreeHandler = { context in
+                let timeout = try #require(context?.accessibilityTimeoutSeconds)
+                #expect(timeout > 4)
+                #expect(timeout <= 5)
+                return ElementDetectionResult(
+                    snapshotId: "system-settings-empty-deadline",
+                    screenshotPath: "",
+                    elements: DetectedElements(),
+                    metadata: DetectionMetadata(
+                        detectionTime: 0.288,
+                        elementCount: 0,
+                        method: "AXorcist",
+                        truncationInfo: DetectionTruncationInfo(deadlineReached: true)
+                    )
+                )
+            }
+            let (context, _) = Self.makeSeeCommandRuntimeContext(
+                automation: automation,
+                screenCapture: fixture.screenCapture,
+                applicationInfo: fixture.applicationInfo,
+                windowInfo: fixture.windowInfo
+            )
+
+            let result = try await InProcessCommandRunner.run(
+                [
+                    "see",
+                    "--app", fixture.applicationInfo.name,
+                    "--tree",
+                    "--no-screenshot",
+                    "--timeout", "5s",
+                    "--json",
+                ],
+                services: context.services
+            )
+
+            #expect(result.exitStatus == 1)
+            #expect(result.combinedOutput.contains("Element detection timed out after 5s"))
+            #expect(!result.combinedOutput.contains("\"snapshot_id\""))
+            #expect(try await context.snapshots.listSnapshots().isEmpty)
+        }
+    }
+
+    @Test
+    @MainActor
+    func `tree only See preserves useful partial evidence at its deadline`() async throws {
+        try await self.withTempConfigEnv { _ in
+            let fixture = Self.makeSeeCommandRuntimeFixture()
+            let automation = StubAutomationService()
+            let partialElement = try #require(fixture.detectionResult.elements.all.first)
+            automation.inspectAccessibilityTreeHandler = { _ in
+                ElementDetectionResult(
+                    snapshotId: "partial-deadline",
+                    screenshotPath: "",
+                    elements: DetectedElements(buttons: [partialElement]),
+                    metadata: DetectionMetadata(
+                        detectionTime: 4.75,
+                        elementCount: 1,
+                        method: "AXorcist",
+                        truncationInfo: DetectionTruncationInfo(deadlineReached: true)
+                    )
+                )
+            }
+            let (context, _) = Self.makeSeeCommandRuntimeContext(
+                automation: automation,
+                screenCapture: fixture.screenCapture,
+                applicationInfo: fixture.applicationInfo,
+                windowInfo: fixture.windowInfo
+            )
+
+            let result = try await InProcessCommandRunner.run(
+                [
+                    "see",
+                    "--app", fixture.applicationInfo.name,
+                    "--tree",
+                    "--no-screenshot",
+                    "--timeout", "5s",
+                    "--json",
+                ],
+                services: context.services
+            )
+
+            #expect(result.exitStatus == 0)
+            #expect(result.combinedOutput.contains(partialElement.id))
+            #expect(result.combinedOutput.contains("\"deadline_reached\" : true") ||
+                result.combinedOutput.contains("\"deadline_reached\":true"))
+        }
+    }
+
     @Test
     @MainActor
     func `Remote See publishes a host-certified observation without a caller barrier`() async throws {

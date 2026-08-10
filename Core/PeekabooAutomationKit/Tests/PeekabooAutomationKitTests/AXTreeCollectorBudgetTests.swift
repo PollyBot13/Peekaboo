@@ -93,6 +93,31 @@ final class AXTreeCollectorBudgetTests: XCTestCase {
         XCTAssertTrue(info.isTruncated)
     }
 
+    func testAutomationToolDeadlineRemediationNamesOnlyAvailableControls() {
+        let info = DetectionTruncationInfo(maxDepthReached: true, deadlineReached: true)
+
+        let message = info.automationToolRemediationMessage(budget: AXTraversalBudget(maxDepth: 4))
+
+        XCTAssertTrue(message.contains("app_target"))
+        XCTAssertTrue(message.contains("window_id"))
+        XCTAssertTrue(message.contains("max_depth"))
+        XCTAssertTrue(message.contains("does not expose a timeout argument"))
+        XCTAssertFalse(message.contains("--depth"))
+        XCTAssertFalse(message.contains("longer caller timeout"))
+        XCTAssertFalse(message.contains(AXTraversalBudget.maxDepthEnvironmentKey))
+    }
+
+    func testAutomationToolIncompleteRemediationDoesNotInventTimeoutControl() {
+        let info = DetectionTruncationInfo(incompleteAccessibilityRead: true)
+
+        let message = info.automationToolRemediationMessage(budget: nil)
+
+        XCTAssertTrue(message.contains("app_target"))
+        XCTAssertTrue(message.contains("window_id"))
+        XCTAssertFalse(message.contains("increase the timeout"))
+        XCTAssertFalse(message.contains("--"))
+    }
+
     func testMaxDepthOneStopsAtRoot() throws {
         guard let window = self.frontmostWindowElement() else {
             throw XCTSkip("No frontmost window available for AX testing")
@@ -220,6 +245,36 @@ final class AXTreeCollectorBudgetTests: XCTestCase {
             includeMenuBarElements: true))
 
         XCTAssertNotEqual(withoutMenuBar, withMenuBar)
+    }
+
+    func testElementCacheDoesNotStoreDeadlineResults() throws {
+        let cache = ElementDetectionCache()
+        let key = try XCTUnwrap(cache.key(windowID: 42, processID: 123, allowWebFocus: false))
+        cache.store([], for: key)
+        XCTAssertNotNil(cache.result(for: key))
+
+        cache.store([], truncationInfo: DetectionTruncationInfo(deadlineReached: true), for: key)
+
+        XCTAssertNil(cache.result(for: key))
+    }
+
+    func testElementCacheDoesNotStoreIncompleteAccessibilityResults() throws {
+        let cache = ElementDetectionCache()
+        let key = try XCTUnwrap(cache.key(windowID: 42, processID: 123, allowWebFocus: false))
+
+        cache.store([], truncationInfo: DetectionTruncationInfo(incompleteAccessibilityRead: true), for: key)
+
+        XCTAssertNil(cache.result(for: key))
+    }
+
+    func testElementCachePreservesStructuralLimitResults() throws {
+        let cache = ElementDetectionCache()
+        let key = try XCTUnwrap(cache.key(windowID: 42, processID: 123, allowWebFocus: false))
+        let truncation = DetectionTruncationInfo(maxDepthReached: true)
+
+        cache.store([], truncationInfo: truncation, for: key)
+
+        XCTAssertEqual(cache.result(for: key)?.truncationInfo, truncation)
     }
 
     func testExactWindowResolutionDoesNotActivateBackgroundApplication() async throws {
