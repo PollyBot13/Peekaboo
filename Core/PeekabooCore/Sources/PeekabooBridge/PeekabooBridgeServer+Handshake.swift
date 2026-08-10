@@ -57,7 +57,7 @@ extension PeekabooBridgeServer {
             max(payload.protocolVersion, self.supportedVersions.lowerBound),
             self.supportedVersions.upperBound)
 
-        let permissions = self.currentPermissions(allowAppleScriptLaunch: false)
+        let permissions = self.currentPermissions()
         let advertisedOps = Array(self.operationsCompatibleWithNegotiatedVersion(
             self.allowedOperationsToAdvertise(),
             negotiated)).sorted { $0.rawValue < $1.rawValue }
@@ -109,6 +109,8 @@ extension PeekabooBridgeServer {
 
     func allowedOperationsToAdvertise() -> Set<PeekabooBridgeOperation> {
         var operations = self.allowedOperations
+        // Retain the wire enum for old-client decoding, but current hosts never advertise or execute the probe.
+        operations.remove(._appleScriptProbe)
         if self.daemonControl == nil {
             operations.remove(.daemonStatus)
             operations.remove(.daemonStop)
@@ -182,9 +184,6 @@ extension PeekabooBridgeServer {
         if permissions.accessibility {
             granted.insert(.accessibility)
         }
-        if permissions.appleScript {
-            granted.insert(.appleScript)
-        }
         if permissions.postEvent {
             granted.insert(.postEvent)
         }
@@ -192,9 +191,13 @@ extension PeekabooBridgeServer {
         return granted
     }
 
-    func currentPermissions(allowAppleScriptLaunch: Bool = true) -> PermissionsStatus {
-        self.permissionStatusEvaluator(allowAppleScriptLaunch)
-            .withPostEvent(self.postEventAccessEvaluator())
+    func currentPermissions() -> PermissionsStatus {
+        let permissions = self.permissionStatusEvaluator(false)
+        return PermissionsStatus(
+            screenRecording: permissions.screenRecording,
+            accessibility: permissions.accessibility,
+            appleScript: false,
+            postEvent: self.postEventAccessEvaluator())
     }
 
     static func bridgePermission(for error: PeekabooError) -> PeekabooBridgePermissionKind? {
