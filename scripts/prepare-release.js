@@ -395,11 +395,20 @@ function checkSwiftCLIIntegration(binaryPath) {
     return false;
   }
 
-  const removedCommands = ['image', 'list', 'hotkey', 'inspect-ui', 'perform-action', 'swipe'];
+  // Removed roots must fail and name their v4 replacement, even when a trailing
+  // --help would otherwise short-circuit into help output.
+  const removedCommands = [
+    'image', 'list', 'hotkey', 'inspect-ui', 'perform-action', 'swipe',
+    'sleep', 'open', 'run', 'commander'
+  ];
   for (const command of removedCommands) {
     const result = run([command, '--help']);
-    if (result.status === 0 || !combinedOutput(result).includes(`Unknown command '${command}'`)) {
+    if (result.status === 0) {
       logError(`Removed command unexpectedly resolved: peekaboo ${command}`);
+      return false;
+    }
+    if (!combinedOutput(result).includes(`Command 'peekaboo ${command}' was removed in v4. Use '`)) {
+      logError(`Removed command lacks its v4 migration hint: peekaboo ${command}`);
       return false;
     }
   }
