@@ -103,10 +103,37 @@ struct AppCommandTests {
 
     @Test
     func `App focus preserves an exact PID target`() async throws {
-        let (_, service) = try await runAppCommandWithService([
+        let (output, service) = try await runAppCommandWithService([
             "app", "focus", "--pid", "202", "--json",
         ])
+        let object = try #require(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        #expect(object["effect"] as? String == "confirmed")
         #expect(await appServiceState(service) { $0.activateCalls } == ["PID:202"])
+    }
+
+    @Test
+    func `App focus exits nonzero when activation verification fails`() async throws {
+        let context = await MainActor.run { makeAppCommandContext() }
+        await MainActor.run {
+            context.applicationService.activateApplicationHandler = { _ in
+                throw NSError(
+                    domain: "AppFocusActivationVerification",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Application did not become active and frontmost"]
+                )
+            }
+        }
+
+        let result = try await InProcessCommandRunner.run(
+            ["app", "focus", "TextEdit", "--json"],
+            services: context.services
+        )
+
+        #expect(result.exitStatus != 0)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        )
+        #expect(object["success"] as? Bool == false)
     }
 
     @Test
