@@ -4,6 +4,14 @@ import PeekabooBridge
 import Security
 
 struct BridgeDiagnostics {
+    typealias CandidateProbe = @Sendable (
+        _ socketPath: String,
+        _ identity: PeekabooBridgeClientIdentity
+    ) async throws -> PeekabooBridgeHandshakeResponse
+
+    nonisolated static let maxConcurrentProbes = 8
+    nonisolated static let probeTimeoutSeconds: TimeInterval = 1
+
     private let logger: Logger
 
     init(logger: Logger) {
@@ -11,7 +19,7 @@ struct BridgeDiagnostics {
     }
 
     @MainActor
-    func run(runtimeOptions: CommandRuntimeOptions) async -> BridgeStatusReport {
+    func run(runtimeOptions: CommandRuntimeOptions) async throws -> BridgeStatusReport {
         let environment = ProcessInfo.processInfo.environment
         let effectiveOptions = runtimeOptions.applyingEnvironmentOverrides(environment: environment)
         let configurationInput = PeekabooAutomation.ConfigurationManager.shared.getConfiguration()?.input
@@ -60,13 +68,18 @@ struct BridgeDiagnostics {
             }
         }
 
+        let probeResults = try await Self.probeCandidates(
+            socketPaths: candidates,
+            identity: identity
+        )
+
         var results: [BridgeCandidateReport] = []
         var selected: BridgeSelectionReport?
 
-        for socketPath in candidates {
-            let client = PeekabooBridgeClient(socketPath: socketPath)
-            do {
-                let handshake = try await client.handshake(client: identity, requestedHost: nil)
+        for probeResult in probeResults {
+            let socketPath = probeResult.socketPath
+            switch probeResult.outcome {
+            case let .success(handshake):
                 let report = BridgeHandshakeReport(from: handshake)
                 self.logger.debug(
                     "Bridge status: handshake OK \(handshake.hostKind.rawValue) via \(socketPath)",
@@ -86,18 +99,19 @@ struct BridgeDiagnostics {
                         selected = .remote(socketPath: socketPath, handshake: report)
                     }
                 }
-            } catch let envelope as PeekabooBridgeErrorEnvelope {
-                self.logger.debug(
-                    "Bridge status: handshake error \(envelope.code.rawValue) via \(socketPath): \(envelope.message)",
-                    category: "Bridge"
-                )
-                results.append(.init(socketPath: socketPath, result: .failure(.bridgeEnvelope(envelope))))
-            } catch {
-                self.logger.debug(
-                    "Bridge status: handshake error via \(socketPath): \(String(describing: error))",
-                    category: "Bridge"
-                )
-                results.append(.init(socketPath: socketPath, result: .failure(.other(error))))
+            case let .failure(error):
+                if let errorCode = error.code {
+                    self.logger.debug(
+                        "Bridge status: handshake error \(errorCode) via \(socketPath): \(error.message)",
+                        category: "Bridge"
+                    )
+                } else {
+                    self.logger.debug(
+                        "Bridge status: handshake error via \(socketPath): \(error.details ?? error.message)",
+                        category: "Bridge"
+                    )
+                }
+                results.append(.init(socketPath: socketPath, result: .failure(error)))
             }
         }
 
@@ -108,6 +122,84 @@ struct BridgeDiagnostics {
             candidates: results,
             client: .init(identity: identity)
         )
+    }
+
+    nonisolated static func probeCandidates(
+        socketPaths: [String],
+        identity: PeekabooBridgeClientIdentity,
+        maxConcurrentProbes: Int = Self.maxConcurrentProbes,
+        probe: @escaping CandidateProbe = Self.liveProbe
+    ) async throws -> [BridgeDiagnosticProbeResult] {
+        guard !socketPaths.isEmpty else { return [] }
+        precondition(maxConcurrentProbes > 0, "Bridge probe concurrency must be positive")
+        try Task.checkCancellation()
+
+        return try await withThrowingTaskGroup(
+            of: (Int, BridgeDiagnosticProbeOutcome).self,
+            returning: [BridgeDiagnosticProbeResult].self
+        ) { group in
+            defer { group.cancelAll() }
+
+            func enqueue(_ index: Int) {
+                let socketPath = socketPaths[index]
+                group.addTask {
+                    do {
+                        let handshake = try await probe(socketPath, identity)
+                        return (index, .success(handshake))
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch let envelope as PeekabooBridgeErrorEnvelope {
+                        return (index, .failure(.bridgeEnvelope(envelope)))
+                    } catch {
+                        return (index, .failure(.other(error)))
+                    }
+                }
+            }
+
+            let initialProbeCount = min(socketPaths.count, maxConcurrentProbes)
+            for index in 0..<initialProbeCount {
+                enqueue(index)
+            }
+
+            var nextIndex = initialProbeCount
+            var orderedResults = [BridgeDiagnosticProbeResult?](repeating: nil, count: socketPaths.count)
+            while let (index, outcome) = try await group.next() {
+                try Task.checkCancellation()
+                orderedResults[index] = BridgeDiagnosticProbeResult(
+                    socketPath: socketPaths[index],
+                    outcome: outcome
+                )
+                if nextIndex < socketPaths.count {
+                    enqueue(nextIndex)
+                    nextIndex += 1
+                }
+            }
+
+            return orderedResults.compactMap(\.self)
+        }
+    }
+
+    private nonisolated static func liveProbe(
+        socketPath: String,
+        identity: PeekabooBridgeClientIdentity
+    ) async throws -> PeekabooBridgeHandshakeResponse {
+        let client = PeekabooBridgeClient(
+            socketPath: socketPath,
+            requestTimeoutSec: Self.probeTimeoutSeconds
+        )
+        do {
+            return try await client.handshake(
+                client: identity,
+                requestedHost: nil,
+                overallTimeoutSec: Self.probeTimeoutSeconds
+            )
+        } catch let error as POSIXError where error.code == .ETIMEDOUT {
+            throw PeekabooBridgeErrorEnvelope(
+                code: .timeout,
+                message: "Bridge diagnostic handshake timed out after \(Self.probeTimeoutSeconds)s",
+                details: "The host at \(socketPath) did not answer before the diagnostic deadline."
+            )
+        }
     }
 
     static func remoteSkipReason(
@@ -215,4 +307,14 @@ struct BridgeDiagnostics {
 
         return info[kSecCodeInfoTeamIdentifier as String] as? String
     }
+}
+
+struct BridgeDiagnosticProbeResult: Sendable {
+    let socketPath: String
+    let outcome: BridgeDiagnosticProbeOutcome
+}
+
+enum BridgeDiagnosticProbeOutcome: Sendable {
+    case success(PeekabooBridgeHandshakeResponse)
+    case failure(BridgeCandidateErrorReport)
 }

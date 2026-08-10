@@ -58,7 +58,7 @@ extension BridgeCommand {
             self.runtime = runtime
             self.logger.setJsonOutputMode(self.jsonOutput)
 
-            let report = await BridgeDiagnostics(logger: self.logger).run(runtimeOptions: self.runtimeOptions)
+            let report = try await BridgeDiagnostics(logger: self.logger).run(runtimeOptions: self.runtimeOptions)
             if self.jsonOutput {
                 outputSuccessCodable(data: report, logger: self.outputLogger)
                 return

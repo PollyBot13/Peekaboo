@@ -133,14 +133,14 @@ struct BridgeHandshakeReport: Codable {
     }
 }
 
-struct BridgeCandidateErrorReport: Codable {
+struct BridgeCandidateErrorReport: Codable, Sendable {
     let kind: String
     let code: String?
     let message: String
     let details: String?
     let hint: String?
 
-    static func bridgeEnvelope(_ envelope: PeekabooBridgeErrorEnvelope) -> BridgeCandidateErrorReport {
+    nonisolated static func bridgeEnvelope(_ envelope: PeekabooBridgeErrorEnvelope) -> BridgeCandidateErrorReport {
         let hint: String? = switch envelope.code {
         case .unauthorizedClient:
             "Client not signed by an allowed TeamID. For local dev, set " +
@@ -151,6 +151,8 @@ struct BridgeCandidateErrorReport: Codable {
         case .internalError:
             "Host closed the connection without a valid response. This commonly indicates code-sign checks " +
                 "or a mismatched Bridge protocol."
+        case .timeout:
+            "Inspect or restart this specific host; other diagnostic candidates were still probed."
         default:
             nil
         }
@@ -163,7 +165,7 @@ struct BridgeCandidateErrorReport: Codable {
         )
     }
 
-    static func other(_ error: any Error) -> BridgeCandidateErrorReport {
+    nonisolated static func other(_ error: any Error) -> BridgeCandidateErrorReport {
         BridgeCandidateErrorReport(
             kind: "system",
             code: nil,
