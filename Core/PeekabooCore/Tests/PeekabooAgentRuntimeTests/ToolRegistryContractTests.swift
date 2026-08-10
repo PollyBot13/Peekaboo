@@ -1,7 +1,7 @@
-import PeekabooAgentRuntime
 import PeekabooAutomation
 import PeekabooCore
 import Testing
+@testable import PeekabooAgentRuntime
 
 @MainActor
 struct ToolRegistryContractTests {
@@ -23,10 +23,23 @@ struct ToolRegistryContractTests {
             "action",
             "drag",
             "move",
+            "shell",
             "app",
             "window",
         ]))
         #expect(names.isDisjoint(with: ["hotkey", "launch_app", "list"]))
+    }
+
+    @Test
+    func `Curated copy only overrides tools the runtime exposes`() {
+        let services = PeekabooServices()
+        services.installAgentRuntimeDefaults()
+
+        let exposed = Set(ToolRegistry.allTools(using: services).map(\.name))
+        let documented = ToolRegistry.overriddenToolNames
+        let orphaned = documented.subtracting(exposed).sorted()
+
+        #expect(orphaned.isEmpty, "Curated copy overrides unavailable runtime tools: \(orphaned)")
     }
 
     @Test
