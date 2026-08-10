@@ -104,24 +104,43 @@ extension ApplicationService {
         let backgroundActivationGraceDuration: Duration = launch.openURLs.isEmpty
             ? self.backgroundLaunchActivationGraceDuration
             : self.backgroundOpenActivationGraceDuration
-        let activationLease = launch.activates ? nil : BackgroundLaunchActivationLease(
-            activationGraceDuration: backgroundActivationGraceDuration)
+        let activationLease = launch.activates
+            ? nil
+            : self.backgroundActivationLeaseFactory(
+                backgroundActivationGraceDuration,
+                BackgroundRestorationDependencies(
+                    applicationActivationHandler: self.applicationActivationHandler,
+                    accessibilityActivationHandler: self.applicationAccessibilityActivationHandler,
+                    applicationActiveProvider: self.applicationActiveProvider,
+                    applicationTerminatedProvider: { $0.isTerminated },
+                    frontmostProcessIdentifierProvider: self.frontmostProcessIdentifierProvider,
+                    windowServerActivationStateProvider: self.windowServerActivationStateProvider,
+                    processStartIdentityProvider: self.processStartIdentityProvider,
+                    confirmationSleepHandler: { duration in
+                        try? await self.applicationActivationSleepHandler(duration)
+                    },
+                    confirmationTimeout: self.applicationActivationTimeout))
 
         do {
-            let runningApp: NSRunningApplication
-            if let applicationURL = launch.applicationURL {
-                if launch.disablesRunningApplicationSubstitution {
-                    config.allowsRunningApplicationSubstitution = false
-                }
-                self.logger.debug("Launching app from URL: \(applicationURL.path)")
+            // LaunchServices may continue opening an application after its caller is cancelled. Keep
+            // ownership of that native operation until it returns a PID so the activation guard and
+            // global desktop lane cannot be abandoned while the app may still activate later.
+            let openTask = Task { @MainActor in
+                if let applicationURL = launch.applicationURL {
+                    if launch.disablesRunningApplicationSubstitution {
+                        config.allowsRunningApplicationSubstitution = false
+                    }
+                    self.logger.debug("Launching app from URL: \(applicationURL.path)")
 
-                runningApp = try await self.applicationOpenHandler(applicationURL, launch.openURLs, config)
-            } else {
+                    return try await self.applicationOpenHandler(applicationURL, launch.openURLs, config)
+                }
                 let targetURL = launch.openURLs[0]
-                runningApp = try await self.defaultApplicationOpenHandler(targetURL, config)
+                return try await self.defaultApplicationOpenHandler(targetURL, config)
             }
+            let runningApp = try await openTask.value
             let launchProcessIdentity = try self.captureLaunchProcessIdentity(runningApp)
-            activationLease?.setTargetProcessIdentifier(runningApp.processIdentifier)
+            activationLease?.setTargetProcessIdentity(launchProcessIdentity)
+            try Task.checkCancellation()
 
             if launch.activates, !runningApp.isActive, !runningApp.activate(options: []) {
                 self.logger
@@ -141,11 +160,9 @@ extension ApplicationService {
                 throw PeekabooError.commandFailed(
                     "Launched application process generation changed before its receipt could be returned")
             }
-            activationLease?.finish(protectionCompleted: true)
             return application
         } catch {
-            activationLease?.finish(protectionCompleted: false)
-            await activationLease?.waitForProtectionHeartbeat()
+            _ = await activationLease?.waitForReconciliation()
             throw error
         }
     }
@@ -768,26 +785,106 @@ func waitForApplicationTermination(
     return await isTerminated()
 }
 
+enum BackgroundRestorationOutcome: Sendable, Equatable {
+    case candidateConfirmed(pid_t)
+    case differentFrontmost(pid_t)
+    case targetWasAlreadyFrontmost
+    case targetNotFrontmost
+    case targetStillFrontmost
+}
+
+@MainActor
+struct BackgroundRestorationDependencies {
+    typealias ApplicationActivationHandler = @MainActor (NSRunningApplication) -> Bool
+    typealias AccessibilityActivationHandler = @MainActor (pid_t) -> Bool
+    typealias ApplicationActiveProvider = @MainActor (NSRunningApplication) -> Bool
+    typealias ApplicationTerminatedProvider = @MainActor (NSRunningApplication) -> Bool
+    typealias FrontmostProcessIdentifierProvider = @MainActor () -> pid_t?
+    typealias WindowServerActivationStateProvider = @MainActor (pid_t)
+        -> ApplicationService.WindowServerActivationState
+    typealias ProcessStartIdentityProvider = @MainActor (pid_t) -> UInt64?
+    typealias SleepHandler = @MainActor (Duration) async -> Void
+
+    let applicationActivationHandler: ApplicationActivationHandler
+    let accessibilityActivationHandler: AccessibilityActivationHandler
+    let applicationActiveProvider: ApplicationActiveProvider
+    let applicationTerminatedProvider: ApplicationTerminatedProvider
+    let frontmostProcessIdentifierProvider: FrontmostProcessIdentifierProvider
+    let windowServerActivationStateProvider: WindowServerActivationStateProvider
+    let processStartIdentityProvider: ProcessStartIdentityProvider
+    let confirmationSleepHandler: SleepHandler
+    let confirmationTimeout: Duration
+
+    init(
+        applicationActivationHandler: @escaping ApplicationActivationHandler,
+        accessibilityActivationHandler: @escaping AccessibilityActivationHandler,
+        applicationActiveProvider: @escaping ApplicationActiveProvider,
+        applicationTerminatedProvider: @escaping ApplicationTerminatedProvider,
+        frontmostProcessIdentifierProvider: @escaping FrontmostProcessIdentifierProvider,
+        windowServerActivationStateProvider: @escaping WindowServerActivationStateProvider = { _ in
+            ApplicationService.WindowServerActivationState(
+                targetHasVisibleWindow: false,
+                frontmostWindowProcessIdentifier: nil)
+        },
+        processStartIdentityProvider: @escaping ProcessStartIdentityProvider,
+        confirmationSleepHandler: @escaping SleepHandler,
+        confirmationTimeout: Duration)
+    {
+        self.applicationActivationHandler = applicationActivationHandler
+        self.accessibilityActivationHandler = accessibilityActivationHandler
+        self.applicationActiveProvider = applicationActiveProvider
+        self.applicationTerminatedProvider = applicationTerminatedProvider
+        self.frontmostProcessIdentifierProvider = frontmostProcessIdentifierProvider
+        self.windowServerActivationStateProvider = windowServerActivationStateProvider
+        self.processStartIdentityProvider = processStartIdentityProvider
+        self.confirmationSleepHandler = confirmationSleepHandler
+        self.confirmationTimeout = confirmationTimeout
+    }
+
+    static func live(workspace: NSWorkspace = .shared) -> Self {
+        Self(
+            applicationActivationHandler: { $0.activate(options: [.activateAllWindows]) },
+            accessibilityActivationHandler: ApplicationService.requestAccessibilityActivation,
+            applicationActiveProvider: { $0.isActive },
+            applicationTerminatedProvider: { $0.isTerminated },
+            frontmostProcessIdentifierProvider: { workspace.frontmostApplication?.processIdentifier },
+            windowServerActivationStateProvider: ApplicationService.windowServerActivationState,
+            processStartIdentityProvider: SystemIdentityResolver.processStartIdentity,
+            confirmationSleepHandler: { try? await Task.sleep(for: $0) },
+            confirmationTimeout: .seconds(2))
+    }
+}
+
 @MainActor
 final class BackgroundLaunchActivationLease {
-    typealias RestorationHandler = @MainActor (NSRunningApplication) -> Void
-    typealias FrontmostProcessIdentifierProvider = @MainActor () -> pid_t?
     typealias NowProvider = @MainActor () -> ContinuousClock.Instant
-    typealias SleepHandler = @MainActor (_ duration: Duration) async throws -> Void
+    typealias SleepHandler = @MainActor (_ duration: Duration) async -> Void
+
+    private struct ActivationRecord {
+        let processIdentifier: pid_t
+        let application: NSRunningApplication?
+    }
+
+    private struct RestorationCandidate {
+        let application: NSRunningApplication
+        let processIdentity: ApplicationProcessIdentity
+    }
 
     private let notificationCenter: NotificationCenter
-    private let restorationHandler: RestorationHandler
-    private let frontmostProcessIdentifierProvider: FrontmostProcessIdentifierProvider
+    private let restorationDependencies: BackgroundRestorationDependencies
     private let activationGraceDuration: Duration
+    private let confirmationTimeout: Duration
     private let nowProvider: NowProvider
     private let sleepHandler: SleepHandler
+    private let initialFrontmostProcessIdentity: ApplicationProcessIdentity?
     private var observer: (any NSObjectProtocol)?
-    private var targetProcessIdentifier: pid_t?
-    private var activatedBeforeTargetResolution: Set<pid_t> = []
-    private var applicationsActivatedBeforeTargetResolution: [NSRunningApplication] = []
-    private var restorationCandidate: NSRunningApplication?
-    private var protectionDeadline: ContinuousClock.Instant?
-    private var protectionHeartbeat: Task<Void, Never>?
+    private var targetProcessIdentity: ApplicationProcessIdentity?
+    private var activationsBeforeTargetResolution: [ActivationRecord] = []
+    private var observedNonTargetActivation = false
+    private var restorationCandidate: RestorationCandidate?
+    private var candidateRevision: UInt64 = 0
+    private var reconciliationTask: Task<BackgroundRestorationOutcome, Never>?
+    private var reconciliationOutcome: BackgroundRestorationOutcome?
 
     init(
         workspace: NSWorkspace = .shared,
@@ -795,21 +892,33 @@ final class BackgroundLaunchActivationLease {
         observeActivations: Bool = true,
         activationGraceDuration: Duration = .milliseconds(500),
         nowProvider: @escaping NowProvider = { ContinuousClock.now },
-        sleepHandler: @escaping SleepHandler = { duration in try await Task.sleep(for: duration) },
-        frontmostProcessIdentifierProvider: FrontmostProcessIdentifierProvider? = nil,
-        restorationHandler: @escaping RestorationHandler = { application in
-            _ = application.activate(options: [])
-        })
+        sleepHandler: @escaping SleepHandler = { duration in try? await Task.sleep(for: duration) },
+        restorationDependencies: BackgroundRestorationDependencies? = nil)
     {
+        let dependencies = restorationDependencies ?? .live(workspace: workspace)
+        let initialApplication = previousApplication ?? workspace.frontmostApplication
         self.notificationCenter = workspace.notificationCenter
-        self.restorationCandidate = previousApplication ?? workspace.frontmostApplication
-        self.restorationHandler = restorationHandler
-        self.frontmostProcessIdentifierProvider = frontmostProcessIdentifierProvider ?? {
-            workspace.frontmostApplication?.processIdentifier
-        }
-        self.activationGraceDuration = activationGraceDuration
+        self.restorationDependencies = dependencies
+        self.activationGraceDuration = Self.boundedProtectionDuration(activationGraceDuration)
+        self.confirmationTimeout = Self.boundedProtectionDuration(dependencies.confirmationTimeout)
         self.nowProvider = nowProvider
         self.sleepHandler = sleepHandler
+        self.initialFrontmostProcessIdentity = dependencies.frontmostProcessIdentifierProvider().flatMap {
+            guard let processStartIdentity = dependencies.processStartIdentityProvider($0) else { return nil }
+            return ApplicationProcessIdentity(
+                processIdentifier: $0,
+                processStartIdentity: processStartIdentity)
+        }
+        self.restorationCandidate = initialApplication.flatMap { application in
+            guard let processStartIdentity = dependencies
+                .processStartIdentityProvider(application.processIdentifier)
+            else { return nil }
+            return RestorationCandidate(
+                application: application,
+                processIdentity: ApplicationProcessIdentity(
+                    processIdentifier: application.processIdentifier,
+                    processStartIdentity: processStartIdentity))
+        }
 
         if observeActivations {
             self.observer = self.notificationCenter.addObserver(
@@ -819,9 +928,7 @@ final class BackgroundLaunchActivationLease {
             { [weak self] notification in
                 let application = notification
                     .userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-                guard let processIdentifier = application?.processIdentifier else {
-                    return
-                }
+                guard let processIdentifier = application?.processIdentifier else { return }
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     if let application = NSRunningApplication(processIdentifier: processIdentifier) {
@@ -834,78 +941,255 @@ final class BackgroundLaunchActivationLease {
         }
     }
 
-    func setTargetProcessIdentifier(_ processIdentifier: pid_t) {
-        self.targetProcessIdentifier = processIdentifier
-        self.protectionDeadline = self.nowProvider().advanced(by: self.activationGraceDuration)
-        if let latestNonTarget = self.applicationsActivatedBeforeTargetResolution.last(where: {
-            $0.processIdentifier != processIdentifier && !$0.isTerminated
+    @discardableResult
+    func setTargetProcessIdentifier(_ processIdentifier: pid_t) -> Bool {
+        guard let processStartIdentity = self.restorationDependencies
+            .processStartIdentityProvider(processIdentifier)
+        else { return false }
+        return self.setTargetProcessIdentity(ApplicationProcessIdentity(
+            processIdentifier: processIdentifier,
+            processStartIdentity: processStartIdentity))
+    }
+
+    @discardableResult
+    func setTargetProcessIdentity(_ processIdentity: ApplicationProcessIdentity) -> Bool {
+        guard self.targetProcessIdentity == nil else { return false }
+        self.targetProcessIdentity = processIdentity
+        let protectionDeadline = self.nowProvider().advanced(by: self.activationGraceDuration)
+        if let latestNonTargetActivation = self.activationsBeforeTargetResolution.last(where: {
+            $0.processIdentifier != processIdentity.processIdentifier
         }) {
-            self.restorationCandidate = latestNonTarget
+            self.observedNonTargetActivation = true
+            if let application = latestNonTargetActivation.application,
+               !self.restorationDependencies.applicationTerminatedProvider(application)
+            {
+                self.setRestorationCandidate(application)
+            } else {
+                self.clearRestorationCandidate()
+            }
+        } else if self.restorationCandidate?.processIdentity.processIdentifier == processIdentity.processIdentifier {
+            self.clearRestorationCandidate()
         }
-        if self.activatedBeforeTargetResolution.remove(processIdentifier) != nil {
-            self.restoreIfTargetIsFrontmost()
-        }
+        self.activationsBeforeTargetResolution.removeAll()
+        self.restoreIfTargetIsFrontmost()
+        self.startReconciliationTask(deadline: protectionDeadline)
+        return true
     }
 
     func holdThroughInitialActivationWindow() async throws {
-        guard let protectionDeadline else { return }
-        let now = self.nowProvider()
-        guard now < protectionDeadline else { return }
-        try await self.sleepHandler(now.duration(to: protectionDeadline))
-        self.restoreAtProtectionBoundaryIfTargetIsFrontmost()
+        guard let reconciliationTask else { return }
+        let outcome = await reconciliationTask.value
+        try Task.checkCancellation()
+        if outcome == .targetStillFrontmost {
+            throw PeekabooError.commandFailed(
+                "Background launch could not restore focus before its protection deadline")
+        }
     }
 
     func handleActivatedProcessIdentifier(_ processIdentifier: pid_t) {
-        guard let targetProcessIdentifier else {
-            self.activatedBeforeTargetResolution.insert(processIdentifier)
+        guard let targetProcessIdentity else {
+            self.activationsBeforeTargetResolution.append(ActivationRecord(
+                processIdentifier: processIdentifier,
+                application: nil))
             return
         }
-        guard self.isProtectionActive else { return }
-        guard processIdentifier == targetProcessIdentifier else { return }
-        self.restoreIfTargetIsFrontmost()
+        guard self.reconciliationOutcome == nil else { return }
+        if processIdentifier == targetProcessIdentity.processIdentifier,
+           self.isCurrentTargetGeneration(targetProcessIdentity)
+        {
+            self.restoreIfTargetIsFrontmost()
+        } else {
+            self.observedNonTargetActivation = true
+            self.clearRestorationCandidate()
+        }
     }
 
     func handleActivatedApplication(_ application: NSRunningApplication) {
-        guard let targetProcessIdentifier else {
-            self.activatedBeforeTargetResolution.insert(application.processIdentifier)
-            self.applicationsActivatedBeforeTargetResolution.append(application)
+        guard let targetProcessIdentity else {
+            self.activationsBeforeTargetResolution.append(ActivationRecord(
+                processIdentifier: application.processIdentifier,
+                application: application))
             return
         }
-        guard self.isProtectionActive else { return }
+        guard self.reconciliationOutcome == nil else { return }
 
-        if application.processIdentifier == targetProcessIdentifier {
+        if application.processIdentifier == targetProcessIdentity.processIdentifier,
+           self.isCurrentTargetGeneration(targetProcessIdentity)
+        {
             self.restoreIfTargetIsFrontmost()
-        } else if !application.isTerminated {
-            self.restorationCandidate = application
+        } else if !self.restorationDependencies.applicationTerminatedProvider(application) {
+            self.observedNonTargetActivation = true
+            self.setRestorationCandidate(application)
         }
     }
 
-    func finish(protectionCompleted: Bool) {
-        guard !protectionCompleted,
-              let protectionDeadline,
-              self.nowProvider() < protectionDeadline
-        else {
+    func waitForReconciliation() async -> BackgroundRestorationOutcome? {
+        guard let reconciliationTask else {
             self.stopObserving()
+            return nil
+        }
+        return await reconciliationTask.value
+    }
+
+    var hasActiveReconciliation: Bool {
+        self.reconciliationTask != nil && self.reconciliationOutcome == nil
+    }
+
+    private func startReconciliationTask(deadline: ContinuousClock.Instant) {
+        guard self.reconciliationTask == nil else { return }
+        self.reconciliationTask = Task { @MainActor [weak self] in
+            guard let self else { return .targetNotFrontmost }
+            let now = self.nowProvider()
+            if now < deadline {
+                await self.sleepHandler(now.duration(to: deadline))
+            }
+            let outcome = await self.reconcileAtGraceBoundary()
+            self.reconciliationOutcome = outcome
+            self.stopObserving()
+            return outcome
+        }
+    }
+
+    private func reconcileAtGraceBoundary() async -> BackgroundRestorationOutcome {
+        guard let targetProcessIdentity else { return .targetNotFrontmost }
+        let targetProcessIdentifier = targetProcessIdentity.processIdentifier
+        var fallbackRevision: UInt64?
+        let confirmationDeadline = self.nowProvider().advanced(by: self.confirmationTimeout)
+
+        while true {
+            let candidate = self.restorationCandidate
+            let revision = self.candidateRevision
+            let frontmostProcessIdentifier = self.restorationDependencies.frontmostProcessIdentifierProvider()
+            if let outcome = self.classifyRestoration(
+                candidate: candidate,
+                targetProcessIdentity: targetProcessIdentity,
+                frontmostProcessIdentifier: frontmostProcessIdentifier)
+            {
+                return outcome
+            }
+            if frontmostProcessIdentifier == targetProcessIdentifier,
+               self.initialFrontmostProcessIdentity == targetProcessIdentity,
+               !self.observedNonTargetActivation
+            {
+                return .targetWasAlreadyFrontmost
+            }
+
+            let now = self.nowProvider()
+            guard now < confirmationDeadline else {
+                return frontmostProcessIdentifier == targetProcessIdentifier
+                    ? .targetStillFrontmost
+                    : .targetNotFrontmost
+            }
+
+            if frontmostProcessIdentifier == targetProcessIdentifier,
+               let candidate,
+               candidate.processIdentity.processIdentifier != targetProcessIdentifier,
+               self.isCurrentCandidate(candidate),
+               !self.restorationDependencies.applicationTerminatedProvider(candidate.application),
+               self.isCurrentTargetGeneration(targetProcessIdentity)
+            {
+                let accepted = self.restorationDependencies.applicationActivationHandler(candidate.application)
+                await Task.yield()
+                guard revision == self.candidateRevision else {
+                    continue
+                }
+                if let outcome = self.classifyRestoration(
+                    candidate: candidate,
+                    targetProcessIdentity: targetProcessIdentity,
+                    frontmostProcessIdentifier: self.restorationDependencies.frontmostProcessIdentifierProvider())
+                {
+                    return outcome
+                }
+                if self.restorationDependencies.frontmostProcessIdentifierProvider() == targetProcessIdentifier,
+                   self.isCurrentTargetGeneration(targetProcessIdentity),
+                   self.isCurrentCandidate(candidate),
+                   !self.restorationDependencies.applicationTerminatedProvider(candidate.application),
+                   fallbackRevision == revision || !accepted
+                {
+                    _ = self.restorationDependencies.accessibilityActivationHandler(
+                        candidate.processIdentity.processIdentifier)
+                    await Task.yield()
+                    guard revision == self.candidateRevision else {
+                        continue
+                    }
+                    if let outcome = self.classifyRestoration(
+                        candidate: candidate,
+                        targetProcessIdentity: targetProcessIdentity,
+                        frontmostProcessIdentifier: self.restorationDependencies
+                            .frontmostProcessIdentifierProvider())
+                    {
+                        return outcome
+                    }
+                }
+                fallbackRevision = revision
+            }
+
+            let sleepNow = self.nowProvider()
+            guard sleepNow < confirmationDeadline else { continue }
+            await self.restorationDependencies.confirmationSleepHandler(
+                min(.milliseconds(100), sleepNow.duration(to: confirmationDeadline)))
+        }
+    }
+
+    private func classifyRestoration(
+        candidate: RestorationCandidate?,
+        targetProcessIdentity: ApplicationProcessIdentity,
+        frontmostProcessIdentifier: pid_t?) -> BackgroundRestorationOutcome?
+    {
+        let targetProcessIdentifier = targetProcessIdentity.processIdentifier
+        if frontmostProcessIdentifier == targetProcessIdentifier,
+           !self.isCurrentTargetGeneration(targetProcessIdentity)
+        {
+            return .targetNotFrontmost
+        }
+        if let candidate,
+           candidate.processIdentity.processIdentifier != targetProcessIdentifier,
+           self.isCurrentCandidate(candidate),
+           !self.restorationDependencies.applicationTerminatedProvider(candidate.application),
+           self.isVerifiedApplicationActivation(candidate.application)
+        {
+            return .candidateConfirmed(candidate.processIdentity.processIdentifier)
+        }
+        if let frontmostProcessIdentifier, frontmostProcessIdentifier != targetProcessIdentifier {
+            return .differentFrontmost(frontmostProcessIdentifier)
+        }
+        return nil
+    }
+
+    private func isVerifiedApplicationActivation(_ application: NSRunningApplication) -> Bool {
+        let processIdentifier = application.processIdentifier
+        let windowServerState = self.restorationDependencies
+            .windowServerActivationStateProvider(processIdentifier)
+        return ApplicationService.isVerifiedApplicationActivation(
+            processIdentifier: processIdentifier,
+            isActive: self.restorationDependencies.applicationActiveProvider(application),
+            frontmostProcessIdentifier: self.restorationDependencies.frontmostProcessIdentifierProvider(),
+            targetHasVisibleWindow: windowServerState.targetHasVisibleWindow,
+            frontmostWindowProcessIdentifier: windowServerState.frontmostWindowProcessIdentifier)
+    }
+
+    private func setRestorationCandidate(_ application: NSRunningApplication) {
+        self.candidateRevision &+= 1
+        guard let processStartIdentity = self.restorationDependencies
+            .processStartIdentityProvider(application.processIdentifier)
+        else {
+            self.restorationCandidate = nil
             return
         }
-        guard self.protectionHeartbeat == nil else { return }
-        self.protectionHeartbeat = Task { @MainActor in
-            let now = self.nowProvider()
-            if now < protectionDeadline {
-                try? await self.sleepHandler(now.duration(to: protectionDeadline))
-            }
-            self.restoreAtProtectionBoundaryIfTargetIsFrontmost()
-            self.stopObserving()
-            self.protectionHeartbeat = nil
-        }
+        self.restorationCandidate = RestorationCandidate(
+            application: application,
+            processIdentity: ApplicationProcessIdentity(
+                processIdentifier: application.processIdentifier,
+                processStartIdentity: processStartIdentity))
     }
 
-    var hasProtectionHeartbeat: Bool {
-        self.protectionHeartbeat != nil
+    private func clearRestorationCandidate() {
+        self.candidateRevision &+= 1
+        self.restorationCandidate = nil
     }
 
-    func waitForProtectionHeartbeat() async {
-        await self.protectionHeartbeat?.value
+    private static func boundedProtectionDuration(_ duration: Duration) -> Duration {
+        max(.zero, min(duration, .seconds(10)))
     }
 
     private func stopObserving() {
@@ -916,27 +1200,31 @@ final class BackgroundLaunchActivationLease {
 
     private func restorePreviousApplication() {
         guard let restorationCandidate,
-              !restorationCandidate.isTerminated,
-              restorationCandidate.processIdentifier != self.targetProcessIdentifier
-        else {
-            return
-        }
-        self.restorationHandler(restorationCandidate)
+              self.isCurrentCandidate(restorationCandidate),
+              !self.restorationDependencies.applicationTerminatedProvider(restorationCandidate.application),
+              restorationCandidate.processIdentity.processIdentifier != self.targetProcessIdentity?.processIdentifier
+        else { return }
+        _ = self.restorationDependencies.applicationActivationHandler(restorationCandidate.application)
     }
 
     private func restoreIfTargetIsFrontmost() {
-        guard self.isProtectionActive else { return }
-        self.restoreAtProtectionBoundaryIfTargetIsFrontmost()
-    }
-
-    private func restoreAtProtectionBoundaryIfTargetIsFrontmost() {
-        guard self.frontmostProcessIdentifierProvider() == self.targetProcessIdentifier else { return }
+        guard let targetProcessIdentity,
+              self.reconciliationOutcome == nil,
+              self.restorationDependencies.frontmostProcessIdentifierProvider() == targetProcessIdentity
+                  .processIdentifier,
+                  self.isCurrentTargetGeneration(targetProcessIdentity)
+        else { return }
         self.restorePreviousApplication()
     }
 
-    private var isProtectionActive: Bool {
-        guard let protectionDeadline else { return false }
-        return self.nowProvider() < protectionDeadline
+    private func isCurrentTargetGeneration(_ processIdentity: ApplicationProcessIdentity) -> Bool {
+        self.restorationDependencies.processStartIdentityProvider(processIdentity.processIdentifier) ==
+            processIdentity.processStartIdentity
+    }
+
+    private func isCurrentCandidate(_ candidate: RestorationCandidate) -> Bool {
+        self.restorationDependencies.processStartIdentityProvider(candidate.processIdentity.processIdentifier) ==
+            candidate.processIdentity.processStartIdentity
     }
 }
 

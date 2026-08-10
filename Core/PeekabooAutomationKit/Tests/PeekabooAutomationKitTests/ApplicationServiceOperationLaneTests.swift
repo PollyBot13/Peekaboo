@@ -57,17 +57,30 @@ struct ApplicationServiceOperationLaneTests {
 
     @Test
     @MainActor
-    func `Cancelled background launch retains global lane through activation heartbeat`() async throws {
-        let runningApplication = try #require(NSWorkspace.shared.runningApplications.first {
+    func `Cancelled background launch retains global lane through restoration confirmation`() async throws {
+        let runningApplications = NSWorkspace.shared.runningApplications.filter {
             $0.processIdentifier > 0 && !$0.isTerminated && $0.isFinishedLaunching
+        }
+        let runningApplication = try #require(runningApplications.first)
+        let previousApplication = try #require(runningApplications.first {
+            $0.processIdentifier != runningApplication.processIdentifier
         })
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("peekaboo-launch-lane-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let coordinator = DesktopOperationLaneCoordinator(coordinationRootURL: root)
         let launchWaiting = ApplicationOperationLatch()
+        let graceStarted = ApplicationOperationLatch()
+        let graceRelease = ApplicationOperationLatch()
+        let confirmationStarted = ApplicationOperationLatch()
+        let confirmationRelease = ApplicationOperationLatch()
         let contenderStarted = ApplicationOperationLatch()
         let generation = SystemIdentityResolver.processStartIdentity(runningApplication.processIdentifier) ?? 70
+        let activationNow = ApplicationOperationInstantBox(ContinuousClock.now)
+        let frontmostPID = ApplicationOperationPIDBox(previousApplication.processIdentifier)
+        var reconciliationObservedCancellation = false
+        var nativeActivationRequests: [pid_t] = []
+        var accessibilityActivationRequests: [pid_t] = []
         let service = ApplicationService(
             operationLaneCoordinator: coordinator,
             applicationOpenHandler: { _, _, _ in runningApplication },
@@ -77,7 +90,41 @@ struct ApplicationServiceOperationLaneTests {
             },
             processStartIdentityProvider: { _ in generation },
             applicationReadinessTimeout: 5,
-            backgroundLaunchActivationGraceDuration: .milliseconds(250))
+            backgroundLaunchActivationGraceDuration: .milliseconds(250),
+            backgroundActivationLeaseFactory: { duration, _ in
+                let lease = BackgroundLaunchActivationLease(
+                    previousApplication: previousApplication,
+                    observeActivations: false,
+                    activationGraceDuration: duration,
+                    nowProvider: { activationNow.value },
+                    sleepHandler: { sleepDuration in
+                        await graceStarted.open()
+                        await graceRelease.wait()
+                        activationNow.value = activationNow.value.advanced(by: sleepDuration)
+                    },
+                    restorationDependencies: BackgroundRestorationDependencies(
+                        applicationActivationHandler: { application in
+                            nativeActivationRequests.append(application.processIdentifier)
+                            return true
+                        },
+                        accessibilityActivationHandler: { processIdentifier in
+                            accessibilityActivationRequests.append(processIdentifier)
+                            return true
+                        },
+                        applicationActiveProvider: { _ in false },
+                        applicationTerminatedProvider: { _ in false },
+                        frontmostProcessIdentifierProvider: { frontmostPID.value },
+                        processStartIdentityProvider: { _ in generation },
+                        confirmationSleepHandler: { sleepDuration in
+                            reconciliationObservedCancellation = Task.isCancelled
+                            await confirmationStarted.open()
+                            await confirmationRelease.wait()
+                            activationNow.value = activationNow.value.advanced(by: sleepDuration)
+                        },
+                        confirmationTimeout: .milliseconds(100)))
+                frontmostPID.value = runningApplication.processIdentifier
+                return lease
+            })
 
         let launch = Task { @MainActor in
             try await service.launchApplication(request: ApplicationLaunchRequest(
@@ -87,6 +134,7 @@ struct ApplicationServiceOperationLaneTests {
         }
         await launchWaiting.wait()
         launch.cancel()
+        await graceStarted.wait()
         let contender = Task {
             try await coordinator.run(scope: .global, access: .write) {
                 await contenderStarted.open()
@@ -94,11 +142,126 @@ struct ApplicationServiceOperationLaneTests {
         }
 
         #expect(await !(contenderStarted.opensWithin(.milliseconds(100))))
+        await graceRelease.open()
+        await confirmationStarted.wait()
+        #expect(!reconciliationObservedCancellation)
+        #expect(await !contenderStarted.isOpen)
+        await confirmationRelease.open()
         await #expect(throws: CancellationError.self) {
             try await launch.value
         }
         try await contender.value
         #expect(await contenderStarted.isOpen)
+        #expect(!nativeActivationRequests.isEmpty)
+        #expect(nativeActivationRequests.allSatisfy { $0 == previousApplication.processIdentifier })
+        #expect(accessibilityActivationRequests.allSatisfy { $0 == previousApplication.processIdentifier })
+    }
+
+    @Test
+    @MainActor
+    func `Cancelled in-flight open retains lane until target receipt and reconciliation`() async throws {
+        let runningApplication = try #require(NSWorkspace.shared.runningApplications.first {
+            $0.processIdentifier > 0 && !$0.isTerminated && $0.isFinishedLaunching
+        })
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("peekaboo-open-lane-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = DesktopOperationLaneCoordinator(coordinationRootURL: root)
+        let openStarted = ApplicationOperationLatch()
+        let openRelease = ApplicationOperationLatch()
+        let reconciliationStarted = ApplicationOperationLatch()
+        let reconciliationRelease = ApplicationOperationLatch()
+        let contenderStarted = ApplicationOperationLatch()
+        let generation = SystemIdentityResolver.processStartIdentity(runningApplication.processIdentifier) ?? 70
+        let activationNow = ApplicationOperationInstantBox(ContinuousClock.now)
+        var openObservedCancellation = false
+        var reconciliationObservedCancellation = false
+        var nativeActivationRequests: [pid_t] = []
+        var accessibilityActivationRequests: [pid_t] = []
+        let service = ApplicationService(
+            operationLaneCoordinator: coordinator,
+            applicationOpenHandler: { _, _, _ in
+                await openStarted.open()
+                await openRelease.wait()
+                openObservedCancellation = Task.isCancelled
+                return runningApplication
+            },
+            processStartIdentityProvider: { _ in generation },
+            backgroundLaunchActivationGraceDuration: .milliseconds(250),
+            backgroundActivationLeaseFactory: { duration, _ in
+                BackgroundLaunchActivationLease(
+                    previousApplication: runningApplication,
+                    observeActivations: false,
+                    activationGraceDuration: duration,
+                    nowProvider: { activationNow.value },
+                    sleepHandler: { sleepDuration in
+                        reconciliationObservedCancellation = Task.isCancelled
+                        await reconciliationStarted.open()
+                        await reconciliationRelease.wait()
+                        activationNow.value = activationNow.value.advanced(by: sleepDuration)
+                    },
+                    restorationDependencies: BackgroundRestorationDependencies(
+                        applicationActivationHandler: { application in
+                            nativeActivationRequests.append(application.processIdentifier)
+                            return true
+                        },
+                        accessibilityActivationHandler: { processIdentifier in
+                            accessibilityActivationRequests.append(processIdentifier)
+                            return true
+                        },
+                        applicationActiveProvider: { _ in false },
+                        applicationTerminatedProvider: { _ in false },
+                        frontmostProcessIdentifierProvider: { nil },
+                        processStartIdentityProvider: { _ in generation },
+                        confirmationSleepHandler: { _ in },
+                        confirmationTimeout: .zero))
+            })
+
+        let launch = Task { @MainActor in
+            try await service.launchApplication(request: ApplicationLaunchRequest(
+                applicationIdentifier: "Finder",
+                activates: false))
+        }
+        await openStarted.wait()
+        launch.cancel()
+        let contender = Task {
+            try await coordinator.run(scope: .global, access: .write) {
+                await contenderStarted.open()
+            }
+        }
+
+        #expect(await !(contenderStarted.opensWithin(.milliseconds(100))))
+        await openRelease.open()
+        await reconciliationStarted.wait()
+        #expect(!openObservedCancellation)
+        #expect(!reconciliationObservedCancellation)
+        #expect(await !contenderStarted.isOpen)
+        await reconciliationRelease.open()
+        await #expect(throws: CancellationError.self) {
+            try await launch.value
+        }
+        try await contender.value
+        #expect(await contenderStarted.isOpen)
+        #expect(nativeActivationRequests.isEmpty)
+        #expect(accessibilityActivationRequests.isEmpty)
+    }
+}
+
+@MainActor
+private final class ApplicationOperationInstantBox {
+    var value: ContinuousClock.Instant
+
+    init(_ value: ContinuousClock.Instant) {
+        self.value = value
+    }
+}
+
+@MainActor
+private final class ApplicationOperationPIDBox {
+    var value: pid_t?
+
+    init(_ value: pid_t?) {
+        self.value = value
     }
 }
 
