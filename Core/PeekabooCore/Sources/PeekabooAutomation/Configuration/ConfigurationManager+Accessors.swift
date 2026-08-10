@@ -34,7 +34,7 @@ extension ConfigurationManager {
             cliValue: cliValue,
             envVar: "PEEKABOO_AI_PROVIDERS",
             configValue: self.configuration?.aiProviders?.providers,
-            defaultValue: "openai/gpt-5.5,anthropic/claude-opus-4-8")
+            defaultValue: "openai/gpt-5.6,anthropic/claude-opus-5")
     }
 
     /// Whether the provider list came from an explicit user selection rather than an app-generated fallback list.
@@ -46,16 +46,29 @@ extension ConfigurationManager {
             return true
         }
 
-        guard let providers = self.configuration?.aiProviders?.providers?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !providers.isEmpty
-        else {
-            return false
-        }
+        guard let providers = self.configuredAIProviderList() else { return false }
 
         return !Self.isGeneratedAIProviderList(
             providers,
             configuredDefault: self.configuration?.agent?.defaultModel)
+    }
+
+    /// Whether a provider list is stored in the user's configuration file.
+    ///
+    /// This deliberately excludes built-in defaults and environment overrides so callers can distinguish a saved
+    /// model selection from credential-only discovery.
+    public func hasConfiguredAIProviderList() -> Bool {
+        self.configuredAIProviderList() != nil
+    }
+
+    private func configuredAIProviderList() -> String? {
+        guard let providers = self.configuration?.aiProviders?.providers?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !providers.isEmpty
+        else {
+            return nil
+        }
+        return providers
     }
 
     public static func isGeneratedAIProviderList(_ providers: String, configuredDefault: String?) -> Bool {
@@ -63,7 +76,8 @@ extension ConfigurationManager {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
 
-        if entries == ["openai/gpt-5.5", "anthropic/claude-opus-4-7"] ||
+        if entries == ["openai/gpt-5.6", "anthropic/claude-opus-5"] ||
+            entries == ["openai/gpt-5.5", "anthropic/claude-opus-4-7"] ||
             entries == ["openai/gpt-5.5", "anthropic/claude-opus-4-8"]
         {
             return true

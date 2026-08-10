@@ -26,8 +26,7 @@ extension PeekabooAgentServiceTests {
         let mockServices = self.makeServices()
         let agentService = try PeekabooAgentService(services: mockServices)
 
-        // Should default to Claude Opus 4.8 for Anthropic zero-retention compatibility.
-        #expect(agentService.defaultModel == LanguageModel.anthropic(.opus48).description)
+        #expect(agentService.defaultModel == LanguageModel.anthropic(.opus5).description)
     }
 
     @Test
@@ -61,7 +60,7 @@ extension PeekabooAgentServiceTests {
                 let agentService = try PeekabooAgentService(services: services)
 
                 let fableSettings = agentService.generationSettings(for: .anthropic(.fable5))
-                let opusSettings = agentService.generationSettings(for: .anthropic(.opus48))
+                let opusSettings = agentService.generationSettings(for: .anthropic(.opus5))
 
                 #expect(fableSettings.maxTokens == 128_000)
                 #expect(fableSettings.temperature == 0.2)
@@ -1155,15 +1154,56 @@ extension PeekabooAgentServiceTests {
 
     @Test
     @MainActor
-    func `Generated provider list preserves available model order`() throws {
+    func `Auth-only Anthropic credentials keep the compatible agent fallback`() throws {
         try self.withIsolatedAgentEnvironment([
-            "OPENAI_API_KEY": "test-openai-key",
             "ANTHROPIC_API_KEY": "test-anthropic-key",
         ]) {
             let services = self.makeServices()
             let agentService = try #require(services.agent as? PeekabooAgentService)
 
-            #expect(agentService.defaultModel == LanguageModel.openai(.gpt55).description)
+            #expect(agentService.defaultModel == LanguageModel.anthropic(.opus48).description)
+        }
+    }
+
+    @Test
+    @MainActor
+    func `Saved Anthropic model pin wins over the current generated provider list`() throws {
+        try self.withIsolatedAgentEnvironment(
+            ["ANTHROPIC_API_KEY": "test-anthropic-key"],
+            configurationJSON: """
+            {
+              "aiProviders": {
+                "providers": "openai/gpt-5.6,anthropic/claude-opus-5"
+              },
+              "agent": {
+                "defaultModel": "claude-opus-4-8"
+              }
+            }
+            """) {
+                let services = self.makeServices()
+                let agentService = try #require(services.agent as? PeekabooAgentService)
+
+                #expect(agentService.defaultModel == LanguageModel.anthropic(.opus48).description)
+            }
+    }
+
+    @Test
+    @MainActor
+    func `Saved current provider generation preserves available model order`() throws {
+        try self.withIsolatedAgentEnvironment([
+            "OPENAI_API_KEY": "test-openai-key",
+            "ANTHROPIC_API_KEY": "test-anthropic-key",
+        ], configurationJSON: """
+        {
+          "aiProviders": {
+            "providers": "openai/gpt-5.6,anthropic/claude-opus-5"
+          }
+        }
+        """) {
+            let services = self.makeServices()
+            let agentService = try #require(services.agent as? PeekabooAgentService)
+
+            #expect(agentService.defaultModel == LanguageModel.openai(.gpt56Sol).description)
         }
     }
 
@@ -1613,7 +1653,7 @@ extension PeekabooAgentServiceTests {
                 let services = self.makeServices()
                 let agentService = try #require(services.agent as? PeekabooAgentService)
 
-                #expect(agentService.defaultModel == LanguageModel.openai(.gpt55).description)
+                #expect(agentService.defaultModel == LanguageModel.openai(.gpt56Sol).description)
             }
     }
 

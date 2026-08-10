@@ -21,6 +21,7 @@ extension PeekabooServices {
         let environmentProviders = EnvironmentVariables.value(for: "PEEKABOO_AI_PROVIDERS")?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let hasEnvironmentProviders = environmentProviders?.isEmpty == false
+        let hasConfiguredProviderList = self.configuration.hasConfiguredAIProviderList()
         let configuredCustomDefaultResolution: ConfiguredCustomDefaultResolution = if hasEnvironmentProviders {
             .none
         } else {
@@ -92,9 +93,8 @@ extension PeekabooServices {
                     providers,
                     configuredDefault: configuredDefault,
                     isEnvironmentProvided: hasEnvironmentProviders,
-                    hasConfiguredProviderList: agentConfig?.aiProviders?.providers?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .isEmpty == false),
+                    hasConfiguredProviderList: hasConfiguredProviderList),
+                hasConfiguredProviderList: hasConfiguredProviderList,
                 isEnvironmentProvided: hasEnvironmentProviders)
 
             let determination = self.determineDefaultModelWithConflict(sources)
@@ -198,7 +198,7 @@ extension PeekabooServices {
         if let configuredModel = PeekabooAIService(configuration: configuration).resolveConfiguredModel(modelString) {
             return configuredModel
         }
-        return LanguageModel.parse(from: modelString) ?? .openai(.gpt55)
+        return LanguageModel.parse(from: modelString) ?? .openai(.gpt56Sol)
     }
 
     private static func logModelConflict(_ determination: ModelDetermination, logger: SystemLogger) {
@@ -209,7 +209,11 @@ extension PeekabooServices {
     }
 
     private func determineDefaultModelWithConflict(_ sources: ModelSources) -> ModelDetermination {
-        let providerListModel = self.firstAvailableModel(in: sources)
+        let providerListModel: String? = if sources.isEnvironmentProvided || sources.hasConfiguredProviderList {
+            self.firstAvailableModel(in: sources)
+        } else {
+            nil
+        }
         let environmentModel = sources.isEnvironmentProvided ? providerListModel : nil
 
         let hasConflict = sources.isEnvironmentProvided
@@ -240,7 +244,7 @@ extension PeekabooServices {
             model = "claude-opus-4-8"
             resolvedModel = nil
         } else if sources.hasOpenAI {
-            model = "gpt-5.5"
+            model = "gpt-5.6"
             resolvedModel = nil
         } else if sources.hasGemini {
             model = "gemini-3.5-flash"
@@ -270,7 +274,7 @@ extension PeekabooServices {
             model = customDefaultModel.description
             resolvedModel = customDefaultModel
         } else {
-            model = "gpt-5.5"
+            model = "gpt-5.6"
             resolvedModel = nil
         }
 
@@ -507,6 +511,7 @@ private struct ModelSources {
     let configuredDefault: String?
     let aiService: PeekabooAIService
     let isProviderListExplicit: Bool
+    let hasConfiguredProviderList: Bool
     let isEnvironmentProvided: Bool
 }
 
