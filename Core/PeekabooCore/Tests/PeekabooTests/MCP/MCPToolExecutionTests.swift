@@ -736,10 +736,10 @@ struct MCPElementActionToolExecutionTests {
     }
 
     @Test
-    func `perform_action tool validates request shape`() async throws {
+    func `action tool validates request shape`() async throws {
         let automation = await MainActor.run { MockElementActionAutomationService(accessibilityGranted: true) }
         let context = await MCPToolTestHelpers.makeContext(automation: automation)
-        let tool = PerformActionTool(context: context)
+        let tool = ActionTool(context: context)
         let snapshot = await UISnapshotManager.shared.createSnapshot()
         let snapshotId = await snapshot.id
 
@@ -1497,6 +1497,28 @@ struct MCPToolErrorHandlingTests {
             #expect(milliseconds == 0)
         } else {
             Issue.record("Expected linear cadence, got \(cadence)")
+        }
+    }
+
+    @Test
+    func `Type tool describes clear-only requests without claiming it typed`() async throws {
+        let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
+
+        try await MCPToolTestHelpers.withContext(automation: automation) {
+            let response = try await TypeTool().execute(arguments: ToolArguments(raw: [
+                "clear": true,
+                "foreground": true,
+            ]))
+
+            #expect(response.isError == false)
+            guard case let .object(meta) = response.meta,
+                  case let .object(summary)? = meta["summary"],
+                  case let .string(action)? = summary["action"]
+            else {
+                Issue.record("Expected type response summary action")
+                return
+            }
+            #expect(action == "Clear Field")
         }
     }
 
