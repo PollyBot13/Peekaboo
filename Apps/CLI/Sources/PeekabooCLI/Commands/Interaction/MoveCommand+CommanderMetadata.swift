@@ -14,11 +14,9 @@ extension MoveCommand: ParsableCommand {
                     on UI elements detected by 'see'. Supports instant and smooth movement.
 
                     EXAMPLES:
-                      peekaboo move 100,200 --foreground
-                      peekaboo move --to "Submit Button" --foreground
+                      peekaboo move --at 100,200 --foreground
                       peekaboo move --on "$ELEMENT_ID" --foreground
-                      peekaboo move 500,300 --smooth --foreground
-                      peekaboo move --center --foreground
+                      peekaboo move --at 500,300 --smooth --foreground
 
                     MOVEMENT MODES:
                       - Instant (default): Immediate cursor positioning
@@ -44,14 +42,11 @@ extension MoveCommand: AsyncRuntimeCommand {}
 @MainActor
 extension MoveCommand: CommanderBindableCommand {
     mutating func applyCommanderValues(_ values: CommanderBindableValues) throws {
-        self.coordinates = try values.decodeOptionalPositional(0, label: "coordinates")
-        self.coords = values.singleOption("coords")
-        self.to = values.singleOption("to")
+        self.at = values.singleOption("at")
         self.on = values.singleOption("on")
         self.target = try values.makeInteractionTargetOptions()
-        self.center = values.flag("center")
         self.smooth = values.flag("smooth")
-        if let duration: Int = try values.decodeOption("duration", as: Int.self) {
+        if let duration: CLIDuration = try values.decodeOption("duration", as: CLIDuration.self) {
             self.duration = duration
         }
         if let steps: Int = try values.decodeOption("steps", as: Int.self) {
@@ -59,7 +54,7 @@ extension MoveCommand: CommanderBindableCommand {
         }
         self.snapshot = values.singleOption("snapshot")
         self.profile = values.singleOption("profile")
-        self.foreground = values.flag("foreground")
+        self.global = values.flag("global")
         self.focusOptions = try values.makeFocusOptions()
     }
 }
@@ -67,32 +62,21 @@ extension MoveCommand: CommanderBindableCommand {
 extension MoveCommand: CommanderSignatureProviding {
     static func commanderSignature() -> CommandSignature {
         CommandSignature(
-            arguments: [
-                .make(
-                    label: "coordinates",
-                    help: "Coordinates as x,y",
-                    isOptional: true
-                ),
-            ],
             options: [
                 .commandOption(
-                    "coords",
-                    help: "Coordinates as x,y (alias for positional argument)",
-                    long: "coords"
-                ),
-                .commandOption(
-                    "to",
-                    help: "Move to element by text/label",
-                    long: "to"
+                    "at",
+                    help: "x,y — target-relative when --app/--window-* given; global otherwise " +
+                        "(use --global for explicit global)",
+                    long: "at"
                 ),
                 .commandOption(
                     "on",
-                    help: "Opaque element ID copied from current see or inspect-ui output",
+                    help: "Opaque element ID copied from current see output",
                     long: "on"
                 ),
                 .commandOption(
                     "duration",
-                    help: "Movement duration in milliseconds",
+                    help: "Movement duration; bare values are milliseconds, or use ms/s suffixes",
                     long: "duration"
                 ),
                 .commandOption(
@@ -113,24 +97,15 @@ extension MoveCommand: CommanderSignatureProviding {
             ],
             flags: [
                 .commandFlag(
-                    "center",
-                    help: "Move to screen center",
-                    long: "center"
-                ),
-                .commandFlag(
                     "smooth",
                     help: "Use natural smooth movement",
                     long: "smooth"
                 ),
-                .commandFlag(
-                    "foreground",
-                    help: "Confirm foreground cursor movement and focus the target when specified",
-                    long: "foreground"
-                ),
+                .commandFlag("global", help: "Treat --at as global screen coordinates", long: "global"),
             ],
             optionGroups: [
                 InteractionTargetOptions.commanderSignature(),
-                FocusCommandOptions.commanderSignature(includeAutoFocusControl: false),
+                FocusCommandOptions.commanderSignature(),
             ]
         )
     }

@@ -8,32 +8,25 @@ import PeekabooFoundation
 @available(macOS 14.0, *)
 @MainActor
 struct MoveCommand: ErrorHandlingCommand, OutputFormattable, InjectedRuntimeBackedCommand {
-    @Argument(help: "Coordinates as x,y (e.g., 100,200)")
-    var coordinates: String?
+    @Option(
+        help: "x,y — target-relative when --app/--window-* given; global otherwise (use --global for explicit global)"
+    )
+    var at: String?
 
-    @Option(name: .customLong("coords"), help: "Coordinates as x,y (alias for the positional argument)")
-    var coords: String?
-
-    @Option(help: "Move to element by text/label")
-    var to: String?
-
-    @Option(help: "Opaque element ID copied from current see or inspect-ui output")
+    @Option(help: "Opaque element ID copied from current see output")
     var on: String?
 
     @OptionGroup var target: InteractionTargetOptions
     @OptionGroup var focusOptions: FocusCommandOptions
 
-    @Flag(help: "Confirm foreground cursor movement and focus the target when specified")
-    var foreground = false
-
-    @Flag(help: "Move to screen center")
-    var center = false
+    @Flag(help: "Treat --at as global screen coordinates even when target options are supplied")
+    var global = false
 
     @Flag(help: "Use natural smooth movement (equivalent to --profile human)")
     var smooth = false
 
-    @Option(help: "Movement duration in milliseconds (enables natural movement when no profile is given)")
-    var duration: Int?
+    @Option(help: "Movement duration (bare values are milliseconds; enables natural movement)")
+    var duration: CLIDuration?
 
     @Option(help: "Number of movement samples (automatic for human, default: 20 for linear)")
     var steps: Int?
@@ -45,37 +38,28 @@ struct MoveCommand: ErrorHandlingCommand, OutputFormattable, InjectedRuntimeBack
     var snapshot: String?
     @RuntimeStorage var runtime: CommandRuntime?
 
-    private var resolvedCoordinates: String? {
-        self.coordinates ?? self.coords
-    }
-
     mutating func validate() throws {
         try self.target.validate()
-        if self.coordinates != nil, self.coords != nil {
-            throw ValidationError("Provide coordinates either positionally or with --coords, not both")
-        }
-        guard self.foreground else {
+        guard self.focusOptions.foreground else {
             throw ValidationError(
                 "move changes the physical cursor and requires explicit --foreground consent."
             )
         }
         let targetCount = [
-            self.center ? 1 : 0,
-            self.resolvedCoordinates == nil ? 0 : 1,
-            self.to == nil ? 0 : 1,
+            self.at == nil ? 0 : 1,
             self.on == nil ? 0 : 1,
         ].reduce(0, +)
 
         guard targetCount >= 1 else {
-            throw ValidationError("Specify coordinates, --coords, --to, --on, or --center")
+            throw ValidationError("Specify --at or --on")
         }
 
         guard targetCount == 1 else {
-            throw ValidationError("Specify exactly one target: coordinates, --coords, --to, --on, or --center")
+            throw ValidationError("Specify exactly one target: --at or --on")
         }
 
         // Validate coordinates format if provided
-        if let coordString = self.resolvedCoordinates {
+        if let coordString = self.at {
             let parts = coordString.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             guard parts.count == 2,
                   Double(parts[0]) != nil,
@@ -89,9 +73,6 @@ struct MoveCommand: ErrorHandlingCommand, OutputFormattable, InjectedRuntimeBack
             throw ValidationError("Invalid profile '\(profileName)'. Use 'linear' or 'human'.")
         }
 
-        if let duration, duration < 0 {
-            throw ValidationError("--duration must be zero or greater")
-        }
         if let steps, steps < 1 {
             throw ValidationError("--steps must be at least 1")
         }
@@ -167,29 +148,19 @@ struct MoveCommand: ErrorHandlingCommand, OutputFormattable, InjectedRuntimeBack
     }
 
     private func resolveTarget() async throws -> MoveTargetResolution {
-        if self.center {
-            try await self.focusForCoordinateTarget()
-            guard let mainScreen = self.services.screens.primaryScreen else {
-                throw ValidationError("No main screen found")
-            }
-            let screenFrame = mainScreen.frame
-            let location = CGPoint(x: screenFrame.midX, y: screenFrame.midY)
-            return MoveTargetResolution(
-                location: location,
-                description: "Screen center",
-                diagnostics: InteractionTargetPointResolver.coordinate(
-                    location,
-                    source: .screenCenter
-                ).diagnostics
-            )
-        }
-
-        if let coordString = self.resolvedCoordinates {
+        if let coordString = self.at {
             try await self.focusForCoordinateTarget()
             let parts = coordString.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             let x = Double(parts[0])!
             let y = Double(parts[1])!
-            let location = CGPoint(x: x, y: y)
+            let inputPoint = CGPoint(x: x, y: y)
+            let resolution = try await InteractionCoordinateResolver.resolveClickCoordinates(
+                inputPoint,
+                target: self.target,
+                services: self.services,
+                forceGlobal: self.global
+            )
+            let location = resolution.screenPoint
             return MoveTargetResolution(
                 location: location,
                 description: "Coordinates (\(Int(x)), \(Int(y)))",
@@ -204,11 +175,7 @@ struct MoveCommand: ErrorHandlingCommand, OutputFormattable, InjectedRuntimeBack
             return try await self.resolveElementTarget(elementId: elementId)
         }
 
-        if let query = to {
-            return try await self.resolveQueryTarget(query: query)
-        }
-
-        throw ValidationError("Specify coordinates, --coords, --to, --on, or --center")
+        throw ValidationError("Specify --at or --on")
     }
 
     private func focusForCoordinateTarget() async throws {
@@ -254,57 +221,6 @@ struct MoveCommand: ErrorHandlingCommand, OutputFormattable, InjectedRuntimeBack
             element: element,
             elementId: elementId,
             snapshotId: observation.snapshotId,
-            snapshots: self.services.snapshots
-        )
-        return MoveTargetResolution(
-            location: resolution.point,
-            description: self.formatElementInfo(element),
-            diagnostics: resolution.diagnostics
-        )
-    }
-
-    private func resolveQueryTarget(query: String) async throws -> MoveTargetResolution {
-        var observation = await InteractionObservationContext.resolve(
-            explicitSnapshot: self.snapshot,
-            fallbackToLatest: true,
-            snapshots: self.services.snapshots
-        )
-        observation = try await InteractionObservationRefresher.refreshForMissingQueryIfNeeded(
-            observation,
-            query: query,
-            target: self.target,
-            services: self.services,
-            logger: self.logger,
-            beforeRefresh: { startedAt in
-                self.resolvedRuntime.beginInteractionMutation(at: startedAt)
-            }
-        )
-        let activeSnapshotId = try observation.requireSnapshot()
-        self.resolvedRuntime.beginInteractionMutation()
-        try await ensureFocused(
-            snapshotId: observation.focusSnapshotId(for: self.target),
-            target: self.target,
-            options: self.focusOptions,
-            services: self.services
-        )
-
-        try await observation.validateIfExplicit(using: self.services.snapshots)
-
-        let waitResult = try await AutomationServiceBridge.waitForElement(
-            automation: self.services.automation,
-            target: .query(query),
-            timeout: 5.0,
-            snapshotId: activeSnapshotId
-        )
-
-        guard waitResult.found, let element = waitResult.element else {
-            throw PeekabooError.elementNotFound("No element found matching '\(query)'")
-        }
-
-        let resolution = try await InteractionTargetPointResolver.elementCenterResolution(
-            element: element,
-            elementId: element.id,
-            snapshotId: activeSnapshotId,
             snapshots: self.services.snapshots
         )
         return MoveTargetResolution(
