@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Add actionable text and JSON migration hints for removed v4 commands and flags, reject ambiguous press input shapes, and align `see`/`type`/`press` help with the accepted grammar.
 - Stop cancelled on-demand daemon idle timers from rescheduling one another, preventing runaway CPU and memory use after repeated Bridge activity.
+- Return exact window-sized pixels from automatic and modern ScreenCaptureKit capture instead of accepting a display-sized transparent canvas, and avoid SDK continuation-leak diagnostics when a quarantined screenshot callback never arrives.
 - Reject conflicting app/PID and window selectors across interaction CLI and MCP entry points before focus, observation, or mutation.
 - Require explicit `--foreground` for long-press clicks so the shared physical cursor cannot be used through an implicit delivery-mode promotion.
 - Pin background `press` sequences to one process generation, stop before a recycled PID can receive later chords, and report partial delivery as retry-unsafe.
