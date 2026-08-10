@@ -123,7 +123,7 @@ The following subsections spell out the concrete steps, required Playground surf
 #### `image`
 - **View**: Keep Playground on ScrollTestingView to capture dynamic content.
 - **Steps**:
-  1. `peekaboo image window --app Playground --output "$LOG_ROOT/image-playground.png"`.
+  1. `peekaboo see --app Playground --path "$LOG_ROOT/image-playground.png"`.
   2. Repeat with `--screen main --bounds 100,100,800,600` to cover coordinate cropping.
 - **2025-11-16 verification**: After restoring the ScreenCaptureKit → CGWindowList fallback order, both window and screen captures succeed. Saved `.artifacts/playground-tools/20251116-082109-image-window-playground.{json,png}` and `.artifacts/playground-tools/20251116-082125-image-screen0.{json,png}`; CLI debug logs still note tiny background windows but the primary Playground window captures at 1200×852.
 
@@ -275,18 +275,18 @@ The following subsections spell out the concrete steps, required Playground surf
 #### `hotkey`
 - **View**: KeyboardView hotkey demo or main window (use `cmd+shift+l` to open log viewer).
 - **Test cases**:
-  1. `peekaboo hotkey cmd,shift,l` should toggle the “Clear All Logs” command (log viewer clears entries).
-  2. `peekaboo hotkey cmd,1` to trigger Test Menu action; watch `Menu` logs.
+  1. `peekaboo press cmd+shift+l --foreground` should toggle the “Clear All Logs” command (log viewer clears entries).
+  2. `peekaboo press cmd+1 --foreground` to trigger Test Menu action; watch `Menu` logs.
   3. Negative test: provide invalid chord order to ensure validation message.
 - **Verification**: Playground `Keyboard` log file shows the keystrokes fired.
 - **2025-11-16 run**:
   - Logs stored at `.artifacts/playground-tools/20251116-051654-keyboard-hotkey.log` (contains entries for `L` and `1` corresponding to the combos).
-  - `peekaboo hotkey --keys "cmd,shift,l" --snapshot 11227301-05DE-4540-8BE7-617F99A74156` (clears logs via shortcut).
-  - `peekaboo hotkey --keys "cmd,1" --snapshot …` switches Playground tabs.
-  - `peekaboo hotkey --keys "foo,bar"` correctly fails with `Unknown key: 'foo'`.
+  - `peekaboo press cmd+shift+l --snapshot 11227301-05DE-4540-8BE7-617F99A74156` (clears logs via shortcut).
+  - `peekaboo press cmd+1 --snapshot …` switches Playground tabs.
+  - `peekaboo press foo+bar --foreground` correctly fails with an unknown-key error.
 
 #### `scroll`
-- **View**: ScrollTestingView vertical/horizontal sections (switch using `peekaboo hotkey --keys "cmd,option,4"` to trigger the new Test Menu shortcut).
+- **View**: ScrollTestingView vertical/horizontal sections (switch using `peekaboo press cmd+option+4 --foreground` to trigger the new Test Menu shortcut).
 - **Test cases**:
   1. `peekaboo scroll --direction down --amount 6 --snapshot <id>` for vertical movement.
   2. `peekaboo scroll --direction right --amount 4 --smooth --snapshot <id>` for horizontal smooth scrolling.
@@ -309,7 +309,7 @@ The following subsections spell out the concrete steps, required Playground surf
 - **Test cases**:
   1. `peekaboo drag --from 1100,520 --to 700,520 --duration 600ms --foreground`.
   2. `peekaboo drag --from 850,600 --to 850,350 --duration 800ms --profile human --foreground`.
-  3. Negative test: `peekaboo swipe … --right-button` should error.
+  3. Negative test: `peekaboo drag --from 100,100 --to 200,200 --button middle --foreground` should error.
 - **2025-11-16 verification**:
   - Used snapshot `DBFDD053-4513-4603-B7C3-9170E7386BA7` (see `.artifacts/playground-tools/20251116-085714-see-scrolltab.{json,png}`) to keep the tab selection stable.
   - Horizontal and vertical commands above completed successfully; Playground log `.artifacts/playground-tools/20251116-090041-gesture.log` shows `[boo.peekaboo.playground:Gesture]` entries with exact coordinates, profiles, and step counts.

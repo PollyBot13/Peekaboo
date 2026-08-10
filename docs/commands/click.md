@@ -77,7 +77,7 @@ peekaboo click --window-id 59620 --at 420,180 --foreground --input-strategy synt
 
 ## Troubleshooting
 - Verify Screen Recording + Accessibility permissions (`peekaboo permissions status`).
-- Confirm your target (app/window/selector) with `peekaboo list`/`peekaboo see` before rerunning.
+- Confirm your target with `peekaboo app list`, `peekaboo window list`, or `peekaboo see` before rerunning.
 - If you see `SNAPSHOT_NOT_FOUND`, regenerate the snapshot with `peekaboo see` (or omit `--snapshot` to use the most recent one). Cleaned/expired snapshots cannot be reused.
 - Re-run with `--json` or `--verbose` to surface detailed errors.
 - Chromium browsers can expose menus plus generic web-area/layout containers while omitting actionable web-content descendants from `see --annotate`. This is a browser accessibility limitation, not proof that the page is empty. Use `screen list` and `window list` to map the intended display/window, then use `--foreground --input-strategy synthOnly` with window-relative coordinates. For already-focused browser automation, targetless `--global` is also valid.

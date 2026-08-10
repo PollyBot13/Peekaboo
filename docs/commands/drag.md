@@ -49,6 +49,6 @@ peekaboo drag --from row_1 --to row_5 --modifiers shift --foreground
 
 ## Troubleshooting
 - Verify Event Synthesizing permission (`peekaboo permissions status`).
-- Confirm your target (app/window/selector) with `peekaboo list`/`peekaboo see` before rerunning.
+- Confirm your target with `peekaboo app list`, `peekaboo window list`, or `peekaboo see` before rerunning.
 - If you see `SNAPSHOT_NOT_FOUND`, regenerate the snapshot with `peekaboo see` (or omit `--snapshot` to use the most recent one).
 - Re-run with `--json` or `--verbose` to surface detailed errors.

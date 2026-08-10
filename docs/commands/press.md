@@ -31,7 +31,7 @@ read_when:
 - Window selectors are rejected in background mode because process-targeted events cannot prove which window owns the process's focused element.
 - Repetition multiplies the sequence client-side—e.g., `press tab return --count 3` becomes six actions—so you get predictable ordering.
 - Results include the literal key list, total presses, repeat count, delivery mode, optional target PID, and elapsed time in both text and JSON modes.
-- The `--hold` flag is passed to the hotkey service for each key press.
+- The `--hold` flag controls how long each chord's keys remain down.
 
 ## Examples
 ```bash
@@ -53,6 +53,6 @@ peekaboo press cmd+shift+t --app Safari
 
 ## Troubleshooting
 - Verify Screen Recording + Accessibility permissions (`peekaboo permissions status`). Background key presses also require Event Synthesizing access for the sending process; request it with `peekaboo permissions request event-synthesizing`.
-- Confirm your target (app/window/selector) with `peekaboo list`/`peekaboo see` before rerunning.
+- Confirm your target with `peekaboo app list`, `peekaboo window list`, or `peekaboo see` before rerunning.
 - If you see `SNAPSHOT_NOT_FOUND`, regenerate the snapshot with `peekaboo see`.
 - Re-run with `--json` or `--verbose` to surface detailed errors.

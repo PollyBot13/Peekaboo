@@ -44,5 +44,5 @@ peekaboo move --on menu_gear --smooth --foreground
 
 ## Troubleshooting
 - Verify Event Synthesizing permission (`peekaboo permissions status`).
-- Confirm your target (app/window/selector) with `peekaboo list`/`peekaboo see` before rerunning.
+- Confirm your target with `peekaboo app list`, `peekaboo window list`, or `peekaboo see` before rerunning.
 - Re-run with `--json` or `--verbose` to surface detailed errors.
