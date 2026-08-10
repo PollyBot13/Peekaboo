@@ -16,6 +16,14 @@ enum VisualizerTargetWindowResolver {
             .first { $0.processIdentifier == application.processIdentifier }
     }
 
+    /// Frontmost ordinary window belonging to `pid`. `onScreenWindows()` is
+    /// front-to-back, so the first match is the app's frontmost window — the
+    /// same rule the renderer's visibility evaluator enforces.
+    @MainActor
+    static func frontmostWindow(ofProcess pid: pid_t) -> VisualizerTargetWindow? {
+        self.onScreenWindows().first { $0.processIdentifier == pid }
+    }
+
     static func target(from context: WindowContext?) -> VisualizerTargetWindow? {
         guard let context,
               let processIdentifier = context.applicationProcessId,
@@ -73,5 +81,34 @@ extension UIAutomationService {
             return target
         }
         return VisualizerTargetWindowResolver.frontmostWindow()
+    }
+
+    /// Anchor for input feedback. Untargeted input follows the frontmost
+    /// window; process-targeted input anchors to the target's own window
+    /// (snapshot context first, else the pid's frontmost window) so the
+    /// renderer's visibility evaluator can decide whether it may render.
+    /// A targeted operation with no resolvable anchor shows nothing.
+    func inputFeedbackAnchor(
+        snapshotId: String?,
+        targetProcessIdentifier: pid_t?,
+        resolved visualizerTarget: VisualizerTargetWindow? = nil) async -> VisualizerTargetWindow?
+    {
+        guard let pid = targetProcessIdentifier else {
+            if let visualizerTarget {
+                return visualizerTarget
+            }
+            return await self.visualizerTargetWindow(snapshotId: snapshotId)
+        }
+        if let visualizerTarget, visualizerTarget.processIdentifier == pid {
+            return visualizerTarget
+        }
+        if let snapshotId,
+           let result = try? await self.snapshotManager.getDetectionResult(snapshotId: snapshotId),
+           let target = VisualizerTargetWindowResolver.target(from: result.metadata.windowContext),
+           target.processIdentifier == pid
+        {
+            return target
+        }
+        return await VisualizerTargetWindowResolver.frontmostWindow(ofProcess: pid)
     }
 }

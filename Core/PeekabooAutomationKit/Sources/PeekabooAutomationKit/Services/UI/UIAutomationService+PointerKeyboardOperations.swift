@@ -154,18 +154,23 @@ extension UIAutomationService {
         }
     }
 
-    /// PID-routed hotkeys are background operations and never emit foreground feedback.
+    /// PID-routed hotkeys anchor to the target's own window; the renderer only
+    /// renders when that window is visibly frontmost. No anchor, no HUD.
     func visualizeHotkey(
         keys: String,
         targetProcessIdentifier: pid_t?,
         visualizerTarget: VisualizerTargetWindow? = nil) async
     {
-        guard targetProcessIdentifier == nil else { return }
+        guard let anchor = await self.inputFeedbackAnchor(
+            snapshotId: nil,
+            targetProcessIdentifier: targetProcessIdentifier,
+            resolved: visualizerTarget)
+        else { return }
         let keyArray = keys.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
         _ = await self.feedbackClient.showHotkeyDisplay(
             keys: keyArray,
             duration: 1.0,
-            target: visualizerTarget ?? VisualizerTargetWindowResolver.frontmostWindow())
+            target: anchor)
     }
 
     // MARK: - Gesture Operations

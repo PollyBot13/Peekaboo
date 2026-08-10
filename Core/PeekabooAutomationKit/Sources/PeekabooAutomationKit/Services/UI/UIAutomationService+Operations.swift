@@ -232,8 +232,9 @@ extension UIAutomationService {
         }
     }
 
-    /// Background delivery must remain invisible to the foreground user. Visualizer windows are
-    /// desktop-global, so only untargeted/foreground clicks may emit click feedback.
+    /// Click feedback anchors to the click's target window; the renderer only renders
+    /// when that window is visibly frontmost, so background delivery stays invisible
+    /// without suppressing feedback for the app the user is actually watching.
     func visualizeClick(
         target: ClickTarget,
         actionAnchor: CGPoint?,
@@ -241,13 +242,20 @@ extension UIAutomationService {
         snapshotId: String?,
         targetProcessIdentifier: pid_t?) async throws
     {
-        guard targetProcessIdentifier == nil else { return }
+        let anchor = await self.inputFeedbackAnchor(
+            snapshotId: snapshotId,
+            targetProcessIdentifier: targetProcessIdentifier)
+        // Targeted clicks with no resolvable target window show nothing; the
+        // renderer additionally suppresses anchors that are not visibly frontmost.
+        if targetProcessIdentifier != nil, anchor == nil {
+            return
+        }
         let fallbackPoint = try await self.getClickPoint(for: target, snapshotId: snapshotId)
         if let clickPoint = Self.visualFeedbackPoint(actionAnchor: actionAnchor, fallbackPoint: fallbackPoint) {
             _ = await self.feedbackClient.showClickFeedback(
                 at: clickPoint,
                 type: clickType,
-                target: self.visualizerTargetWindow(snapshotId: snapshotId))
+                target: anchor)
         }
     }
 
