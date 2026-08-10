@@ -34,7 +34,8 @@ extension AgentCommand {
         } catch {
             try self.failAgentCommand(
                 message: AgentMessages.Audio.processingError(error),
-                code: .AGENT_ERROR)
+                code: .AGENT_ERROR
+            )
         }
     }
 

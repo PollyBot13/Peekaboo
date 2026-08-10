@@ -10,8 +10,8 @@ import TauTUI
 @available(macOS 14.0, *)
 extension AgentCommand {
     func requireAgentCredentials(
-        selectedModel: LanguageModel) throws
-    {
+        selectedModel: LanguageModel
+    ) throws {
         if self.isLocalModel(selectedModel) {
             return
         }
@@ -24,7 +24,8 @@ extension AgentCommand {
         let envVar = self.providerEnvironmentVariable(for: selectedModel)
         try self.failAgentCommand(
             message: "Missing API key for \(providerName). Set \(envVar) and retry.",
-            code: .MISSING_API_KEY)
+            code: .MISSING_API_KEY
+        )
     }
 
     /// Render the agent execution result using either JSON output or a rich CLI transcript.
@@ -150,8 +151,8 @@ extension AgentCommand {
         maxSteps: Int,
         queueMode: QueueMode,
         preserveStepLimitError: Bool = false,
-        wrapReportedFailure: Bool = false) async throws -> AgentExecutionResult
-    {
+        wrapReportedFailure: Bool = false
+    ) async throws -> AgentExecutionResult {
         let outputDelegate = self.makeDisplayDelegate(for: task)
         let streamingDelegate = self.makeStreamingDelegate(using: outputDelegate)
         do {
@@ -164,7 +165,8 @@ extension AgentCommand {
                 queueMode: queueMode,
                 eventDelegate: streamingDelegate,
                 verbose: self.verbose,
-                persistSession: !self.noCache)
+                persistSession: !self.noCache
+            )
             self.displayResult(result, delegate: outputDelegate)
             let duration = String(format: "%.2f", result.metadata.executionTime)
             let sessionId = result.sessionId ?? "none"
@@ -174,7 +176,8 @@ extension AgentCommand {
                 .agent,
                 "result status=\(status) task='\(task)' model=\(result.metadata.modelName) duration=\(duration)s "
                     + "tools=\(result.metadata.toolCallCount) dry_run=\(self.dryRun) "
-                    + "session=\(sessionId) tokens=\(finalTokens)")
+                    + "session=\(sessionId) tokens=\(finalTokens)"
+            )
             return result
         } catch let error as PeekabooAgentService.AgentStepLimitExceededError where preserveStepLimitError {
             if outputDelegate?.hasReceivedError != true {
