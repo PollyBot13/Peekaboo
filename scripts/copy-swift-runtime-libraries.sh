@@ -9,6 +9,11 @@ fi
 EXECUTABLE_PATH="$1"
 DESTINATION_DIR="$2"
 SIGN_IDENTITY="${MAC_RELEASE_CODESIGN_IDENTITY:-${SIGN_IDENTITY:-}}"
+# An ambient SIGN_IDENTITY from the operator's login shell is a legitimate
+# interface, but it must never substitute for a release identity unnoticed.
+if [ -z "${MAC_RELEASE_CODESIGN_IDENTITY:-}" ] && [ -n "${SIGN_IDENTITY:-}" ]; then
+    echo "copy-swift-runtime-libraries: using inherited SIGN_IDENTITY '$SIGN_IDENTITY'" >&2
+fi
 CODESIGN_BIN="${MAC_RELEASE_CODESIGN_BIN:-codesign}"
 CODESIGN_TIMESTAMP="${CODESIGN_TIMESTAMP:-auto}"
 CODESIGN_KEYCHAIN="${MAC_RELEASE_CODESIGN_KEYCHAIN:-${CODESIGN_KEYCHAIN:-}}"

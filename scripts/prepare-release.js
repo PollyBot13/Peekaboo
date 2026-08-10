@@ -15,7 +15,9 @@ import { readFileSync, existsSync } from 'fs';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import {
+  MIGRATION_ADVISOR_PATH,
   REMOVED_ROOT_COMMANDS,
+  parseRemovedRootReplacements,
   validateChangelogContract,
   validateSourceDocumentationContracts,
   validateVersionConsistency
@@ -418,16 +420,32 @@ function checkSwiftCLIIntegration(binaryPath) {
     return false;
   }
 
-  // Removed roots must fail and name their v4 replacement, even when a trailing
-  // --help would otherwise short-circuit into help output.
+  // Removed roots must fail and name their exact v4 replacement, even when a
+  // trailing --help would otherwise short-circuit into help output. Matching only
+  // the hint prefix would pass on an empty or wrong replacement.
+  let removedReplacements;
+  try {
+    removedReplacements = parseRemovedRootReplacements(
+      readFileSync(join(projectRoot, MIGRATION_ADVISOR_PATH), 'utf8')
+    );
+  } catch (error) {
+    logError(`Could not read removed-command replacements: ${error.message}`);
+    return false;
+  }
   for (const command of REMOVED_ROOT_COMMANDS) {
+    const replacement = removedReplacements.get(command);
+    if (!replacement) {
+      logError(`No advisor replacement declared for removed command: peekaboo ${command}`);
+      return false;
+    }
     const result = run([command, '--help']);
     if (result.status === 0) {
       logError(`Removed command unexpectedly resolved: peekaboo ${command}`);
       return false;
     }
-    if (!combinedOutput(result).includes(`Command 'peekaboo ${command}' was removed in v4. Use '`)) {
-      logError(`Removed command lacks its v4 migration hint: peekaboo ${command}`);
+    const expected = `Command 'peekaboo ${command}' was removed in v4. Use '${replacement}'.`;
+    if (!combinedOutput(result).includes(expected)) {
+      logError(`Removed command lacks its exact v4 migration hint: peekaboo ${command}`);
       return false;
     }
   }

@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.0.1] - Unreleased
+
+### Fixed
+- Pin the OpenClaw Foundation identity for the release preflight so a bare `SIGN_IDENTITY`
+  exported by the operator's login shell can no longer substitute for the release certificate,
+  and surface any inherited identity instead of signing with it silently.
+- Assert the exact v4 replacement text for every removed root command in the release preflight,
+  derived from `CommanderMigrationAdvisor` so the gate cannot drift from the binary.
+
 ## [4.0.0] - 2026-08-10
 
 Peekaboo 4 is a ground-up cleanup of the command surface: fewer commands, one spelling

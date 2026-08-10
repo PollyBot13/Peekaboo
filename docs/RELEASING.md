@@ -11,6 +11,22 @@ OpenClaw Foundation Developer ID signed/notarized `Peekaboo.app`, standalone and
 
 Every shipped macOS code object uses `Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)`. Peekaboo 3.8 and later bridge hosts continue accepting both the Foundation team and transition-era personal-team clients so staged upgrades remain possible; Foundation-signed 3.9.6+ CLIs do not authenticate to pre-3.8 GUI bridge hosts. The release driver signs through the shared managed passwordless Foundation keychain, notarizes the standalone CLI as well as the app and DMG, and verifies exact authority, Team ID, Developer ID requirement, and online notarization for extracted archive payloads.
 
+### Signing environment
+
+Run the release from a shell inside the logged-in GUI session. A `tmux` server bootstrapped outside that session
+cannot reach codesign private keys, and every signing step fails with `errSecInternalComponent` even though
+`security find-identity` lists the identity. Confirm with a scratch `codesign --sign "$MAC_RELEASE_CODESIGN_IDENTITY"`
+before blaming the keychain.
+
+The Foundation release keychain is passwordless and must never auto-lock. If it has locked, repair it with
+`security unlock-keychain -p "" <keychain>` and `security set-keychain-settings <keychain>`; a locked keychain
+produces the same `errSecInternalComponent`. Do not export a bare `SIGN_IDENTITY` in a shell used for releases —
+it is a fallback for the build scripts and will substitute for the Foundation identity wherever
+`MAC_RELEASE_CODESIGN_IDENTITY` is not explicitly set.
+
+Notarization uses the `openclaw-release` keychain profile. On a Mac that lacks it, create it from the same App
+Store Connect key with `xcrun notarytool store-credentials`.
+
 ## 1. Prepare
 
 - Confirm `main` is clean, current, and all submodules are at the intended commits.

@@ -418,7 +418,12 @@ if [ "$SKIP_CHECKS" = false ]; then
     else
         PREP_ENV=""
     fi
-    if ! env $PREP_ENV node scripts/prepare-release.js; then
+    # Pin the release identity for the precheck too. Without it, the signing
+    # steps it exercises fall back to a bare SIGN_IDENTITY inherited from the
+    # operator's login shell, which silently signs with the wrong certificate.
+    if ! env $PREP_ENV \
+        MAC_RELEASE_CODESIGN_IDENTITY="$CLI_SIGN_IDENTITY" \
+        node scripts/prepare-release.js; then
         echo -e "${RED}❌ Pre-release checks failed!${NC}"
         exit 1
     fi

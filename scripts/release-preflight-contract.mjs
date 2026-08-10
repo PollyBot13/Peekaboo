@@ -3,6 +3,9 @@ import { basename, join } from 'node:path';
 
 export const EXPECTED_ROOT_COMMAND_COUNT = 33;
 
+export const MIGRATION_ADVISOR_PATH =
+  'Apps/CLI/Sources/PeekabooCLI/CLI/CommanderMigrationAdvisor.swift';
+
 export const REMOVED_ROOT_COMMANDS = Object.freeze([
   'image',
   'list',
@@ -148,6 +151,22 @@ function collectionBody(source, name) {
     `(?:private\\s+)?static\\s+let\\s+${name}[^=]*=\\s*(?:Set\\s*\\(\\s*)?\\[([\\s\\S]*?)\\]`
   );
   return source.match(pattern)?.[1] ?? null;
+}
+
+// Replacement text per removed root, derived from the advisor itself so the
+// preflight cannot drift from what the binary actually prints.
+export function parseRemovedRootReplacements(source) {
+  const body = collectionBody(source, 'removedRootReplacements');
+  if (!body) throw new Error('Could not parse CommanderMigrationAdvisor.removedRootReplacements');
+  const replacements = new Map();
+  for (const match of body.matchAll(/^\s*"([^"]+)"\s*:\s*"([^"]*)"/gm)) {
+    replacements.set(match[1], match[2]);
+  }
+  // `list` is not a dictionary entry: removedListError picks a replacement from
+  // the subcommand, and a bare `list` falls through to its default branch.
+  const listDefault = source.match(/default:\s*"([^"]+)"/);
+  if (listDefault) replacements.set('list', listDefault[1]);
+  return replacements;
 }
 
 export function parseMigrationAdvisorForms(source) {
@@ -327,10 +346,7 @@ export function validateSourceDocumentationContracts(projectRoot) {
     referenceSource: readFileSync(join(projectRoot, 'docs/cli-command-reference.md'), 'utf8')
   });
   const migrationFailures = validateMigrationGuideContract({
-    advisorSource: readFileSync(
-      join(projectRoot, 'Apps/CLI/Sources/PeekabooCLI/CLI/CommanderMigrationAdvisor.swift'),
-      'utf8'
-    ),
+    advisorSource: readFileSync(join(projectRoot, MIGRATION_ADVISOR_PATH), 'utf8'),
     migrationGuideSource: readFileSync(join(projectRoot, 'docs/v4-migration.md'), 'utf8')
   });
   return [...commandFailures, ...migrationFailures];
