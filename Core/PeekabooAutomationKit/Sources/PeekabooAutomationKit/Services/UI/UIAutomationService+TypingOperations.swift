@@ -259,8 +259,12 @@ extension UIAutomationService {
             return
         }
         // Typed text shows verbatim in the caption; only password fields mask.
-        // Type-action callers sample each text segment at delivery time; the
-        // post-typing sample remains a final safety net for direct text entry.
+        // Both masking signals are scoped to the SAME identity the renderer's
+        // visibility check uses: `typedIntoSecureField` is sampled per segment at
+        // delivery time against the target pid, and this post-typing safety net
+        // queries the target application's own focused element (system-wide only
+        // when untargeted). A targeted secure field therefore masks even though
+        // targeted input can now reach the HUD.
         let masksTypedText = typedIntoSecureField
             || TypeService.focusedElementIsSecureField(processIdentifier: targetProcessIdentifier)
         _ = await self.feedbackClient.showTypingFeedback(
