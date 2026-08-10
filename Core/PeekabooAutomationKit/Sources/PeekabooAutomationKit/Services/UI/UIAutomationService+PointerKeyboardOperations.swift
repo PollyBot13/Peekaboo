@@ -161,11 +161,13 @@ extension UIAutomationService {
         targetProcessIdentifier: pid_t?,
         visualizerTarget: VisualizerTargetWindow? = nil) async
     {
-        guard let anchor = await self.inputFeedbackAnchor(
+        let anchor = await self.inputFeedbackAnchor(
             snapshotId: nil,
             targetProcessIdentifier: targetProcessIdentifier,
             resolved: visualizerTarget)
-        else { return }
+        if targetProcessIdentifier != nil, anchor == nil {
+            return
+        }
         let keyArray = keys.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
         _ = await self.feedbackClient.showHotkeyDisplay(
             keys: keyArray,

@@ -248,12 +248,16 @@ extension UIAutomationService {
     {
         guard !keys.isEmpty else { return }
         // Targeted typing anchors to its target's own window; the renderer only
-        // renders when that window is visibly frontmost. No anchor, no HUD.
-        guard let anchor = await self.inputFeedbackAnchor(
+        // renders when that window is visibly frontmost. Targeted input with no
+        // resolvable anchor shows nothing; untargeted input keeps its optional
+        // frontmost anchor exactly as before.
+        let anchor = await self.inputFeedbackAnchor(
             snapshotId: nil,
             targetProcessIdentifier: targetProcessIdentifier,
             resolved: visualizerTarget)
-        else { return }
+        if targetProcessIdentifier != nil, anchor == nil {
+            return
+        }
         // Typed text shows verbatim in the caption; only password fields mask.
         // Type-action callers sample each text segment at delivery time; the
         // post-typing sample remains a final safety net for direct text entry.
