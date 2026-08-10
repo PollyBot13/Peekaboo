@@ -296,10 +296,18 @@ struct CommandRuntimeInjectionTests {
             build: nil,
             supportedOperations: [.captureScreen]
         )
+        let disabled = PeekabooBridgeHandshakeResponse(
+            negotiatedVersion: PeekabooBridgeProtocolVersion(major: 1, minor: 5),
+            hostKind: .gui,
+            build: nil,
+            supportedOperations: [.captureScreen, .desktopObservation],
+            enabledOperations: [.captureScreen]
+        )
 
         #expect(CommandRuntime.supportsDesktopObservation(for: supported))
         #expect(!CommandRuntime.supportsDesktopObservation(for: older))
         #expect(!CommandRuntime.supportsDesktopObservation(for: hidden))
+        #expect(!CommandRuntime.supportsDesktopObservation(for: disabled))
     }
 
     @Test

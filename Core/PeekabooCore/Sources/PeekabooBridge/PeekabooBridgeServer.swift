@@ -214,6 +214,40 @@ public final class PeekabooBridgeServer {
                 details: "\(error)",
                 operationMayHaveCompleted: error.operationMayHaveCompleted)
         }
+        if let error = error as? DesktopObservationError {
+            switch error {
+            case .targetNotFound, .targetChanged:
+                return .init(
+                    code: .notFound,
+                    message: error.localizedDescription,
+                    details: "\(error)",
+                    kind: .windowNotFound)
+            case .ambiguousWindowTitle:
+                return .init(
+                    code: .invalidRequest,
+                    message: error.localizedDescription,
+                    details: "\(error)")
+            case .unsupportedTarget:
+                return .init(
+                    code: .operationNotSupported,
+                    message: error.localizedDescription,
+                    details: "\(error)")
+            }
+        }
+        if let error = error as? CaptureROIError {
+            let code: PeekabooBridgeErrorCode = switch error {
+            case .invalidFormat, .invalidBounds, .exactWindowRequired, .missingExactWindowReceipt,
+                 .outOfBounds, .outputTooLarge:
+                .invalidRequest
+            case .invalidSourceImage, .unsupportedScale, .hostDidNotApplyROI:
+                .internalError
+            }
+            return .init(
+                code: code,
+                message: error.localizedDescription,
+                details: "\(error)",
+                context: "capture_roi:\(error.code)")
+        }
 
         if let error = error as? DockError {
             let kind: PeekabooBridgeErrorKind?

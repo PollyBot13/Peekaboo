@@ -1,5 +1,7 @@
 import Commander
+import CoreGraphics
 import Foundation
+import PeekabooBridge
 import PeekabooCore
 import PeekabooFoundation
 
@@ -29,6 +31,9 @@ struct SeeCommand: ApplicationResolvable, ErrorHandlingCommand, RuntimeBackedCom
 
     @Option(help: "Region for area captures as x,y,width,height in global display coordinates")
     var region: String?
+
+    @Option(help: "Crop an exact --window-id as x,y,width,height in window-local logical points")
+    var roi: String?
 
     @Option(help: "Image format: png or jpg")
     var format: PeekabooCore.ImageFormat = .png
@@ -137,6 +142,12 @@ struct SeeCommand: ApplicationResolvable, ErrorHandlingCommand, RuntimeBackedCom
         ])
 
         do {
+            if let requiredHostFailure = runtime.requiredHostFailure {
+                throw PeekabooBridgeErrorEnvelope(
+                    code: .operationNotSupported,
+                    message: requiredHostFailure
+                )
+            }
             try self.validateMergedOptions()
             if self.usesPixelOnlyCapture {
                 try await self.runPixelOnlyCapture()
@@ -270,6 +281,27 @@ struct SeeCommand: ApplicationResolvable, ErrorHandlingCommand, RuntimeBackedCom
     func validateMergedOptions() throws {
         let resolvedMode = self.determineMode()
         let forcesPixelOnlyMode = resolvedMode == .area || resolvedMode == .multi
+        try self.validateExactWindowIdentifier()
+        try self.validatePresentationOptions(
+            resolvedMode: resolvedMode,
+            forcesPixelOnlyMode: forcesPixelOnlyMode
+        )
+        try self.validateROIOptions(resolvedMode: resolvedMode)
+        try self.validateInteractionTargetSelectors()
+        let windowSelectorCount = [self.windowTitle != nil, self.windowIndex != nil, self.windowId != nil]
+            .count(where: { $0 })
+        try self.validateSpecialCaptureTargets(windowSelectorCount: windowSelectorCount)
+        guard !self.menubar else { return }
+        try self.validateTarget(
+            for: resolvedMode,
+            windowSelectorCount: windowSelectorCount
+        )
+    }
+
+    private func validatePresentationOptions(
+        resolvedMode: PeekabooCore.CaptureMode,
+        forcesPixelOnlyMode: Bool
+    ) throws {
         if self.tree, self.noElements {
             throw ValidationError("--tree cannot be combined with --no-elements")
         }
@@ -299,9 +331,9 @@ struct SeeCommand: ApplicationResolvable, ErrorHandlingCommand, RuntimeBackedCom
         if self.region != nil, self.mode != nil, self.mode != .area {
             throw ValidationError("--region can only be combined with --mode area")
         }
-        try self.validateInteractionTargetSelectors()
-        let windowSelectorCount = [self.windowTitle != nil, self.windowIndex != nil, self.windowId != nil]
-            .count(where: { $0 })
+    }
+
+    private func validateSpecialCaptureTargets(windowSelectorCount: Int) throws {
         if let appAlias = self.app?.lowercased(), appAlias == "frontmost" || appAlias == "menubar" {
             let allowedModes: Set<PeekabooCore.CaptureMode> = appAlias == "frontmost"
                 ? [.window, .frontmost]
@@ -317,9 +349,13 @@ struct SeeCommand: ApplicationResolvable, ErrorHandlingCommand, RuntimeBackedCom
                 windowSelectorCount > 0 {
                 throw ValidationError("--menubar cannot be combined with another capture target")
             }
-            return
         }
+    }
 
+    private func validateTarget(
+        for resolvedMode: PeekabooCore.CaptureMode,
+        windowSelectorCount: Int
+    ) throws {
         let hasProcessTarget = self.app != nil || self.pid != nil
         switch resolvedMode {
         case .screen:
@@ -473,17 +509,61 @@ struct SeeCommand: ApplicationResolvable, ErrorHandlingCommand, RuntimeBackedCom
         try Task.checkCancellation()
 
         let executionTime = Date().timeIntervalSince(startTime)
+        let presentationElements = DesktopObservationROIProcessor.presentationElements(
+            captureResult.elements,
+            viewport: captureResult.coordinateContext?.viewport
+        )
         return SeeCommandRenderContext(
             snapshotId: captureResult.snapshotId,
             screenshotPath: captureResult.screenshotPath,
             annotatedPath: annotatedPath,
             metadata: captureResult.metadata,
-            elements: captureResult.elements,
+            elements: presentationElements,
+            coordinateContext: captureResult.coordinateContext,
             analysis: analysisResult,
             executionTime: executionTime,
             observation: captureResult.observation,
             menuBar: menuBarSummary
         )
+    }
+
+    func captureROI() throws -> CaptureRegionOfInterest? {
+        guard let roi else { return nil }
+        do {
+            let parsed = try CaptureRegionOfInterest.parse(roi)
+            if let windowId, let exactWindowID = CGWindowID(exactly: windowId) {
+                try DesktopObservationROIProcessor.validateRequest(
+                    parsed,
+                    target: .windowID(exactWindowID)
+                )
+            } else if windowId != nil {
+                throw ValidationError("--window-id must be between 1 and \(UInt32.max)")
+            }
+            return parsed
+        } catch let error as CaptureROIError {
+            throw ValidationError(error.localizedDescription)
+        }
+    }
+
+    private func validateExactWindowIdentifier() throws {
+        guard let windowId else { return }
+        guard windowId > 0, UInt32(exactly: windowId) != nil else {
+            throw ValidationError("--window-id must be between 1 and \(UInt32.max)")
+        }
+    }
+
+    private func validateROIOptions(resolvedMode: PeekabooCore.CaptureMode) throws {
+        guard self.roi != nil else { return }
+        guard self.windowId != nil else {
+            throw ValidationError("--roi requires an exact --window-id")
+        }
+        guard !self.noElements, !self.noScreenshot, !self.streamsImageToStdout else {
+            throw ValidationError("--roi requires a snapshot-producing see capture with element detection")
+        }
+        guard resolvedMode == .window, self.region == nil, self.screenIndex == nil, !self.menubar else {
+            throw ValidationError("--roi supports exact window capture only")
+        }
+        _ = try self.captureROI()
     }
 
     private func emitAnnotationStatus(context: SeeCommandRenderContext) {
@@ -532,8 +612,10 @@ extension SeeCommand: ParsableCommand {
                         description: "Capture the frontmost window, print structured output, and save annotations."
                     ),
                     CommandUsageExample(
-                        command: "peekaboo see --app Safari --window-title \"Login\" --json --path /tmp/safari-login.png",
-                        description: "Target a specific Safari window to collect fresh element IDs and keep the capture artifact in /tmp."
+                        command: "peekaboo see --app Safari --window-title \"Login\" --json " +
+                            "--path /tmp/safari-login.png",
+                        description: "Target a specific Safari window to collect fresh element IDs and " +
+                            "keep the capture artifact in /tmp."
                     ),
                     CommandUsageExample(
                         command: "peekaboo see --mode screen --screen-index 0 --analyze 'Summarize the dashboard'",
@@ -560,6 +642,7 @@ extension SeeCommand: CommanderBindableCommand {
             self.mode = parsedMode
         }
         self.region = values.singleOption("region")
+        self.roi = values.singleOption("roi")
         let parsedFormat: PeekabooCore.ImageFormat? = try values.decodeOptionEnum("format")
         if let parsedFormat {
             self.format = parsedFormat

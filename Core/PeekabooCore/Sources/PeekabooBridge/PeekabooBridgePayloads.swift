@@ -529,6 +529,9 @@ public struct PeekabooBridgeStoreScreenshotRequest: Codable, Sendable {
     public let applicationName: String?
     public let windowTitle: String?
     public let windowBounds: CGRect?
+    public let windowID: Int?
+    public let windowMutationIdentity: WindowMutationIdentity?
+    public let captureCoordinateContext: CaptureCoordinateContext?
 
     public init(_ request: SnapshotScreenshotRequest) {
         self.snapshotId = request.snapshotId
@@ -538,6 +541,9 @@ public struct PeekabooBridgeStoreScreenshotRequest: Codable, Sendable {
         self.applicationName = request.applicationName
         self.windowTitle = request.windowTitle
         self.windowBounds = request.windowBounds
+        self.windowID = request.windowID
+        self.windowMutationIdentity = request.windowMutationIdentity
+        self.captureCoordinateContext = request.captureCoordinateContext
     }
 
     public var snapshotRequest: SnapshotScreenshotRequest {
@@ -548,7 +554,29 @@ public struct PeekabooBridgeStoreScreenshotRequest: Codable, Sendable {
             applicationProcessId: self.applicationProcessId,
             applicationName: self.applicationName,
             windowTitle: self.windowTitle,
-            windowBounds: self.windowBounds)
+            windowBounds: self.windowBounds,
+            windowID: self.windowID,
+            windowMutationIdentity: self.windowMutationIdentity,
+            captureCoordinateContext: self.captureCoordinateContext)
+    }
+}
+
+public struct PeekabooBridgeStoreObservationSnapshotRequest: Codable, Sendable {
+    public let screenshot: PeekabooBridgeStoreScreenshotRequest
+    public let detectionResult: ElementDetectionResult?
+    public let annotatedScreenshotPath: String?
+
+    public init(_ request: SnapshotObservationPublicationRequest) {
+        self.screenshot = PeekabooBridgeStoreScreenshotRequest(request.screenshot)
+        self.detectionResult = request.detectionResult
+        self.annotatedScreenshotPath = request.annotatedScreenshotPath
+    }
+
+    public var publicationRequest: SnapshotObservationPublicationRequest {
+        SnapshotObservationPublicationRequest(
+            screenshot: self.screenshot.snapshotRequest,
+            detectionResult: self.detectionResult,
+            annotatedScreenshotPath: self.annotatedScreenshotPath)
     }
 }
 

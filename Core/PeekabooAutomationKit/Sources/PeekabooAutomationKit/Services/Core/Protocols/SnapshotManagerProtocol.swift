@@ -11,6 +11,7 @@ public struct SnapshotScreenshotRequest: Sendable, Equatable {
     public let windowBounds: CGRect?
     public let windowID: Int?
     public let windowMutationIdentity: WindowMutationIdentity?
+    public let captureCoordinateContext: CaptureCoordinateContext?
 
     public init(
         snapshotId: String,
@@ -21,7 +22,8 @@ public struct SnapshotScreenshotRequest: Sendable, Equatable {
         windowTitle: String?,
         windowBounds: CGRect?,
         windowID: Int? = nil,
-        windowMutationIdentity: WindowMutationIdentity? = nil)
+        windowMutationIdentity: WindowMutationIdentity? = nil,
+        captureCoordinateContext: CaptureCoordinateContext? = nil)
     {
         self.snapshotId = snapshotId
         self.screenshotPath = screenshotPath
@@ -32,6 +34,23 @@ public struct SnapshotScreenshotRequest: Sendable, Equatable {
         self.windowBounds = windowBounds
         self.windowID = windowID
         self.windowMutationIdentity = windowMutationIdentity
+        self.captureCoordinateContext = captureCoordinateContext
+    }
+}
+
+public struct SnapshotObservationPublicationRequest: Sendable {
+    public let screenshot: SnapshotScreenshotRequest
+    public let detectionResult: ElementDetectionResult?
+    public let annotatedScreenshotPath: String?
+
+    public init(
+        screenshot: SnapshotScreenshotRequest,
+        detectionResult: ElementDetectionResult?,
+        annotatedScreenshotPath: String?)
+    {
+        self.screenshot = screenshot
+        self.detectionResult = detectionResult
+        self.annotatedScreenshotPath = annotatedScreenshotPath
     }
 }
 
@@ -43,6 +62,9 @@ public protocol SnapshotManagerProtocol: Sendable {
 
     /// Whether `storeScreenshot` copies source artifacts into independently managed storage.
     var copiesScreenshotArtifactsIntoStorage: Bool { get }
+
+    /// Whether this manager can replace a complete observation snapshot as one transaction.
+    var supportsAtomicObservationSnapshotPublication: Bool { get }
 
     /// Effective desktop-wide cutoff applied to implicit latest-snapshot lookup.
     /// Managers without a shared watermark can rely on the default `nil` implementation.
@@ -115,6 +137,9 @@ public protocol SnapshotManagerProtocol: Sendable {
     /// - Parameter request: Screenshot metadata and storage location for the snapshot.
     func storeScreenshot(_ request: SnapshotScreenshotRequest) async throws
 
+    /// Atomically publish the raster, element map, and optional annotation produced by one observation.
+    func storeObservationSnapshot(_ request: SnapshotObservationPublicationRequest) async throws
+
     /// Store an annotated screenshot for a snapshot (optional companion to `raw.png`).
     /// - Parameters:
     ///   - snapshotId: Snapshot identifier
@@ -152,6 +177,10 @@ extension SnapshotManagerProtocol {
         false
     }
 
+    public var supportsAtomicObservationSnapshotPublication: Bool {
+        false
+    }
+
     public var effectiveImplicitLatestInvalidationWatermark: Date? {
         nil
     }
@@ -159,6 +188,12 @@ extension SnapshotManagerProtocol {
     public func createSnapshot(pendingAt observationStartedAt: Date) async throws -> String {
         _ = observationStartedAt
         return try await self.createSnapshot()
+    }
+
+    public func storeObservationSnapshot(_ request: SnapshotObservationPublicationRequest) async throws {
+        _ = request
+        throw SnapshotError.storageError(
+            "This snapshot manager does not support atomic observation publication")
     }
 
     /// Source-compatible fallback for managers without watermark support.
