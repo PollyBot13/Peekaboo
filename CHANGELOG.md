@@ -3,6 +3,8 @@
 ## [4.0.1] - Unreleased
 
 ### Fixed
+- Ensure action-command JSON validation failures before dispatch report
+  `effect: refused`, including parser and binding errors.
 - Pin the OpenClaw Foundation identity for the release preflight so a bare `SIGN_IDENTITY`
   exported by the operator's login shell can no longer substitute for the release certificate,
   and surface any inherited identity instead of signing with it silently.
@@ -91,7 +93,6 @@ It is a breaking release — see `docs/v4-migration.md` for the complete old→n
   `image`, AX-only `inspect_ui`, and `sleep` (MCP clients may lack a shell).
 
 ### Fixed
-
 - Normalize agent failures and `see` success JSON under the shared result envelope,
   with nonzero terminal failures, specific validation/credential/session/runtime codes,
   and no duplicate inner `success` field.

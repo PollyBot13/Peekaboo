@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.0.1] - Unreleased
 
+### Fixed
+- Ensure action-command JSON validation failures before dispatch report `effect: refused`, including parser and binding errors.
+
 ## [4.0.0] - 2026-08-10
 
 ### Added
