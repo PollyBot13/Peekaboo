@@ -339,6 +339,7 @@ struct SeeCommandRuntimeTests {
                         detectionTime: 4.75,
                         elementCount: 1,
                         method: "AXorcist",
+                        windowContext: fixture.detectionResult.metadata.windowContext,
                         truncationInfo: DetectionTruncationInfo(deadlineReached: true)
                     )
                 )
@@ -999,7 +1000,7 @@ struct SeeCommandRuntimeTests {
         }
     }
 
-    private func withTempConfigEnv<T>(
+    func withTempConfigEnv<T>(
         _ body: @escaping (URL) async throws -> T
     ) async throws -> T {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -1030,7 +1031,7 @@ struct SeeCommandRuntimeTests {
 }
 
 extension SeeCommandRuntimeTests {
-    fileprivate struct RuntimeFixture {
+    struct RuntimeFixture {
         let snapshotId: String
         let applicationInfo: ServiceApplicationInfo
         let windowInfo: ServiceWindowInfo
@@ -1038,7 +1039,7 @@ extension SeeCommandRuntimeTests {
         let detectionResult: ElementDetectionResult
     }
 
-    fileprivate static func makeSeeCommandRuntimeFixture() -> RuntimeFixture {
+    static func makeSeeCommandRuntimeFixture() -> RuntimeFixture {
         let snapshotId = UUID().uuidString
         let windowBounds = CGRect(x: 10, y: 20, width: 800, height: 600)
         let applicationInfo = Self.makeSeeFixtureApplicationInfo()
@@ -1064,7 +1065,7 @@ extension SeeCommandRuntimeTests {
         )
     }
 
-    fileprivate static func makeSeeCommandRuntimeContext(
+    static func makeSeeCommandRuntimeContext(
         automation: StubAutomationService,
         screenCapture: StubScreenCaptureService,
         applicationInfo: ServiceApplicationInfo? = nil,
@@ -1093,6 +1094,7 @@ extension SeeCommandRuntimeTests {
     fileprivate static func makeSeeFixtureApplicationInfo() -> ServiceApplicationInfo {
         ServiceApplicationInfo(
             processIdentifier: 4242,
+            processStartIdentity: 4242,
             bundleIdentifier: "com.example.app",
             name: "ExampleApp",
             isActive: true,
@@ -1101,11 +1103,18 @@ extension SeeCommandRuntimeTests {
     }
 
     fileprivate static func makeSeeFixtureWindowInfo(windowBounds: CGRect) -> ServiceWindowInfo {
-        ServiceWindowInfo(
+        let mutationIdentity = WindowMutationIdentity(
+            windowID: 101,
+            ownerProcessIdentifier: 4242,
+            ownerProcessStartIdentity: 4242,
+            capturedBounds: windowBounds
+        )
+        return ServiceWindowInfo(
             windowID: 101,
             title: "Main Window",
             bounds: windowBounds,
-            isMainWindow: true
+            isMainWindow: true,
+            mutationIdentity: mutationIdentity
         )
     }
 
@@ -1146,8 +1155,12 @@ extension SeeCommandRuntimeTests {
             method: "stub",
             windowContext: WindowContext(
                 applicationName: applicationInfo.name,
+                applicationBundleId: applicationInfo.bundleIdentifier,
+                applicationProcessId: applicationInfo.processIdentifier,
                 windowTitle: windowInfo.title,
-                windowBounds: windowBounds
+                windowID: windowInfo.windowID,
+                windowBounds: windowBounds,
+                windowMutationIdentity: windowInfo.mutationIdentity
             )
         )
         return ElementDetectionResult(
