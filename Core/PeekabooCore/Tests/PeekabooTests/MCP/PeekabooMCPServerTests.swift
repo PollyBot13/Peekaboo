@@ -58,6 +58,115 @@ struct PeekabooMCPServerTests {
     }
 
     @Test
+    @MainActor
+    func `click wire schema requires an exclusive target and a background coordinate receipt`() async throws {
+        let context = await MCPToolTestHelpers.makeContext()
+        let session = try await ClickMCPWireSession.connect(context: context)
+
+        do {
+            let (tools, _) = try await session.client.listTools()
+            let click = try #require(tools.first { $0.name == "click" })
+            guard case let .object(schema) = click.inputSchema,
+                  case let .object(properties)? = schema["properties"],
+                  case let .array(routes)? = schema["oneOf"]
+            else {
+                Issue.record("click wire schema is missing its target routes")
+                await session.stop()
+                return
+            }
+
+            #expect(Set(routes.compactMap(Self.requiredFields)) == Set([["on"], ["query"], ["coords"]]))
+            for route in routes {
+                let required = try #require(Self.requiredFields(route)?.first)
+                #expect(Self.excludedTargetFields(route) == Set(["on", "query", "coords"]).subtracting([required]))
+            }
+
+            let coordinateRoute = try #require(routes.first { Self.requiredFields($0) == ["coords"] })
+            guard case let .object(coordinateFields) = coordinateRoute,
+                  case let .array(coordinateAlternatives)? = coordinateFields["anyOf"]
+            else {
+                Issue.record("coordinate route is missing receipt and foreground alternatives")
+                await session.stop()
+                return
+            }
+
+            #expect(coordinateAlternatives.count == 4)
+            #expect(coordinateAlternatives.contains { Self.requiredFields($0) == ["snapshot"] })
+            #expect(coordinateAlternatives.contains { Self.requiredFields($0) == ["coordinate_reference"] })
+            #expect(Self.hasRequiredBooleanConstant(
+                name: "foreground",
+                value: true,
+                in: coordinateAlternatives))
+            #expect(Self.hasRequiredBooleanConstant(
+                name: "background",
+                value: false,
+                in: coordinateAlternatives))
+
+            guard case let .object(snapshotSchema)? = properties["snapshot"],
+                  case let .object(referenceSchema)? = properties["coordinate_reference"],
+                  case let .object(pidSchema)? = properties["pid"]
+            else {
+                Issue.record("click receipt properties are missing")
+                await session.stop()
+                return
+            }
+            #expect(snapshotSchema["minLength"] == .int(1))
+            #expect(referenceSchema["minLength"] == .int(1))
+            #expect(pidSchema["type"] == .string("integer"))
+            #expect(pidSchema["minimum"] == .int(1))
+            for field in ["on", "query", "coords"] {
+                guard case let .object(targetSchema)? = properties[field] else {
+                    Issue.record("click target property \(field) is missing")
+                    continue
+                }
+                #expect(targetSchema["minLength"] == .int(1))
+            }
+            #expect(click.description?.contains("pid alone is never a safe coordinate target") == true)
+        } catch {
+            await session.stop()
+            throw error
+        }
+
+        await session.stop()
+    }
+
+    @Test
+    @MainActor
+    func `click wire refuses mixed target routes before dispatch`() async throws {
+        let automation = MockAutomationService(accessibilityGranted: true)
+        let context = await MCPToolTestHelpers.makeContext(automation: automation)
+        let session = try await ClickMCPWireSession.connect(context: context)
+        let invalidArguments: [[String: Value]] = [
+            ["on": .string("B1"), "query": .string("Save")],
+            ["on": .string("B1"), "coords": .string("10,20"), "foreground": .bool(true)],
+            ["query": .string("Save"), "coords": .string("10,20"), "foreground": .bool(true)],
+            [
+                "on": .string("B1"),
+                "query": .string("Save"),
+                "coords": .string("10,20"),
+                "foreground": .bool(true),
+            ],
+        ]
+
+        do {
+            for arguments in invalidArguments {
+                let request: RequestContext<CallTool.Result> = try await session.client.callTool(
+                    name: "click",
+                    arguments: arguments)
+                let result = try await request.value
+                #expect(result.isError == true)
+            }
+            #expect(automation.clickCalls.isEmpty)
+            #expect(automation.targetedClickCalls.isEmpty)
+        } catch {
+            await session.stop()
+            throw error
+        }
+
+        await session.stop()
+    }
+
+    @Test
     func `server projects bounded capture failure metadata onto the MCP wire`() throws {
         let response = ToolResponse.error(
             "Video capture produced no decodable frames.",
@@ -99,6 +208,36 @@ struct PeekabooMCPServerTests {
 
         #expect(!names.contains("set_value"))
         #expect(!names.contains("action"))
+    }
+
+    private static func requiredFields(_ schema: Value) -> Set<String>? {
+        guard case let .object(fields) = schema,
+              case let .array(required)? = fields["required"]
+        else { return nil }
+        return Set(required.compactMap(\.stringValue))
+    }
+
+    private static func excludedTargetFields(_ schema: Value) -> Set<String>? {
+        guard case let .object(fields) = schema,
+              case let .object(notSchema)? = fields["not"],
+              case let .array(alternatives)? = notSchema["anyOf"]
+        else { return nil }
+        return Set(alternatives.flatMap { Self.requiredFields($0) ?? [] })
+    }
+
+    private static func hasRequiredBooleanConstant(
+        name: String,
+        value: Bool,
+        in schemas: [Value]) -> Bool
+    {
+        schemas.contains { schema in
+            guard Self.requiredFields(schema) == [name],
+                  case let .object(fields) = schema,
+                  case let .object(properties)? = fields["properties"],
+                  case let .object(property)? = properties[name]
+            else { return false }
+            return property["const"] == .bool(value)
+        }
     }
 
     @Test
@@ -152,6 +291,31 @@ struct PeekabooMCPServerTests {
             }
             #expect(message == Self.missingFactoryMessage)
         }
+    }
+}
+
+private struct ClickMCPWireSession {
+    let client: Client
+    let server: PeekabooMCPServer
+
+    static func connect(context: MCPToolContext) async throws -> Self {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = try await PeekabooMCPServer(toolContext: context)
+        let client = Client(name: "PeekabooClickWireTests", version: "1.0")
+        try await server.startForTesting(transport: serverTransport)
+        do {
+            _ = try await client.connect(transport: clientTransport)
+        } catch {
+            await client.disconnect()
+            await server.stopForTesting()
+            throw error
+        }
+        return Self(client: client, server: server)
+    }
+
+    func stop() async {
+        await self.client.disconnect()
+        await self.server.stopForTesting()
     }
 }
 
