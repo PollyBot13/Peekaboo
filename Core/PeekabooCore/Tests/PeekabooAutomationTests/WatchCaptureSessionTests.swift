@@ -113,6 +113,78 @@ struct WatchCaptureSessionTests {
     }
 
     @Test
+    @MainActor
+    func `Output diff compares with previous retained frame after dropped samples`() throws {
+        let png = Self.makePNG(size: CGSize(width: 40, height: 40))
+        let session = WatchCaptureSession(
+            dependencies: WatchCaptureDependencies(
+                screenCapture: StubScreenCaptureService(result: png, size: CGSize(width: 40, height: 40)),
+                screenService: StubScreenService()),
+            configuration: WatchCaptureConfiguration(
+                scope: CaptureScope(kind: .frontmost),
+                options: Self.defaultWatchOptions(changeThresholdPercent: 2.5),
+                outputRoot: FileManager.default.temporaryDirectory,
+                autoclean: WatchAutocleanConfig(minutes: 1, managed: false)))
+        let previousKept = WatchFrameDiffer.LumaBuffer(
+            width: 4,
+            height: 4,
+            pixels: Array(repeating: 0, count: 16))
+        var changedPixels = Array(repeating: UInt8(0), count: 16)
+        changedPixels[5] = 255
+        let current = WatchFrameDiffer.LumaBuffer(width: 4, height: 4, pixels: changedPixels)
+        let sampledDiff = WatchCaptureSession.DiffComputation(
+            changePercent: 0,
+            motionBoxes: nil,
+            buffer: current,
+            enterActive: false)
+
+        let retainedDiff = session.diffForOutputFrame(
+            sampledDiff: sampledDiff,
+            previousKept: previousKept,
+            previousKeptFrameIndex: 0,
+            currentFrameIndex: 2,
+            originalSize: CGSize(width: 40, height: 40))
+        #expect(retainedDiff.changePercent == 6.25)
+        #expect(retainedDiff.motionBoxes?.isEmpty == false)
+
+        let adjacentDiff = session.diffForOutputFrame(
+            sampledDiff: sampledDiff,
+            previousKept: previousKept,
+            previousKeptFrameIndex: 1,
+            currentFrameIndex: 2,
+            originalSize: CGSize(width: 40, height: 40))
+        #expect(adjacentDiff.changePercent == 0)
+        #expect(adjacentDiff.motionBoxes == nil)
+
+        let resizedSize = CGSize(width: 40, height: 80)
+        let resizedImage = try #require(WatchCaptureArtifactWriter.makeCGImage(from: Self.makePNG(size: resizedSize)))
+        let adjacentResizeDiff = session.computeDiff(cgImage: resizedImage, previous: previousKept)
+        #expect(adjacentResizeDiff.changePercent == 100)
+        #expect(adjacentResizeDiff.motionBoxes == [CGRect(origin: .zero, size: resizedSize)])
+        #expect(adjacentResizeDiff.buffer.width == 40)
+        #expect(adjacentResizeDiff.buffer.height == 80)
+        #expect(adjacentResizeDiff.enterActive)
+
+        let settledResizeSample = WatchCaptureSession.DiffComputation(
+            changePercent: 0,
+            motionBoxes: nil,
+            buffer: adjacentResizeDiff.buffer,
+            enterActive: false)
+        let retainedResizeDiff = session.diffForOutputFrame(
+            sampledDiff: settledResizeSample,
+            previousKept: previousKept,
+            previousKeptFrameIndex: 0,
+            currentFrameIndex: 2,
+            originalSize: resizedSize)
+        #expect(retainedResizeDiff.changePercent == 100)
+        #expect(retainedResizeDiff.motionBoxes == [CGRect(origin: .zero, size: resizedSize)])
+        #expect(retainedResizeDiff.buffer.width == adjacentResizeDiff.buffer.width)
+        #expect(retainedResizeDiff.buffer.height == adjacentResizeDiff.buffer.height)
+        #expect(retainedResizeDiff.buffer.pixels == adjacentResizeDiff.buffer.pixels)
+        #expect(retainedResizeDiff.enterActive)
+    }
+
+    @Test
     func `Quality diff near-zero for identical frames`() {
         let buffer = WatchFrameDiffer.LumaBuffer(width: 4, height: 4, pixels: Array(repeating: 64, count: 16))
         let result = WatchFrameDiffer.computeChange(
@@ -745,12 +817,15 @@ struct WatchCaptureSessionTests {
 
     // MARK: - Helpers
 
-    private static func defaultWatchOptions(resolutionCap: CGFloat? = nil) -> CaptureOptions {
+    private static func defaultWatchOptions(
+        resolutionCap: CGFloat? = nil,
+        changeThresholdPercent: Double = 0) -> CaptureOptions
+    {
         CaptureOptions(
             duration: 1,
             idleFps: 1,
             activeFps: 1,
-            changeThresholdPercent: 0,
+            changeThresholdPercent: changeThresholdPercent,
             heartbeatSeconds: 0,
             quietMsToIdle: 0,
             maxFrames: 1,
