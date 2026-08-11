@@ -66,13 +66,29 @@ public struct TypeTool: MCPTool {
 
     @MainActor
     public func execute(arguments: ToolArguments) async throws -> ToolResponse {
+        let mutationTracker = TypeMutationTracker()
         do {
             let request = try self.parseRequest(arguments: arguments)
-            return try await self.performType(request: request)
+            return try await self.performType(request: request, mutationTracker: mutationTracker)
         } catch let error as TypeToolValidationError {
             return ToolResponse.error(error.message)
         } catch let error as MCPInteractionTargetError {
             return ToolResponse.error(error.localizedDescription)
+        } catch let error as InputDeliveryIndeterminateError {
+            let invalidatedSnapshotId = await UISnapshotManager.shared
+                .invalidateActiveSnapshot(id: mutationTracker.snapshotId)
+            var meta: [String: Value] = [
+                "mutation_dispatched": .bool(true),
+                "retry_safe": .bool(false),
+                "requires_fresh_observation": .bool(true),
+                "characters_typed": error.emittedUnitCount.map(Value.int) ?? .null,
+            ]
+            if let invalidatedSnapshotId {
+                meta["invalidated_snapshot"] = .string(invalidatedSnapshotId)
+            }
+            return ToolResponse.error(
+                error.localizedDescription,
+                meta: .object(meta))
         } catch {
             self.logger.error("Type execution failed: \(error)")
             return ToolResponse.error("Failed to type text: \(error.localizedDescription)")
@@ -130,7 +146,10 @@ public struct TypeTool: MCPTool {
     }
 
     @MainActor
-    private func performType(request: TypeRequest) async throws -> ToolResponse {
+    private func performType(
+        request: TypeRequest,
+        mutationTracker: TypeMutationTracker) async throws -> ToolResponse
+    {
         let automation = self.context.automation
         let startTime = Date()
 
@@ -139,29 +158,55 @@ public struct TypeTool: MCPTool {
             for: request,
             targetContext: targetContext)
 
-        let targetProcessIdentifier = try await self.backgroundProcessIdentifier(
+        let targetProcessIdentity = try await self.backgroundProcessIdentity(
             request: request,
             snapshot: snapshotContext)
-
-        try await self.focusIfNeeded(
-            targetContext: targetContext,
-            request: request,
-            automation: automation,
-            targetProcessIdentifier: targetProcessIdentifier)
+        let targetProcessIdentifier = targetProcessIdentity.map { Int($0.processIdentifier) }
         let actions = try self.buildActions(for: request)
         let effectiveSnapshotId = snapshotContext?.id
-        let typeResult: TypeResult = if let targetProcessIdentifier {
-            try await self.performBackgroundType(
-                actions: actions,
-                cadence: request.cadence,
-                snapshotId: effectiveSnapshotId,
-                targetProcessIdentifier: targetProcessIdentifier,
-                automation: automation)
-        } else {
-            try await automation.typeActions(
-                actions,
-                cadence: request.cadence,
-                snapshotId: effectiveSnapshotId)
+        mutationTracker.snapshotId = effectiveSnapshotId
+
+        let elementFocusClickCompleted: Bool
+        do {
+            elementFocusClickCompleted = try await self.focusIfNeeded(
+                targetContext: targetContext,
+                request: request,
+                automation: automation,
+                targetProcessIdentity: targetProcessIdentity)
+        } catch let error as InputDeliveryIndeterminateError {
+            throw InputDeliveryIndeterminateError(
+                operation: .type,
+                causeDescription: error.causeDescription ?? error.localizedDescription)
+        }
+
+        let typeResult: TypeResult
+        do {
+            if elementFocusClickCompleted {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if let targetProcessIdentity {
+                typeResult = try await self.performBackgroundType(
+                    actions: actions,
+                    cadence: request.cadence,
+                    snapshotId: effectiveSnapshotId,
+                    expectedProcessIdentity: targetProcessIdentity,
+                    automation: automation)
+            } else {
+                typeResult = try await automation.typeActions(
+                    actions,
+                    cadence: request.cadence,
+                    snapshotId: effectiveSnapshotId)
+            }
+        } catch let error as InputDeliveryIndeterminateError {
+            throw InputDeliveryIndeterminateError(
+                operation: .type,
+                emittedUnitCount: error.emittedUnitCount,
+                causeDescription: error.causeDescription ?? error.localizedDescription)
+        } catch {
+            guard elementFocusClickCompleted else { throw error }
+            throw InputDeliveryIndeterminateError(
+                operation: .type,
+                causeDescription: error.localizedDescription)
         }
 
         let invalidatedSnapshotId = await UISnapshotManager.shared.invalidateActiveSnapshot(id: effectiveSnapshotId)
@@ -198,21 +243,22 @@ public struct TypeTool: MCPTool {
         targetContext: TargetElementContext?,
         request: TypeRequest,
         automation: any UIAutomationServiceProtocol,
-        targetProcessIdentifier: Int?) async throws
+        targetProcessIdentity: ApplicationProcessIdentity?) async throws -> Bool
     {
         guard let context = targetContext else {
-            if targetProcessIdentifier == nil {
+            if targetProcessIdentity == nil {
                 _ = try await request.target.focusIfRequested(
                     windows: self.context.windows,
                     onlyWhenTargeted: true)
             }
-            return
+            return false
         }
 
         let element = context.element
-        if let targetProcessIdentifier, !request.foreground {
+        if let targetProcessIdentity, !request.foreground {
             guard let automation = automation as? any TargetedClickServiceProtocol,
-                  automation.supportsTargetedClicks
+                  automation.supportsTargetedClicks,
+                  automation.supportsProcessGenerationPinnedClicks
             else {
                 throw TypeToolValidationError("This automation host does not support background element focus.")
             }
@@ -220,30 +266,41 @@ public struct TypeTool: MCPTool {
                 target: .elementId(element.id),
                 clickType: .single,
                 snapshotId: context.snapshot.id,
-                targetProcessIdentifier: pid_t(targetProcessIdentifier))
+                expectedProcessIdentity: targetProcessIdentity)
         } else {
             try await automation.click(
                 target: .elementId(element.id),
                 clickType: .single,
                 snapshotId: context.snapshot.id)
         }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        return true
     }
 
-    private func backgroundProcessIdentifier(
+    private func backgroundProcessIdentity(
         request: TypeRequest,
-        snapshot: UISnapshot?) async throws -> Int?
+        snapshot: UISnapshot?) async throws -> ApplicationProcessIdentity?
     {
         guard !request.foreground else { return nil }
 
         if request.target.hasTarget {
-            let processIdentifier = try await request.target.requireBackgroundProcessIdentifier(
+            let identity = try await request.target.requireBackgroundProcessIdentity(
                 applications: self.context.applications,
                 windows: self.context.windows)
-            return Int(processIdentifier)
+            if let snapshot {
+                guard let snapshotIdentity = try await self.snapshotProcessIdentity(snapshot) else {
+                    throw TypeToolValidationError(
+                        "The selected snapshot has no capture-time process-generation receipt. " +
+                            "Capture fresh UI state.")
+                }
+                guard snapshotIdentity == identity else {
+                    throw TypeToolValidationError(
+                        "The selected snapshot belongs to a different process generation. Capture fresh UI state.")
+                }
+            }
+            return identity
         }
-        if let processIdentifier = snapshot?.applicationProcessId, processIdentifier > 0 {
-            return Int(processIdentifier)
+        if let identity = try await self.snapshotProcessIdentity(snapshot) {
+            return identity
         }
         if snapshot != nil || request.elementId != nil || request.snapshotId != nil {
             throw TypeToolValidationError(
@@ -259,11 +316,12 @@ public struct TypeTool: MCPTool {
         actions: [TypeAction],
         cadence: TypingCadence,
         snapshotId: String?,
-        targetProcessIdentifier: Int,
+        expectedProcessIdentity: ApplicationProcessIdentity,
         automation: any UIAutomationServiceProtocol) async throws -> TypeResult
     {
         guard let automation = automation as? any TargetedTypeServiceProtocol,
-              automation.supportsTargetedTypeActions
+              automation.supportsTargetedTypeActions,
+              automation.supportsProcessGenerationPinnedTypeActions
         else {
             throw TypeToolValidationError("This automation host does not support background typing.")
         }
@@ -271,7 +329,23 @@ public struct TypeTool: MCPTool {
             actions,
             cadence: cadence,
             snapshotId: snapshotId,
-            targetProcessIdentifier: pid_t(targetProcessIdentifier))
+            expectedProcessIdentity: expectedProcessIdentity)
+    }
+
+    private func snapshotProcessIdentity(_ snapshot: UISnapshot?) async throws -> ApplicationProcessIdentity? {
+        guard let snapshot, let processIdentifier = snapshot.applicationProcessId, processIdentifier > 0 else {
+            return nil
+        }
+        if let windowIdentity = snapshot.windowMutationIdentity,
+           windowIdentity.ownerProcessIdentifier != processIdentifier
+        {
+            throw TypeToolValidationError("The selected snapshot has inconsistent process metadata.")
+        }
+        if let identity = snapshot.applicationProcessIdentity {
+            return identity
+        }
+        throw TypeToolValidationError(
+            "The selected snapshot has no capture-time process-generation receipt. Capture fresh UI state.")
     }
 
     @MainActor
@@ -302,4 +376,9 @@ public struct TypeTool: MCPTool {
         }
         return snapshot
     }
+}
+
+@MainActor
+private final class TypeMutationTracker {
+    var snapshotId: String?
 }

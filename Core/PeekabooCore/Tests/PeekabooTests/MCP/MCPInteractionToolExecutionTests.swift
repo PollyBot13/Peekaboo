@@ -53,6 +53,7 @@ extension MCPToolExecutionTests {
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 11,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp")))
         await snapshot.setUIElements([
@@ -82,6 +83,9 @@ extension MCPToolExecutionTests {
         #expect(calls.count == 1)
         #expect(calls.first?.snapshotId == snapshotId)
         #expect(calls.first?.targetProcessIdentifier == 111)
+        #expect(calls.first?.expectedProcessIdentity == ApplicationProcessIdentity(
+            processIdentifier: 111,
+            processStartIdentity: 11))
         if case let .elementId(id) = calls.first?.target {
             #expect(id == "B1")
         } else {
@@ -108,6 +112,7 @@ extension MCPToolExecutionTests {
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 11,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp")))
         await snapshot.setUIElements([
@@ -139,6 +144,65 @@ extension MCPToolExecutionTests {
         #expect(implicitLatest == nil)
         #expect(MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
+    }
+
+    @Test
+    func `Click tool invalidates snapshot after indeterminate delivery`() async throws {
+        await UISnapshotManager.shared.removeAllSnapshots()
+        let automation = await MainActor.run {
+            let automation = MockAutomationService(accessibilityGranted: true)
+            automation.pinnedClickError = { _ in
+                InputDeliveryIndeterminateError(
+                    operation: .click,
+                    causeDescription: "post-dispatch identity drift")
+            }
+            return automation
+        }
+        let context = await MCPToolTestHelpers.makeContext(automation: automation)
+        let snapshot = await UISnapshotManager.shared.createSnapshot()
+        let snapshotId = await snapshot.id
+        await snapshot.setScreenshot(
+            path: "/tmp/screenshot.png",
+            metadata: CaptureMetadata(
+                size: CGSize(width: 200, height: 100),
+                mode: .window,
+                applicationInfo: ServiceApplicationInfo(
+                    processIdentifier: 112,
+                    processStartIdentity: 12,
+                    bundleIdentifier: "com.example.snapshot",
+                    name: "SnapshotApp")))
+        await snapshot.setUIElements([
+            UIElement(
+                id: "B1",
+                elementId: "B1",
+                role: "button",
+                title: "OK",
+                label: "OK",
+                value: nil,
+                description: nil,
+                help: nil,
+                roleDescription: "button",
+                identifier: nil,
+                frame: CGRect(x: 10, y: 20, width: 80, height: 30),
+                isActionable: true),
+        ])
+
+        let response = try await ClickTool(context: context).execute(arguments: ToolArguments(raw: [
+            "on": "B1",
+            "snapshot": snapshotId,
+        ]))
+
+        #expect(response.isError)
+        #expect(await MainActor.run { automation.targetedClickCalls.count } == 1)
+        guard case let .object(meta) = response.meta else {
+            Issue.record("Expected indeterminate click metadata")
+            return
+        }
+        #expect(meta["mutation_dispatched"] == .bool(true))
+        #expect(meta["retry_safe"] == .bool(false))
+        #expect(meta["invalidated_snapshot"] == .string(snapshotId))
+        #expect(await UISnapshotManager.shared.getSnapshot(id: snapshotId) != nil)
+        #expect(await UISnapshotManager.shared.getSnapshot(id: nil) == nil)
     }
 
     @Test
@@ -186,6 +250,7 @@ extension MCPToolExecutionTests {
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 11,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp")))
         await snapshot.setUIElements([
@@ -247,7 +312,8 @@ extension MCPToolExecutionTests {
                 size: CGSize(width: 200, height: 100),
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
-                    processIdentifier: 111,
+                    processIdentifier: 222,
+                    processStartIdentity: 22,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp")))
         await snapshot.setUIElements([
@@ -283,6 +349,97 @@ extension MCPToolExecutionTests {
     }
 
     @Test
+    func `Click tool rejects an explicit PID that contradicts the snapshot receipt`() async throws {
+        let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
+        let context = await MCPToolTestHelpers.makeContext(automation: automation)
+        let snapshot = await UISnapshotManager.shared.createSnapshot()
+        let snapshotId = await snapshot.id
+        await snapshot.setScreenshot(
+            path: "/tmp/screenshot.png",
+            metadata: CaptureMetadata(
+                size: CGSize(width: 200, height: 100),
+                mode: .window,
+                applicationInfo: ServiceApplicationInfo(
+                    processIdentifier: 111,
+                    processStartIdentity: 11,
+                    bundleIdentifier: "com.example.snapshot",
+                    name: "SnapshotApp")))
+        await snapshot.setUIElements([UIElement(
+            id: "B1",
+            elementId: "B1",
+            role: "button",
+            title: "OK",
+            label: "OK",
+            value: nil,
+            description: nil,
+            help: nil,
+            roleDescription: "button",
+            identifier: nil,
+            frame: CGRect(x: 10, y: 20, width: 80, height: 30),
+            isActionable: true)])
+
+        let response = try await ClickTool(context: context).execute(arguments: ToolArguments(raw: [
+            "on": "B1",
+            "snapshot": snapshotId,
+            "pid": 222,
+        ]))
+
+        #expect(response.isError)
+        #expect(await MainActor.run { automation.targetedClickCalls.isEmpty })
+        guard case let .object(meta) = response.meta else {
+            Issue.record("Expected pre-dispatch metadata")
+            return
+        }
+        #expect(meta["mutation_dispatched"] == .bool(false))
+        #expect(meta["retry_safe"] == .bool(true))
+    }
+
+    @Test
+    func `Click tool rejects snapshot PID without capture generation`() async throws {
+        await UISnapshotManager.shared.removeAllSnapshots()
+        let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
+        let applications = await MainActor.run {
+            MockApplicationService(applications: [ServiceApplicationInfo(
+                processIdentifier: 223,
+                processStartIdentity: 23,
+                bundleIdentifier: "com.example.snapshot",
+                name: "SnapshotApp")])
+        }
+        let context = await MCPToolTestHelpers.makeContext(
+            automation: automation,
+            applications: applications)
+        let snapshot = await UISnapshotManager.shared.createSnapshot()
+        let snapshotId = await snapshot.id
+        await snapshot.setTargetMetadata(from: WindowContext(
+            applicationName: "SnapshotApp",
+            applicationProcessId: 223,
+            windowTitle: "Document"))
+        await snapshot.setUIElements([
+            UIElement(
+                id: "B1",
+                elementId: "B1",
+                role: "button",
+                title: "OK",
+                label: "OK",
+                value: nil,
+                description: nil,
+                help: nil,
+                roleDescription: "button",
+                identifier: nil,
+                frame: CGRect(x: 10, y: 20, width: 80, height: 30),
+                isActionable: true),
+        ])
+
+        let response = try await ClickTool(context: context).execute(arguments: ToolArguments(raw: [
+            "on": "B1",
+            "snapshot": snapshotId,
+        ]))
+
+        #expect(response.isError)
+        #expect(await MainActor.run { automation.targetedClickCalls.isEmpty })
+    }
+
+    @Test
     func `Click tool reports routed background double click as unverifiable`() async throws {
         let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
         let context = await MCPToolTestHelpers.makeContext(automation: automation)
@@ -295,6 +452,7 @@ extension MCPToolExecutionTests {
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 11,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp")))
         await snapshot.setUIElements([
@@ -661,6 +819,7 @@ extension MCPToolExecutionTests {
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 11,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp"),
                 windowInfo: ServiceWindowInfo(
@@ -874,6 +1033,7 @@ extension MCPToolExecutionTests {
                 mode: .screen,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 11,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp"),
                 displayInfo: DisplayInfo(
@@ -905,6 +1065,7 @@ extension MCPToolExecutionTests {
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 7,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp"),
                 windowInfo: window))
@@ -937,6 +1098,7 @@ extension MCPToolExecutionTests {
                 mode: .window,
                 applicationInfo: ServiceApplicationInfo(
                     processIdentifier: 111,
+                    processStartIdentity: 7,
                     bundleIdentifier: "com.example.snapshot",
                     name: "SnapshotApp"),
                 windowInfo: window,

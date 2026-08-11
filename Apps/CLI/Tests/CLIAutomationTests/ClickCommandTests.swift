@@ -226,7 +226,7 @@ struct ClickCommandTests {
             label: "Save",
             bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
         )
-        let snapshotId = try await storeSnapshot(element: element, in: context.snapshots)
+        let snapshotId = try await storeSnapshot(element: element, windowID: 42, in: context.snapshots)
 
         let result = try await InProcessCommandRunner.run(
             ["click", "--on", "B1", "--snapshot", snapshotId, "--json"],
@@ -240,11 +240,71 @@ struct ClickCommandTests {
         let call = try #require(calls.first)
         #expect(call.snapshotId == snapshotId)
         #expect(call.targetProcessIdentifier == 12345)
+        #expect(call.expectedProcessIdentity == ApplicationProcessIdentity(
+            processIdentifier: 12345,
+            processStartIdentity: 7
+        ))
         if case let .elementId(id) = call.target {
             #expect(id == "B1")
         } else {
             Issue.record("Expected element ID click target")
         }
+    }
+
+    @Test
+    func `Background element click rejects a snapshot from a prior process generation`() async throws {
+        let application = ServiceApplicationInfo(
+            processIdentifier: 12345,
+            processStartIdentity: 8,
+            bundleIdentifier: "com.example.test",
+            name: "TestApp",
+            activationPolicy: .regular
+        )
+        let context = await self.makeContext(application: application)
+        let snapshotId = try await self.storeSnapshot(
+            element: DetectedElement(
+                id: "B1",
+                type: .button,
+                label: "Save",
+                bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
+            ),
+            windowID: 42,
+            in: context.snapshots
+        )
+
+        let result = try await InProcessCommandRunner.run(
+            ["click", "--on", "B1", "--snapshot", snapshotId, "--app", "TestApp", "--json"],
+            services: context.services
+        )
+
+        #expect(result.exitStatus != 0)
+        #expect(await self.automationState(context) { $0.targetedClickCalls.isEmpty })
+        #expect(result.combinedOutput.contains("different process generation"))
+    }
+
+    @Test
+    func `Background element click rejects snapshot PID without capture generation`() async throws {
+        let context = await self.makeContext()
+        let snapshotId = try await self.storeSnapshot(
+            element: DetectedElement(
+                id: "B1",
+                type: .button,
+                label: "Save",
+                bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
+            ),
+            windowID: 42,
+            includeMutationIdentity: false,
+            in: context.snapshots
+        )
+
+        let result = try await InProcessCommandRunner.run(
+            ["click", "--on", "B1", "--snapshot", snapshotId, "--json"],
+            services: context.services
+        )
+
+        #expect(result.exitStatus != 0)
+        #expect(result.combinedOutput.contains("no capture-time process-generation receipt"))
+        #expect(await self.automationState(context) { $0.targetedClickCalls.isEmpty })
     }
 
     @Test
@@ -256,7 +316,7 @@ struct ClickCommandTests {
             label: "Save",
             bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
         )
-        let snapshotId = try await storeSnapshot(element: element, in: context.snapshots)
+        let snapshotId = try await storeSnapshot(element: element, windowID: 42, in: context.snapshots)
 
         let result = try await InProcessCommandRunner.run(
             ["click", "Save", "--snapshot", snapshotId, "--json"],
@@ -490,7 +550,7 @@ struct ClickCommandTests {
             label: "Close",
             bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
         )
-        let snapshotId = try await storeSnapshot(element: element, in: context.snapshots)
+        let snapshotId = try await storeSnapshot(element: element, windowID: 42, in: context.snapshots)
         context.snapshots.uiAutomationSnapshotError = .snapshotStale("target changed after click")
 
         let result = try await InProcessCommandRunner.run(
@@ -510,6 +570,7 @@ struct ClickCommandTests {
     func `Foreground click failure after focus invalidates latest snapshot`() async throws {
         let application = ServiceApplicationInfo(
             processIdentifier: 12345,
+            processStartIdentity: 7,
             bundleIdentifier: "com.example.peekaboo-focus-mutation-fixture",
             name: "PeekabooFocusMutationFixture",
             isActive: false,
@@ -550,7 +611,7 @@ struct ClickCommandTests {
             label: "Save",
             bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
         )
-        let snapshotId = try await storeSnapshot(element: element, in: context.snapshots)
+        let snapshotId = try await storeSnapshot(element: element, windowID: 42, in: context.snapshots)
         let result = try await InProcessCommandRunner.run(
             ["click", "Save", "--app", application.name, "--json"],
             services: context.services
@@ -584,14 +645,13 @@ struct ClickCommandTests {
         windows: [ServiceWindowInfo] = []
     ) async -> TestServicesFactory.AutomationTestContext {
         await MainActor.run {
-            let applications = application.map { [$0] } ?? []
+            let resolvedApplication = application ?? Self.makeApplication()
+            let applications = [resolvedApplication]
             var windowsByApp: [String: [ServiceWindowInfo]] = [:]
-            if let application {
-                windowsByApp[application.name] = windows
-                windowsByApp["PID:\(application.processIdentifier)"] = windows
-                if let bundleIdentifier = application.bundleIdentifier {
-                    windowsByApp[bundleIdentifier] = windows
-                }
+            windowsByApp[resolvedApplication.name] = windows
+            windowsByApp["PID:\(resolvedApplication.processIdentifier)"] = windows
+            if let bundleIdentifier = resolvedApplication.bundleIdentifier {
+                windowsByApp[bundleIdentifier] = windows
             }
             return TestServicesFactory.makeAutomationTestContext(
                 applications: StubApplicationService(applications: applications, windowsByApp: windowsByApp),
@@ -643,6 +703,7 @@ struct ClickCommandTests {
     private static func makeApplication() -> ServiceApplicationInfo {
         ServiceApplicationInfo(
             processIdentifier: 12345,
+            processStartIdentity: 7,
             bundleIdentifier: "com.example.test",
             name: "TestApp",
             isActive: false,

@@ -159,7 +159,7 @@ extension UIAutomationService {
                 try await self.clickService.click(target: target, clickType: clickType, snapshotId: snapshotId)
             }
 
-            try await self.visualizeClick(
+            await self.visualizeClick(
                 target: target,
                 actionAnchor: result.anchorPoint,
                 clickType: clickType,
@@ -185,12 +185,64 @@ extension UIAutomationService {
                     targetProcessIdentifier: targetProcessIdentifier)
             }
 
-            try await self.visualizeClick(
+            await self.visualizeClick(
                 target: target,
                 actionAnchor: result.anchorPoint,
                 clickType: clickType,
                 snapshotId: snapshotId,
                 targetProcessIdentifier: targetProcessIdentifier)
+        }
+    }
+
+    public func click(
+        target: ClickTarget,
+        clickType: ClickType,
+        snapshotId: String?,
+        expectedProcessIdentity: ApplicationProcessIdentity) async throws
+    {
+        try await self.operationLaneCoordinator.run(scope: .process(expectedProcessIdentity), access: .write) {
+            if let snapshotId,
+               let detection = try? await self.snapshotManager.getDetectionResult(snapshotId: snapshotId),
+               let capturedIdentity = detection.metadata.windowContext?.windowMutationIdentity
+            {
+                guard capturedIdentity.ownerProcessIdentifier == expectedProcessIdentity.processIdentifier,
+                      capturedIdentity.ownerProcessStartIdentity == expectedProcessIdentity.processStartIdentity
+                else {
+                    throw PeekabooError.snapshotStale(
+                        "Background click snapshot belongs to a different process generation")
+                }
+            }
+            let targetIsCurrent: @MainActor @Sendable () -> Bool = {
+                self.processStartIdentityProvider(expectedProcessIdentity.processIdentifier) ==
+                    expectedProcessIdentity.processStartIdentity
+            }
+            guard targetIsCurrent() else {
+                throw PeekabooError.invalidInput(
+                    "Background click target process exited or changed process generation")
+            }
+            self.logger.debug("Delegating generation-pinned background click to ClickService")
+            defer { self.elementDetectionService.invalidateCache() }
+            let result = try await self.normalizingSnapshotErrors {
+                try await self.clickService.click(
+                    target: target,
+                    clickType: clickType,
+                    snapshotId: snapshotId,
+                    targetProcessIdentifier: expectedProcessIdentity.processIdentifier,
+                    expectedProcessIdentity: expectedProcessIdentity)
+            }
+            guard targetIsCurrent() else {
+                throw InputDeliveryIndeterminateError(
+                    operation: .click,
+                    emittedUnitCount: 1,
+                    causeDescription: "The target process changed generation before completion validation")
+            }
+
+            await self.visualizeClick(
+                target: target,
+                actionAnchor: result.anchorPoint,
+                clickType: clickType,
+                snapshotId: snapshotId,
+                targetProcessIdentifier: expectedProcessIdentity.processIdentifier)
         }
     }
 
@@ -218,12 +270,13 @@ extension UIAutomationService {
                     clickType: clickType,
                     snapshotId: snapshotId,
                     targetProcessIdentifier: expectedWindowIdentity.ownerProcessIdentifier,
+                    expectedProcessIdentity: processIdentity,
                     targetWindowID: expectedWindowIdentity.windowID,
                     expectedWindowIdentity: expectedWindowIdentity,
                     expectedWindowBounds: expectedWindowBounds)
             }
 
-            try await self.visualizeClick(
+            await self.visualizeClick(
                 target: target,
                 actionAnchor: result.anchorPoint,
                 clickType: clickType,
@@ -239,10 +292,10 @@ extension UIAutomationService {
         actionAnchor: CGPoint?,
         clickType: ClickType,
         snapshotId: String?,
-        targetProcessIdentifier: pid_t?) async throws
+        targetProcessIdentifier: pid_t?) async
     {
         guard targetProcessIdentifier == nil else { return }
-        let fallbackPoint = try await self.getClickPoint(for: target, snapshotId: snapshotId)
+        let fallbackPoint = await self.getClickPoint(for: target, snapshotId: snapshotId)
         if let clickPoint = Self.visualFeedbackPoint(actionAnchor: actionAnchor, fallbackPoint: fallbackPoint) {
             _ = await self.feedbackClient.showClickFeedback(
                 at: clickPoint,
@@ -261,7 +314,7 @@ extension UIAutomationService {
         }
     }
 
-    private func getClickPoint(for target: ClickTarget, snapshotId: String?) async throws -> CGPoint? {
+    private func getClickPoint(for target: ClickTarget, snapshotId: String?) async -> CGPoint? {
         switch target {
         case let .coordinates(point):
             return point
