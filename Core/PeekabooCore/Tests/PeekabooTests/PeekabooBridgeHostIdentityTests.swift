@@ -122,6 +122,7 @@ struct PeekabooBridgeHostIdentityTests {
         #expect(handshake.hostCapabilities == [
             PeekabooBridgeHostCapability.backgroundBridgeHost,
             PeekabooBridgeHostCapability.codeSignatureBuildIdentity,
+            PeekabooBridgeHostCapability.desktopObservationCaptureEngine,
             PeekabooBridgeHostCapability.desktopObservationOCR,
             PeekabooBridgeHostCapability.hostGenerationIdentity,
         ])
@@ -129,7 +130,7 @@ struct PeekabooBridgeHostIdentityTests {
 
     @Test
     @MainActor
-    func `host advertises desktop observation OCR only when desktop observation is allowed`() {
+    func `host advertises desktop observation extensions only when desktop observation is allowed`() {
         let observationServer = PeekabooBridgeServer(
             services: PeekabooServices(),
             allowlistedTeams: [],
@@ -142,9 +143,21 @@ struct PeekabooBridgeHostIdentityTests {
             allowlistedBundles: [],
             allowedOperations: [.captureScreen],
             hostIdentity: nil)
+        let unverifiedObservationServer = PeekabooBridgeServer(
+            services: StubServices(),
+            allowlistedTeams: [],
+            allowlistedBundles: [],
+            allowedOperations: [.desktopObservation],
+            hostIdentity: nil)
 
         #expect(observationServer.hostCapabilities.contains(PeekabooBridgeHostCapability.desktopObservationOCR))
+        #expect(observationServer.hostCapabilities.contains(
+            PeekabooBridgeHostCapability.desktopObservationCaptureEngine))
         #expect(!captureOnlyServer.hostCapabilities.contains(PeekabooBridgeHostCapability.desktopObservationOCR))
+        #expect(!captureOnlyServer.hostCapabilities.contains(
+            PeekabooBridgeHostCapability.desktopObservationCaptureEngine))
+        #expect(!unverifiedObservationServer.hostCapabilities.contains(
+            PeekabooBridgeHostCapability.desktopObservationCaptureEngine))
     }
 
     @Test
