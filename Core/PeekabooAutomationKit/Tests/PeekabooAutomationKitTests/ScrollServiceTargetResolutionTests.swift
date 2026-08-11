@@ -3,6 +3,8 @@ import ApplicationServices
 @preconcurrency import AXorcist
 import CoreGraphics
 import Foundation
+import PeekabooAutomationKitTestSupport
+import struct PeekabooFoundation.DesktopActionOutcome
 import enum PeekabooFoundation.PeekabooError
 import enum PeekabooFoundation.ScrollDirection
 import Testing
@@ -269,38 +271,47 @@ private final class ScrollRecordingActionInputDriver: ActionInputDriving {
 
     private(set) var scrollCalls: [ScrollCall] = []
 
-    func tryClick(element _: AutomationElement) throws -> ActionInputResult {
-        ActionInputResult()
+    func tryClick(element _: AutomationElement) throws -> UIInputExecutionResult.Action {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
-    func tryRightClick(element _: any AutomationElementRepresenting) async throws -> ActionInputResult {
-        ActionInputResult()
+    func tryRightClick(element _: any AutomationElementRepresenting) async throws
+        -> UIInputExecutionResult.Action
+    {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
     func tryScroll(
         element _: AutomationElement,
         direction: PeekabooFoundation.ScrollDirection,
-        pages: Int) throws
-        -> ActionInputResult
+        pages: Int) throws -> UIInputExecutionResult.Action
     {
         self.scrollCalls.append(.init(direction: direction, pages: pages))
-        return ActionInputResult(actionName: "AXScroll", elementRole: "AXScrollArea")
+        return AutomationTestFixtures.uiActionReceipt(actionName: "AXScroll", elementRole: "AXScrollArea")
     }
 
-    func trySetText(element _: AutomationElement, text _: String, replace _: Bool) throws -> ActionInputResult {
-        ActionInputResult()
+    func trySetText(element _: AutomationElement, text _: String, replace _: Bool) throws
+        -> UIInputExecutionResult.Action
+    {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
-    func tryHotkey(application _: NSRunningApplication, keys _: [String]) throws -> ActionInputResult {
-        ActionInputResult()
+    func tryHotkey(application _: NSRunningApplication, keys _: [String]) throws
+        -> UIInputExecutionResult.Action
+    {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
-    func trySetValue(element _: AutomationElement, value _: UIElementValue) throws -> ActionInputResult {
-        ActionInputResult()
+    func trySetValue(element _: AutomationElement, value _: UIElementValue) throws
+        -> UIInputExecutionResult.Action
+    {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
-    func tryPerformAction(element _: AutomationElement, actionName _: String) throws -> ActionInputResult {
-        ActionInputResult()
+    func tryPerformAction(element _: AutomationElement, actionName _: String) throws
+        -> UIInputExecutionResult.Action
+    {
+        AutomationTestFixtures.uiActionReceipt()
     }
 }
 
@@ -315,12 +326,19 @@ private final class ScrollRecordingSyntheticInputDriver: SyntheticInputDriving {
 
     private(set) var events: [Event] = []
 
-    func click(at point: CGPoint, button: MouseButton, count: Int) throws {
+    func click(at point: CGPoint, button: MouseButton, count: Int) throws -> DesktopActionOutcome {
         self.events.append(.click(point: point, button: button, count: count))
+        return AutomationTestFixtures.uiActionReceipt().outcome
     }
 
-    func click(at point: CGPoint, button: MouseButton, count: Int, targetProcessIdentifier _: pid_t) async throws {
+    func click(
+        at point: CGPoint,
+        button: MouseButton,
+        count: Int,
+        targetProcessIdentifier _: pid_t) async throws -> DesktopActionOutcome
+    {
         self.events.append(.click(point: point, button: button, count: count))
+        return AutomationTestFixtures.uiActionReceipt().outcome
     }
 
     func move(to point: CGPoint) throws {

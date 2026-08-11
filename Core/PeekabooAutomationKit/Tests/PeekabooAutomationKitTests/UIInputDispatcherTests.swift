@@ -1,8 +1,58 @@
+import Foundation
+import PeekabooFoundation
 import Testing
 @testable import PeekabooAutomationKit
 
 @MainActor
 struct UIInputDispatcherTests {
+    @Test
+    func `v4 initializer remains source compatible and never invents outcome evidence`() {
+        let result = UIInputExecutionResult(
+            verb: .click,
+            strategy: .actionFirst,
+            path: .action,
+            actionName: "AXPress")
+
+        #expect(result.verb == .click)
+        #expect(result.strategy == .actionFirst)
+        #expect(result.path == .action)
+        #expect(result.actionName == "AXPress")
+        #expect(result.outcome.state == .indeterminate)
+        #expect(result.outcome.delivery == nil)
+        #expect(result.outcome.dispatchState == .mayHaveDispatched(unitCount: nil))
+        #expect(result.outcome.retrySafety == .unsafe)
+    }
+
+    @Test
+    func `v4 payload without outcome decodes conservatively`() throws {
+        let data = Data(#"{"verb":"click","strategy":"actionFirst","path":"action","duration":0.25}"#.utf8)
+
+        let result = try JSONDecoder().decode(UIInputExecutionResult.self, from: data)
+
+        #expect(result.duration == 0.25)
+        #expect(result.outcome.state == .indeterminate)
+        #expect(result.outcome.evidence == .completionUnknown)
+        #expect(result.outcome.dispatchState == .mayHaveDispatched(unitCount: nil))
+        #expect(result.outcome.retrySafety == .unsafe)
+    }
+
+    @Test
+    func `current execution result round trips its exact outcome`() throws {
+        let result = UIInputExecutionResult(
+            outcome: Self.actionOutcome,
+            verb: .click,
+            strategy: .actionFirst,
+            path: .action,
+            actionName: "AXPress")
+
+        let decoded = try JSONDecoder().decode(
+            UIInputExecutionResult.self,
+            from: JSONEncoder().encode(result))
+
+        #expect(decoded == result)
+        #expect(decoded.outcome == Self.actionOutcome)
+    }
+
     @Test
     func `action-first success returns action path`() async throws {
         var synthCalled = false
@@ -11,13 +61,19 @@ struct UIInputDispatcherTests {
             verb: .click,
             strategy: .actionFirst,
             action: {
-                ActionInputResult(actionName: "AXPress", elementRole: "AXButton")
+                UIInputExecutionResult.Action(
+                    outcome: Self.actionOutcome,
+                    actionName: "AXPress",
+                    anchorPoint: nil,
+                    elementRole: "AXButton")
             },
             synth: {
                 synthCalled = true
+                return Self.synthOutcome
             })
 
         #expect(result.path == .action)
+        #expect(result.outcome == Self.actionOutcome)
         #expect(result.actionName == "AXPress")
         #expect(result.elementRole == "AXButton")
         #expect(!synthCalled)
@@ -35,9 +91,11 @@ struct UIInputDispatcherTests {
             },
             synth: {
                 synthCalled = true
+                return Self.synthOutcome
             })
 
         #expect(result.path == .synth)
+        #expect(result.outcome == Self.synthOutcome)
         #expect(result.fallbackReason == .actionUnsupported)
         #expect(synthCalled)
     }
@@ -64,6 +122,7 @@ struct UIInputDispatcherTests {
                 },
                 synth: {
                     synthCalled = true
+                    return Self.synthOutcome
                 })
 
             #expect(result.path == .synth)
@@ -85,6 +144,7 @@ struct UIInputDispatcherTests {
                 },
                 synth: {
                     synthCalled = true
+                    return Self.synthOutcome
                 })
             Issue.record("Expected stale action element to throw.")
         } catch let error as ActionInputError {
@@ -109,6 +169,7 @@ struct UIInputDispatcherTests {
                 },
                 synth: {
                     synthCalled = true
+                    return Self.synthOutcome
                 })
             Issue.record("Expected permission denial to throw.")
         } catch let error as ActionInputError {
@@ -133,6 +194,7 @@ struct UIInputDispatcherTests {
                 },
                 synth: {
                     synthCalled = true
+                    return Self.synthOutcome
                 })
             Issue.record("Expected target unavailable to throw.")
         } catch let error as ActionInputError {
@@ -157,6 +219,7 @@ struct UIInputDispatcherTests {
                 },
                 synth: {
                     synthCalled = true
+                    return Self.synthOutcome
                 })
             Issue.record("Expected action-only unsupported action to throw.")
         } catch let error as ActionInputError {
@@ -178,13 +241,20 @@ struct UIInputDispatcherTests {
             strategy: .synthFirst,
             action: {
                 actionCalled = true
-                return ActionInputResult(actionName: "AXPress")
+                return UIInputExecutionResult.Action(
+                    outcome: Self.actionOutcome,
+                    actionName: "AXPress",
+                    anchorPoint: nil,
+                    elementRole: nil)
             },
             synth: {
                 synthCalled = true
+                return Self.synthOutcome
             })
 
         #expect(result.path == .synth)
+        #expect(result.outcome.state == .dispatchedUnverified)
+        #expect(result.outcome.effect == .unverifiable)
         #expect(!actionCalled)
         #expect(synthCalled)
     }
@@ -199,13 +269,20 @@ struct UIInputDispatcherTests {
             strategy: .synthOnly,
             action: {
                 actionCalled = true
-                return ActionInputResult(actionName: "AXScrollDownByPage")
+                return UIInputExecutionResult.Action(
+                    outcome: Self.actionOutcome,
+                    actionName: "AXScrollDownByPage",
+                    anchorPoint: nil,
+                    elementRole: nil)
             },
             synth: {
                 synthCalled = true
+                return Self.synthOutcome
             })
 
         #expect(result.path == .synth)
+        #expect(result.outcome.state == .dispatchedUnverified)
+        #expect(result.outcome.effect == .unverifiable)
         #expect(!actionCalled)
         #expect(synthCalled)
     }
@@ -221,12 +298,21 @@ struct UIInputDispatcherTests {
                 action: nil,
                 synth: {
                     synthCalled = true
+                    return Self.synthOutcome
                 })
             Issue.record("Expected action-only without an action closure to throw.")
         } catch {}
 
         #expect(!synthCalled)
     }
+
+    private static let actionOutcome = DesktopActionOutcome.dispatchedUnverified(
+        delivery: .init(mechanism: .accessibilityAction, mode: .background),
+        evidence: .deliveryAccepted)
+
+    private static let synthOutcome = DesktopActionOutcome.dispatchedUnverified(
+        delivery: .init(mechanism: .processTargetedEvents, mode: .background),
+        evidence: .deliveryAccepted)
 }
 
 extension ActionInputUnsupportedReason {

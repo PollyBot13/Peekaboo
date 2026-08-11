@@ -1,5 +1,6 @@
 import Foundation
 import os.log
+import PeekabooFoundation
 
 /// Runs one UI input verb according to the selected action/synthesis strategy.
 @MainActor
@@ -10,8 +11,8 @@ enum UIInputDispatcher {
         verb: UIInputVerb,
         strategy: UIInputStrategy,
         bundleIdentifier: String? = nil,
-        action: (() async throws -> ActionInputResult)?,
-        synth: () async throws -> Void) async throws -> UIInputExecutionResult
+        action: (() async throws -> UIInputExecutionResult.Action)?,
+        synth: () async throws -> DesktopActionOutcome) async throws -> UIInputExecutionResult
     {
         let startedAt = Date()
         let context = DispatchContext(
@@ -31,9 +32,11 @@ enum UIInputDispatcher {
                     fallbackReason: nil,
                     duration: duration)
                 return UIInputExecutionResult(
+                    outcome: result.outcome,
                     verb: verb,
                     strategy: strategy,
                     path: .action,
+                    fallbackReason: nil,
                     bundleIdentifier: bundleIdentifier,
                     elementRole: result.elementRole,
                     actionName: result.actionName,
@@ -76,9 +79,11 @@ enum UIInputDispatcher {
                     fallbackReason: nil,
                     duration: duration)
                 return UIInputExecutionResult(
+                    outcome: result.outcome,
                     verb: verb,
                     strategy: strategy,
                     path: .action,
+                    fallbackReason: nil,
                     bundleIdentifier: bundleIdentifier,
                     elementRole: result.elementRole,
                     actionName: result.actionName,
@@ -99,7 +104,10 @@ enum UIInputDispatcher {
         }
     }
 
-    private static func runAction(_ action: (() async throws -> ActionInputResult)?) async throws -> ActionInputResult {
+    private static func runAction(
+        _ action: (() async throws -> UIInputExecutionResult.Action)?) async throws
+        -> UIInputExecutionResult.Action
+    {
         guard let action else {
             throw ActionInputError.unsupported(.missingElement)
         }
@@ -109,10 +117,10 @@ enum UIInputDispatcher {
     private static func runSynth(
         context: DispatchContext,
         fallbackReason: UIInputFallbackReason?,
-        synth: () async throws -> Void) async throws -> UIInputExecutionResult
+        synth: () async throws -> DesktopActionOutcome) async throws -> UIInputExecutionResult
     {
         do {
-            try await synth()
+            let outcome = try await synth()
             let duration = Date().timeIntervalSince(context.startedAt)
             self.logPath(
                 context: context,
@@ -120,11 +128,15 @@ enum UIInputDispatcher {
                 fallbackReason: fallbackReason,
                 duration: duration)
             return UIInputExecutionResult(
+                outcome: outcome,
                 verb: context.verb,
                 strategy: context.strategy,
                 path: .synth,
                 fallbackReason: fallbackReason,
                 bundleIdentifier: context.bundleIdentifier,
+                elementRole: nil,
+                actionName: nil,
+                anchorPoint: nil,
                 duration: duration)
         } catch {
             self.recordFailure(

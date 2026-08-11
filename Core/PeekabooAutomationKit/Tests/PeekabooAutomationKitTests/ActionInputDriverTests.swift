@@ -144,6 +144,9 @@ struct ActionInputDriverTests {
         let result = try ActionInputDriver().tryScrollForTesting(element: element, direction: .down, pages: 1)
 
         #expect(result.actionName == "AXScrollDownByPage")
+        #expect(result.outcome.state == .dispatchedUnverified)
+        #expect(result.outcome.evidence == .deliveryAccepted)
+        #expect(result.outcome.delivery == .init(mechanism: .accessibilityAction, mode: .background))
         #expect(element.performedActions == ["AXScrollDownByPage"])
     }
 
@@ -624,6 +627,8 @@ struct ActionInputDriverTests {
         let result = try ActionInputDriver().tryClickForTesting(element: element)
 
         #expect(element.performedActions == [AXActionNames.kAXPressAction])
+        #expect(result.outcome.state == .dispatchedUnverified)
+        #expect(result.outcome.evidence == .deliveryAccepted)
         #expect(result.anchorPoint == CGPoint(x: 25, y: 40))
         #expect(result.elementRole == AXRoleNames.kAXButtonRole)
     }
@@ -697,19 +702,6 @@ struct ActionInputDriverTests {
 
     @MainActor
     @Test
-    func `mock element can exercise direct value setter without live AX`() throws {
-        let element = MockAutomationElement(
-            role: AXRoleNames.kAXTextFieldRole,
-            isValueSettable: true)
-
-        let result = try ActionInputDriver().trySetValueForTesting(element: element, value: .string("hello"))
-
-        #expect(element.setValues == [.string("hello")])
-        #expect(result.actionName == AXActionNames.kAXSetValueAction)
-    }
-
-    @MainActor
-    @Test
     func `numeric slider coerces CLI text to a floating point AX value`() throws {
         let element = MockAutomationElement(
             role: AXRoleNames.kAXSliderRole,
@@ -720,6 +712,8 @@ struct ActionInputDriverTests {
 
         #expect(element.setValues == [.double(0.75)])
         #expect((element.value as? Double) == 0.75)
+        #expect(result.outcome.state == .confirmedChange)
+        #expect(result.outcome.evidence == .verifiedChange)
         #expect(result.actionName == AXActionNames.kAXSetValueAction)
     }
 
@@ -735,6 +729,7 @@ struct ActionInputDriverTests {
 
         #expect(element.setSelectedValues == [true])
         #expect(element.selectedValue == true)
+        #expect(result.outcome.state == .confirmedChange)
         #expect(result.actionName == kAXSelectedAttribute as String)
     }
 
@@ -763,6 +758,8 @@ struct ActionInputDriverTests {
         let result = try ActionInputDriver().trySetValueForTesting(element: element, value: .string("0.75"))
 
         #expect(element.setValues.isEmpty)
+        #expect(result.outcome.state == .confirmedNoChange)
+        #expect(result.outcome.dispatchState == .none)
         #expect(result.actionName == AXActionNames.kAXSetValueAction)
     }
 
@@ -912,6 +909,39 @@ struct ActionInputDriverTests {
     }
 }
 
+struct ActionInputDriverOutcomeTests {
+    @MainActor
+    @Test
+    func `unknown pre-action value remains dispatched but unverified`() throws {
+        let element = MockAutomationElement(
+            role: AXRoleNames.kAXTextFieldRole,
+            isValueSettable: true)
+        let result = try ActionInputDriver().trySetValueForTesting(element: element, value: .string("hello"))
+
+        #expect(element.setValues == [.string("hello")])
+        #expect(result.outcome.state == .dispatchedUnverified)
+        #expect(result.outcome.evidence == .deliveryAccepted)
+        #expect(result.outcome.retrySafety == .unsafe)
+        #expect(result.outcome.delivery == .init(mechanism: .accessibilityValue, mode: .background))
+        #expect(result.actionName == AXActionNames.kAXSetValueAction)
+    }
+
+    @MainActor
+    @Test
+    func `unknown pre-action selected state remains dispatched but unverified`() throws {
+        let element = MockAutomationElement(
+            role: AXRoleNames.kAXRowRole,
+            isSelectedSettable: true)
+        let result = try ActionInputDriver().trySetValueForTesting(element: element, value: .string("true"))
+
+        #expect(element.setSelectedValues == [true])
+        #expect(element.selectedValue == true)
+        #expect(result.outcome.state == .dispatchedUnverified)
+        #expect(result.outcome.evidence == .deliveryAccepted)
+        #expect(result.outcome.retrySafety == .unsafe)
+    }
+}
+
 @MainActor
 private final class PhantomSuccessAutomationElement: AutomationElementRepresenting, @unchecked Sendable {
     let name: String? = nil
@@ -962,49 +992,53 @@ private final class RecordingActionInputDriver: ActionInputDriving {
         self.elementActionError = elementActionError
     }
 
-    func tryClick(element _: AutomationElement) throws -> ActionInputResult {
+    func tryClick(element _: AutomationElement) throws -> UIInputExecutionResult.Action {
         Issue.record("Action driver should not be called")
-        return ActionInputResult()
+        return UIInputExecutionResult.Action(outcome: .confirmedNoChange())
     }
 
-    func tryRightClick(element _: any AutomationElementRepresenting) async throws -> ActionInputResult {
+    func tryRightClick(element _: any AutomationElementRepresenting) async throws -> UIInputExecutionResult.Action {
         Issue.record("Action driver should not be called")
-        return ActionInputResult()
+        return UIInputExecutionResult.Action(outcome: .confirmedNoChange())
     }
 
     func tryScroll(
         element _: AutomationElement,
         direction _: PeekabooFoundation.ScrollDirection,
-        pages _: Int) throws -> ActionInputResult
+        pages _: Int) throws -> UIInputExecutionResult.Action
     {
         Issue.record("Action driver should not be called")
-        return ActionInputResult()
+        return UIInputExecutionResult.Action(outcome: .confirmedNoChange())
     }
 
-    func trySetText(element _: AutomationElement, text _: String, replace _: Bool) throws -> ActionInputResult {
+    func trySetText(element _: AutomationElement, text _: String, replace _: Bool) throws
+    -> UIInputExecutionResult.Action {
         Issue.record("Action driver should not be called")
-        return ActionInputResult()
+        return UIInputExecutionResult.Action(outcome: .confirmedNoChange())
     }
 
-    func tryHotkey(application _: NSRunningApplication, keys _: [String]) throws -> ActionInputResult {
+    func tryHotkey(application _: NSRunningApplication, keys _: [String]) throws
+    -> UIInputExecutionResult.Action {
         Issue.record("Action driver should not be called")
-        return ActionInputResult()
+        return UIInputExecutionResult.Action(outcome: .confirmedNoChange())
     }
 
-    func trySetValue(element _: AutomationElement, value _: UIElementValue) throws -> ActionInputResult {
+    func trySetValue(element _: AutomationElement, value _: UIElementValue) throws
+    -> UIInputExecutionResult.Action {
         if let elementActionError {
             throw elementActionError
         }
         Issue.record("Action driver should not be called")
-        return ActionInputResult()
+        return UIInputExecutionResult.Action(outcome: .confirmedNoChange())
     }
 
-    func tryPerformAction(element _: AutomationElement, actionName _: String) throws -> ActionInputResult {
+    func tryPerformAction(element _: AutomationElement, actionName _: String) throws
+    -> UIInputExecutionResult.Action {
         if let elementActionError {
             throw elementActionError
         }
         Issue.record("Action driver should not be called")
-        return ActionInputResult()
+        return UIInputExecutionResult.Action(outcome: .confirmedNoChange())
     }
 }
 

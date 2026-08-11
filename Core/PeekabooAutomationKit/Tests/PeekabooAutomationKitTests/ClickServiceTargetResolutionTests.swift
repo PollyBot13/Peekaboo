@@ -3,6 +3,9 @@ import ApplicationServices
 @preconcurrency import AXorcist
 import CoreGraphics
 import Foundation
+import PeekabooAutomationKitTestSupport
+import struct PeekabooFoundation.DesktopActionFailure
+import struct PeekabooFoundation.DesktopActionOutcome
 import enum PeekabooFoundation.PeekabooError
 import enum PeekabooFoundation.ScrollDirection
 import Testing
@@ -120,12 +123,52 @@ struct ClickServiceTargetResolutionTests {
                 snapshotId: "snapshot",
                 expectedProcessIdentity: identity)
             Issue.record("Expected post-dispatch process drift")
-        } catch let error as InputDeliveryIndeterminateError {
-            #expect(error.operation == .click)
-            #expect(error.emittedUnitCount == 1)
-            #expect(!error.retrySafe)
+        } catch let failure as DesktopActionFailure {
+            #expect(failure.outcome.state == .dispatchedUnverified)
+            #expect(failure.outcome.retrySafety == .unsafe)
+            #expect(failure.causeDescription?.contains("generation") == true)
         }
         #expect(action.performedActionNames == [AXActionNames.kAXPressAction])
+    }
+
+    @Test
+    @MainActor
+    func `post-click focus failure preserves dispatched outcome for id and query targets`() async throws {
+        let element = DetectedElement(
+            id: "B1",
+            type: .button,
+            label: "Post Validation Target",
+            bounds: CGRect(x: 20, y: 30, width: 100, height: 40),
+            attributes: ["identifier": "peekaboo-post-validation-never-focused"])
+        let detection = ElementDetectionResult(
+            snapshotId: "snapshot",
+            screenshotPath: "/tmp/shot.png",
+            elements: DetectedElements(buttons: [element]),
+            metadata: DetectionMetadata(detectionTime: 0, elementCount: 1, method: "test"))
+
+        for target in [ClickTarget.elementId("B1"), .query("Post Validation Target")] {
+            let synthetic = ClickRecordingSyntheticInputDriver(failGlobalClickAt: 2)
+            let service = ClickService(
+                snapshotManager: InMemorySnapshotManager(detectionResult: detection),
+                inputPolicy: UIInputPolicy(defaultStrategy: .synthOnly),
+                syntheticInputDriver: synthetic)
+
+            do {
+                _ = try await service.click(target: target, clickType: .single, snapshotId: "snapshot")
+                Issue.record("Expected post-click focus validation failure")
+            } catch let failure as DesktopActionFailure {
+                #expect(failure.outcome.state == .dispatchedUnverified)
+                #expect(failure.outcome.delivery == .init(mechanism: .globalEvents, mode: .foreground))
+                #expect(failure.outcome.retrySafety == .unsafe)
+                #expect(failure.causeDescription?.contains("synthetic click failure") == true)
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+
+            #expect(synthetic.events == [
+                .click(point: CGPoint(x: 70, y: 50), button: .left, count: 1),
+            ])
+        }
     }
 
     @Test
@@ -341,7 +384,12 @@ struct ClickServiceTargetResolutionTests {
                 method: "test",
                 windowContext: Self.exactWindowContext(processIdentifier: pid)))
         let action = ClickSuccessfulActionInputDriver()
-        let synthetic = ClickRecordingSyntheticInputDriver()
+        let unitCount = try #require(DesktopActionOutcome.DispatchUnitCount(4))
+        let expectedOutcome = DesktopActionOutcome.dispatchedUnverified(
+            delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+            evidence: .deliveryAccepted,
+            unitCount: unitCount)
+        let synthetic = ClickRecordingSyntheticInputDriver(targetedClickOutcome: expectedOutcome)
         let service = ClickService(
             snapshotManager: InMemorySnapshotManager(detectionResult: detectionResult),
             inputPolicy: UIInputPolicy(defaultStrategy: .actionFirst),
@@ -358,6 +406,8 @@ struct ClickServiceTargetResolutionTests {
 
         #expect(result.path == .synth)
         #expect(result.fallbackReason == .actionUnsupported)
+        #expect(result.outcome == expectedOutcome)
+        #expect(result.outcome.dispatchState.unitCount == unitCount)
         #expect(action.performedActionNames.isEmpty)
         #expect(synthetic.events == [
             .targetedClick(
@@ -1241,17 +1291,38 @@ final class ClickRecordingSyntheticInputDriver: SyntheticInputDriving {
 
     private(set) var events: [Event] = []
     private(set) var targetedClickAttempts = 0
+    private var globalClickAttempts = 0
     private let targetedClickError: (any Error)?
+    private let targetedClickOutcome: DesktopActionOutcome
+    private let failGlobalClickAt: Int?
 
-    init(targetedClickError: (any Error)? = nil) {
+    init(
+        targetedClickError: (any Error)? = nil,
+        targetedClickOutcome: DesktopActionOutcome = AutomationTestFixtures.uiActionReceipt().outcome,
+        failGlobalClickAt: Int? = nil)
+    {
         self.targetedClickError = targetedClickError
+        self.targetedClickOutcome = targetedClickOutcome
+        self.failGlobalClickAt = failGlobalClickAt
     }
 
-    func click(at point: CGPoint, button: MouseButton, count: Int) throws {
+    func click(at point: CGPoint, button: MouseButton, count: Int) throws -> DesktopActionOutcome {
+        self.globalClickAttempts += 1
+        if let failGlobalClickAt, self.globalClickAttempts == failGlobalClickAt {
+            throw ActionInputError.failed("synthetic click failure")
+        }
         self.events.append(.click(point: point, button: button, count: count))
+        return .dispatchedUnverified(
+            delivery: .init(mechanism: .globalEvents, mode: .foreground),
+            evidence: .deliveryAccepted)
     }
 
-    func click(at point: CGPoint, button: MouseButton, count: Int, targetProcessIdentifier: pid_t) async throws {
+    func click(
+        at point: CGPoint,
+        button: MouseButton,
+        count: Int,
+        targetProcessIdentifier: pid_t) async throws -> DesktopActionOutcome
+    {
         try await self.click(
             at: point,
             button: button,
@@ -1265,7 +1336,7 @@ final class ClickRecordingSyntheticInputDriver: SyntheticInputDriving {
         button: MouseButton,
         count: Int,
         targetProcessIdentifier: pid_t,
-        targetWindowID: CGWindowID?) async throws
+        targetWindowID: CGWindowID?) async throws -> DesktopActionOutcome
     {
         self.targetedClickAttempts += 1
         if let targetedClickError {
@@ -1277,6 +1348,7 @@ final class ClickRecordingSyntheticInputDriver: SyntheticInputDriving {
             count: count,
             targetProcessIdentifier: targetProcessIdentifier,
             targetWindowID: targetWindowID))
+        return self.targetedClickOutcome
     }
 
     func move(to point: CGPoint) throws {
@@ -1400,44 +1472,49 @@ private final class ClickSuccessfulActionInputDriver: ActionInputDriving {
         self.afterAction = afterAction
     }
 
-    func tryClick(element _: AutomationElement) throws -> ActionInputResult {
+    func tryClick(element _: AutomationElement) throws -> UIInputExecutionResult.Action {
         self.clickCount += 1
-        return ActionInputResult(actionName: "AXPress", anchorPoint: CGPoint(x: 70, y: 50), elementRole: "AXButton")
+        return AutomationTestFixtures.uiActionReceipt(
+            actionName: "AXPress",
+            anchorPoint: CGPoint(x: 70, y: 50),
+            elementRole: "AXButton")
     }
 
-    func tryRightClick(element _: any AutomationElementRepresenting) async throws -> ActionInputResult {
+    func tryRightClick(element _: any AutomationElementRepresenting) async throws
+        -> UIInputExecutionResult.Action
+    {
         self.rightClickCount += 1
-        return ActionInputResult(
+        return AutomationTestFixtures.uiActionReceipt(
             actionName: AXActionNames.kAXShowMenuAction,
             anchorPoint: CGPoint(x: 70, y: 50),
             elementRole: "AXButton")
     }
 
     func tryScroll(element _: AutomationElement, direction _: ScrollDirection, pages _: Int) throws
-    -> ActionInputResult {
-        ActionInputResult()
+    -> UIInputExecutionResult.Action {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
     func trySetText(element _: AutomationElement, text _: String, replace _: Bool) throws
-    -> ActionInputResult {
-        ActionInputResult()
+    -> UIInputExecutionResult.Action {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
     func tryHotkey(application _: NSRunningApplication, keys _: [String]) throws
-    -> ActionInputResult {
-        ActionInputResult()
+    -> UIInputExecutionResult.Action {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
     func trySetValue(element _: AutomationElement, value _: UIElementValue) throws
-    -> ActionInputResult {
-        ActionInputResult()
+    -> UIInputExecutionResult.Action {
+        AutomationTestFixtures.uiActionReceipt()
     }
 
     func tryPerformAction(element _: AutomationElement, actionName: String) throws
-    -> ActionInputResult {
+    -> UIInputExecutionResult.Action {
         self.performedActionNames.append(actionName)
         self.afterAction?()
-        return ActionInputResult(
+        return AutomationTestFixtures.uiActionReceipt(
             actionName: actionName,
             anchorPoint: CGPoint(x: 70, y: 50),
             elementRole: "AXButton")
@@ -1466,36 +1543,38 @@ private final class ClickFailingActionInputDriver: ActionInputDriving {
         self.error = error
     }
 
-    func tryClick(element _: AutomationElement) throws -> ActionInputResult {
+    func tryClick(element _: AutomationElement) throws -> UIInputExecutionResult.Action {
         throw self.error
     }
 
-    func tryRightClick(element _: any AutomationElementRepresenting) async throws -> ActionInputResult {
+    func tryRightClick(element _: any AutomationElementRepresenting) async throws
+        -> UIInputExecutionResult.Action
+    {
         throw self.error
     }
 
     func tryScroll(element _: AutomationElement, direction _: ScrollDirection, pages _: Int) throws
-    -> ActionInputResult {
+    -> UIInputExecutionResult.Action {
         throw self.error
     }
 
     func trySetText(element _: AutomationElement, text _: String, replace _: Bool) throws
-    -> ActionInputResult {
+    -> UIInputExecutionResult.Action {
         throw self.error
     }
 
     func tryHotkey(application _: NSRunningApplication, keys _: [String]) throws
-    -> ActionInputResult {
+    -> UIInputExecutionResult.Action {
         throw self.error
     }
 
     func trySetValue(element _: AutomationElement, value _: UIElementValue) throws
-    -> ActionInputResult {
+    -> UIInputExecutionResult.Action {
         throw self.error
     }
 
     func tryPerformAction(element _: AutomationElement, actionName _: String) throws
-    -> ActionInputResult {
+    -> UIInputExecutionResult.Action {
         throw self.error
     }
 }

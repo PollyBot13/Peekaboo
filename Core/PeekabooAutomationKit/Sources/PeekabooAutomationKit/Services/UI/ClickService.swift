@@ -40,25 +40,55 @@ import PeekabooFoundation
  * - Note: Part of UIAutomationService's specialized service architecture
  * - Since: PeekabooCore 1.0.0
  */
+private struct ExactWindowClickReceipt {
+    let identity: WindowMutationIdentity
+    let bounds: CGRect
+}
+
+private struct ClickMutationReceipt {
+    let processIdentity: ApplicationProcessIdentity?
+    let exactWindow: ExactWindowClickReceipt?
+}
+
+private struct SyntheticClickDestination {
+    let processIdentifier: pid_t?
+    let windowID: CGWindowID?
+    let exactWindowReceipt: ExactWindowClickReceipt?
+    let expectedProcessIdentity: ApplicationProcessIdentity?
+}
+
+private func validatedClickWindowID(_ windowID: Int?) throws -> CGWindowID? {
+    guard let windowID else { return nil }
+    guard windowID > 0, let cgWindowID = CGWindowID(exactly: windowID) else {
+        throw PeekabooError.invalidInput("Target window identifier is outside the valid UInt32 range")
+    }
+    return cgWindowID
+}
+
+private func isClickTargetProcessAlive(_ processIdentifier: pid_t) -> Bool {
+    kill(processIdentifier, 0) == 0 || errno == EPERM
+}
+
+private func clickPostDispatchFailure(
+    outcome: DesktopActionOutcome,
+    message: String,
+    cause: any Error) -> DesktopActionFailure
+{
+    DesktopActionFailure(
+        outcome: outcome,
+        message: message,
+        hint: "Observe the target before retrying this click.",
+        causeDescription: cause.localizedDescription) ?? .indeterminate(
+        delivery: outcome.delivery,
+        evidence: .completionUnknown,
+        unitCount: outcome.dispatchState.unitCount,
+        message: message,
+        hint: "Observe the target before retrying this click.",
+        causeDescription: cause.localizedDescription)
+}
+
 @MainActor
 public final class ClickService {
-    fileprivate struct ExactWindowClickReceipt {
-        let identity: WindowMutationIdentity
-        let bounds: CGRect
-    }
-
-    private struct ClickMutationReceipt {
-        let processIdentity: ApplicationProcessIdentity?
-        let exactWindow: ExactWindowClickReceipt?
-    }
-
-    private struct SyntheticClickDestination {
-        let processIdentifier: pid_t?
-        let windowID: CGWindowID?
-        let exactWindowReceipt: ExactWindowClickReceipt?
-        let expectedProcessIdentity: ApplicationProcessIdentity?
-    }
-
     private let logger = Logger(subsystem: "boo.peekaboo.core", category: "ClickService")
     private let snapshotManager: any SnapshotManagerProtocol
     let inputPolicy: UIInputPolicy
@@ -199,8 +229,15 @@ public final class ClickService {
                         snapshotId: snapshotId,
                         destination: syntheticDestination)
                 })
-            try self.requireCurrentProcess(expectedProcessIdentity, afterDispatch: true)
-            try self.requireCurrentExactWindow(exactWindowReceipt, afterDispatch: true)
+            do {
+                try self.requireCurrentProcess(expectedProcessIdentity, afterDispatch: true)
+                try self.requireCurrentExactWindow(exactWindowReceipt, afterDispatch: true)
+            } catch {
+                throw clickPostDispatchFailure(
+                    outcome: result.outcome,
+                    message: "Click was dispatched, but final target identity validation failed",
+                    cause: error)
+            }
             self.logger.debug("Click completed via \(result.path.rawValue, privacy: .public)")
             return result
         } catch let error as ActionInputError
@@ -221,7 +258,7 @@ public final class ClickService {
         clickType: ClickType,
         snapshotId: String?,
         targetProcessIdentifier: pid_t?,
-        mutationReceipt: ClickMutationReceipt) async throws -> ActionInputResult
+        mutationReceipt: ClickMutationReceipt) async throws -> UIInputExecutionResult.Action
     {
         guard let element = try await self.resolveAutomationElement(
             target: target,
@@ -236,7 +273,7 @@ public final class ClickService {
         switch clickType {
         case .single:
             let valueBefore = element.intAttribute(AXAttributeNames.kAXValueAttribute)
-            let result: ActionInputResult = if targetProcessIdentifier != nil {
+            let result: UIInputExecutionResult.Action = if targetProcessIdentifier != nil {
                 try self.actionInputDriver.tryPerformAction(
                     element: element,
                     actionName: AXActionNames.kAXPressAction)
@@ -270,7 +307,7 @@ public final class ClickService {
         target: ClickTarget,
         clickType: ClickType,
         snapshotId: String?,
-        destination: SyntheticClickDestination) async throws
+        destination: SyntheticClickDestination) async throws -> DesktopActionOutcome
     {
         switch target {
         case let .elementId(id):
@@ -434,7 +471,7 @@ public final class ClickService {
         requestedTargetWindowID: Int?,
         exactWindowReceipt: ExactWindowClickReceipt?) async throws -> CGWindowID?
     {
-        let requestedCGWindowID = try Self.validatedCGWindowID(requestedTargetWindowID)
+        let requestedCGWindowID = try validatedClickWindowID(requestedTargetWindowID)
         guard let targetProcessIdentifier else { return nil }
         if case .coordinates = target {
             return requestedCGWindowID
@@ -460,7 +497,7 @@ public final class ClickService {
                     "\(targetProcessIdentifier); capture a fresh target snapshot")
         }
 
-        guard Self.isProcessAlive(targetProcessIdentifier) else {
+        guard isClickTargetProcessAlive(targetProcessIdentifier) else {
             throw PeekabooError.appNotFound("PID:\(targetProcessIdentifier)")
         }
         if let targetApplication = NSRunningApplication(processIdentifier: targetProcessIdentifier),
@@ -474,7 +511,7 @@ public final class ClickService {
         }
 
         let snapshotWindowID = detectionResult.metadata.windowContext?.windowID
-        let snapshotCGWindowID = try Self.validatedCGWindowID(snapshotWindowID)
+        let snapshotCGWindowID = try validatedClickWindowID(snapshotWindowID)
         if let exactWindowReceipt {
             guard detectionResult.metadata.windowContext?.windowMutationIdentity == exactWindowReceipt.identity,
                   detectionResult.metadata.windowContext?.windowBounds == exactWindowReceipt.bounds
@@ -519,26 +556,11 @@ public final class ClickService {
         }
     }
 
-    private static func validatedCGWindowID(_ windowID: Int?) throws -> CGWindowID? {
-        guard let windowID else { return nil }
-        guard windowID > 0, let cgWindowID = CGWindowID(exactly: windowID) else {
-            throw PeekabooError.invalidInput("Target window identifier is outside the valid UInt32 range")
-        }
-        return cgWindowID
-    }
-
-    private static func isProcessAlive(_ processIdentifier: pid_t) -> Bool {
-        if kill(processIdentifier, 0) == 0 {
-            return true
-        }
-        return errno == EPERM
-    }
-
     private func clickElementById(
         id: String,
         clickType: ClickType,
         snapshotId: String?,
-        destination: SyntheticClickDestination) async throws
+        destination: SyntheticClickDestination) async throws -> DesktopActionOutcome
     {
         guard let snapshotId else {
             throw NotFoundError.element(id)
@@ -557,16 +579,24 @@ public final class ClickService {
             targetWindowID: destination.windowID)
         let center = CGPoint(x: element.bounds.midX, y: element.bounds.midY)
         let adjusted = try await self.resolveAdjustedPoint(center, snapshotId: snapshotId)
-        try await self.performClick(
+        let outcome = try await self.performClick(
             at: adjusted,
             clickType: clickType,
             destination: destination)
-        try await self.nudgeTextInputFocusIfNeeded(
-            afterClickAt: adjusted,
-            clickType: clickType,
-            expectedIdentifier: element.attributes["identifier"],
-            targetProcessIdentifier: destination.processIdentifier)
+        do {
+            try await self.nudgeTextInputFocusIfNeeded(
+                afterClickAt: adjusted,
+                clickType: clickType,
+                expectedIdentifier: element.attributes["identifier"],
+                targetProcessIdentifier: destination.processIdentifier)
+        } catch {
+            throw clickPostDispatchFailure(
+                outcome: outcome,
+                message: "Click was dispatched, but post-click focus validation failed",
+                cause: error)
+        }
         self.logger.debug("Clicked element \(id) at (\(adjusted.x), \(adjusted.y))")
+        return outcome
     }
 
     @MainActor
@@ -574,7 +604,7 @@ public final class ClickService {
         query: String,
         clickType: ClickType,
         snapshotId: String?,
-        destination: SyntheticClickDestination) async throws
+        destination: SyntheticClickDestination) async throws -> DesktopActionOutcome
     {
         // First try to find in snapshot data if available (much faster)
         var found = false
@@ -618,16 +648,24 @@ public final class ClickService {
             let adjusted = try await self.resolveAdjustedPoint(
                 center,
                 snapshotId: resolvedElement != nil ? snapshotId : nil)
-            try await self.performClick(
+            let outcome = try await self.performClick(
                 at: adjusted,
                 clickType: clickType,
                 destination: destination)
-            try await self.nudgeTextInputFocusIfNeeded(
-                afterClickAt: adjusted,
-                clickType: clickType,
-                expectedIdentifier: resolvedElement?.attributes["identifier"],
-                targetProcessIdentifier: destination.processIdentifier)
+            do {
+                try await self.nudgeTextInputFocusIfNeeded(
+                    afterClickAt: adjusted,
+                    clickType: clickType,
+                    expectedIdentifier: resolvedElement?.attributes["identifier"],
+                    targetProcessIdentifier: destination.processIdentifier)
+            } catch {
+                throw clickPostDispatchFailure(
+                    outcome: outcome,
+                    message: "Click was dispatched, but post-click focus validation failed",
+                    cause: error)
+            }
             self.logger.debug("Clicked element matching '\(query)' at (\(adjusted.x), \(adjusted.y))")
+            return outcome
         } else {
             throw NotFoundError.element(query)
         }
@@ -696,7 +734,7 @@ public final class ClickService {
 
         for dy in nudges {
             let candidate = CGPoint(x: point.x, y: point.y + dy)
-            try await self.performClick(
+            _ = try await self.performClick(
                 at: candidate,
                 clickType: .single,
                 destination: SyntheticClickDestination(
@@ -857,7 +895,7 @@ public final class ClickService {
     private func performClick(
         at point: CGPoint,
         clickType: ClickType,
-        destination: SyntheticClickDestination) async throws
+        destination: SyntheticClickDestination) async throws -> DesktopActionOutcome
     {
         self.logger.debug("Performing \(clickType) click at (\(point.x), \(point.y))")
 
@@ -865,21 +903,21 @@ public final class ClickService {
         switch clickType {
         case .single:
             try self.requireCurrentExactWindow(destination.exactWindowReceipt, afterDispatch: false)
-            try await self.performSyntheticClick(
+            return try await self.performSyntheticClick(
                 at: point,
                 button: .left,
                 count: 1,
                 destination: destination)
         case .right:
             try self.requireCurrentExactWindow(destination.exactWindowReceipt, afterDispatch: false)
-            try await self.performSyntheticClick(
+            return try await self.performSyntheticClick(
                 at: point,
                 button: .right,
                 count: 1,
                 destination: destination)
         case .double:
             try self.requireCurrentExactWindow(destination.exactWindowReceipt, afterDispatch: false)
-            try await self.performSyntheticClick(
+            return try await self.performSyntheticClick(
                 at: point,
                 button: .left,
                 count: 2,
@@ -890,6 +928,9 @@ public final class ClickService {
                     "Long press requires foreground delivery")
             }
             try await self.performLongPress(at: point)
+            return .dispatchedUnverified(
+                delivery: .init(mechanism: .globalEvents, mode: .foreground),
+                evidence: .deliveryAccepted)
         }
     }
 
@@ -897,7 +938,7 @@ public final class ClickService {
         at point: CGPoint,
         button: MouseButton,
         count: Int,
-        destination: SyntheticClickDestination) async throws
+        destination: SyntheticClickDestination) async throws -> DesktopActionOutcome
     {
         if let targetProcessIdentifier = destination.processIdentifier {
             if let exactWindowReceipt = destination.exactWindowReceipt {

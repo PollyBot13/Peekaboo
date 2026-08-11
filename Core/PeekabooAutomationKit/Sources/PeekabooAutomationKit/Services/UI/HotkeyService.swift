@@ -74,6 +74,9 @@ public final class HotkeyService {
             },
             synth: {
                 try await self.performSyntheticHotkey(keys: parsedKeys, holdDuration: holdDuration)
+                return .dispatchedUnverified(
+                    delivery: DesktopActionOutcome.Delivery(mechanism: .globalEvents, mode: .foreground),
+                    evidence: .deliveryAccepted)
             })
 
         self.logger.debug("Hotkey completed via \(result.path.rawValue, privacy: .public)")
@@ -132,7 +135,11 @@ public final class HotkeyService {
                     try await self.validateDelivery(
                         deliveryValidator,
                         emittedUnitCount: 1)
-                    return
+                    return .dispatchedUnverified(
+                        delivery: DesktopActionOutcome.Delivery(
+                            mechanism: .accessibilityAction,
+                            mode: .background),
+                        evidence: .deliveryAccepted)
                 }
 
                 let holdNanoseconds = try Self.holdNanoseconds(for: holdDuration)
@@ -157,6 +164,11 @@ public final class HotkeyService {
                         emittedUnitCount: emittedUnitCount,
                         causeDescription: error.localizedDescription)
                 }
+                return .dispatchedUnverified(
+                    delivery: DesktopActionOutcome.Delivery(
+                        mechanism: .processTargetedEvents,
+                        mode: .background),
+                    evidence: .deliveryAccepted)
             })
 
         self.logger.debug("Targeted hotkey completed via \(result.path.rawValue, privacy: .public)")
