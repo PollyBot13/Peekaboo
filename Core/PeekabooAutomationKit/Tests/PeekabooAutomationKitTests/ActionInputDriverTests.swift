@@ -382,6 +382,32 @@ struct ActionInputDriverTests {
 
     @MainActor
     @Test
+    func `element actions require a snapshot before target resolution or dispatch`() async throws {
+        let service = UIAutomationService(
+            snapshotManager: InMemorySnapshotManager(),
+            inputPolicy: UIInputPolicy(defaultStrategy: .actionOnly),
+            actionInputDriver: RecordingActionInputDriver(),
+            automationElementResolver: FixedActionAutomationElementResolver {
+                Issue.record("Snapshotless element action reached target resolution")
+            })
+
+        do {
+            _ = try await service.setValue(target: "Delete", value: .string("yes"), snapshotId: nil)
+            Issue.record("Expected snapshotless setValue to fail")
+        } catch let PeekabooError.snapshotNotAvailable(message) {
+            #expect(message.contains("require a current UI snapshot"))
+        }
+
+        do {
+            _ = try await service.performAction(target: "Delete", actionName: "AXPress", snapshotId: nil)
+            Issue.record("Expected snapshotless performAction to fail")
+        } catch let PeekabooError.snapshotNotAvailable(message) {
+            #expect(message.contains("require a current UI snapshot"))
+        }
+    }
+
+    @MainActor
+    @Test
     func `element actions reject missing explicit snapshot instead of live lookup`() async throws {
         let service = UIAutomationService(
             snapshotManager: InMemorySnapshotManager(),
@@ -436,9 +462,9 @@ struct ActionInputDriverTests {
 
     @MainActor
     @Test
-    func `exact snapshot set value waits only for its process observation frame`() async throws {
+    func `exact snapshot element mutations wait only for their process observation frame`() async throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("peekaboo-set-value-process-lane-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("peekaboo-element-mutation-process-lane-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let coordinator = DesktopOperationLaneCoordinator(coordinationRootURL: root)
         let firstProcess = ApplicationProcessIdentity(processIdentifier: 610, processStartIdentity: 11)
@@ -449,7 +475,7 @@ struct ActionInputDriverTests {
         let secondResolved = ActionLaneLatch()
         let firstIdentity = self.windowIdentity(windowID: 301, process: firstProcess)
         let secondIdentity = self.windowIdentity(windowID: 302, process: secondProcess)
-        let firstService = self.makeScopedSetValueService(
+        let firstService = self.makeScopedElementMutationService(
             snapshotID: "first",
             identity: firstIdentity,
             coordinator: coordinator,
@@ -459,7 +485,7 @@ struct ActionInputDriverTests {
                     : secondProcess.processStartIdentity
             },
             onResolve: { Task { await firstResolved.open() } })
-        let secondService = self.makeScopedSetValueService(
+        let secondService = self.makeScopedElementMutationService(
             snapshotID: "second",
             identity: secondIdentity,
             coordinator: coordinator,
@@ -481,7 +507,7 @@ struct ActionInputDriverTests {
             try? await firstService.setValue(target: "B1", value: .string("one"), snapshotId: "first")
         }
         let secondMutation = Task {
-            try? await secondService.setValue(target: "B1", value: .string("two"), snapshotId: "second")
+            try? await secondService.performAction(target: "B1", actionName: "AXPress", snapshotId: "second")
         }
 
         let secondOverlapped = await secondResolved.opensWithin(.seconds(1))
@@ -495,6 +521,36 @@ struct ActionInputDriverTests {
         _ = await secondMutation.value
         let firstEventuallyResolved = await firstResolved.isOpen
         #expect(firstEventuallyResolved)
+    }
+
+    @MainActor
+    @Test
+    func `exact snapshot element mutations reject process generation reuse before resolution`() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("peekaboo-element-mutation-generation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let process = ApplicationProcessIdentity(processIdentifier: 612, processStartIdentity: 13)
+        let identity = self.windowIdentity(windowID: 303, process: process)
+        let service = self.makeScopedElementMutationService(
+            snapshotID: "reused",
+            identity: identity,
+            coordinator: DesktopOperationLaneCoordinator(coordinationRootURL: root),
+            currentGeneration: { _ in process.processStartIdentity + 1 },
+            onResolve: { Issue.record("Stale element mutation reached target resolution") })
+
+        do {
+            _ = try await service.performAction(target: "B1", actionName: "AXPress", snapshotId: "reused")
+            Issue.record("Expected reused process generation to refuse action")
+        } catch let PeekabooError.snapshotStale(reason) {
+            #expect(reason.contains("process generation"))
+        }
+
+        do {
+            _ = try await service.setValue(target: "B1", value: .string("new"), snapshotId: "reused")
+            Issue.record("Expected reused process generation to refuse set-value")
+        } catch let PeekabooError.snapshotStale(reason) {
+            #expect(reason.contains("process generation"))
+        }
     }
 
     @MainActor
@@ -748,7 +804,7 @@ struct ActionInputDriverTests {
     }
 
     @MainActor
-    private func makeScopedSetValueService(
+    private func makeScopedElementMutationService(
         snapshotID: String,
         identity: WindowMutationIdentity,
         coordinator: DesktopOperationLaneCoordinator,
