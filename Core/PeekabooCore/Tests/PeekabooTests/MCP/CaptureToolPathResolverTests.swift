@@ -122,6 +122,46 @@ struct CaptureToolPathResolverTests {
     }
 
     @Test
+    func `MCP live cadence rejects out of range and inverted rates`() async {
+        let windows = CaptureWindowResolverWindowService(windows: [])
+        for arguments: [String: Value] in [
+            ["source": .string("live"), "idle_fps": .double(0)],
+            ["source": .string("live"), "idle_fps": .double(5.1)],
+            ["source": .string("live"), "active_fps": .double(0.4)],
+            ["source": .string("live"), "active_fps": .double(15.1)],
+            ["source": .string("live"), "idle_fps": .double(5), "active_fps": .double(4)],
+        ] {
+            await #expect(throws: PeekabooError.self) {
+                _ = try await CaptureRequest(arguments: ToolArguments(value: .object(arguments)), windows: windows)
+            }
+        }
+    }
+
+    @Test
+    @MainActor
+    func `MCP cadence schema declares bounds defaults and cross field relation`() {
+        let tool = CaptureTool(context: MCPToolContext(services: PeekabooServices()))
+        guard case let .object(root) = tool.inputSchema,
+              case let .object(properties)? = root["properties"],
+              case let .object(idle)? = properties["idle_fps"],
+              case let .object(active)? = properties["active_fps"]
+        else {
+            Issue.record("Expected live cadence schemas")
+            return
+        }
+
+        #expect(idle["minimum"] == .double(0.1))
+        #expect(idle["maximum"] == .double(5))
+        #expect(idle["default"] == .double(2))
+        #expect(idle["description"] == .string("Idle FPS; must be finite (default 2, range 0.1...5)"))
+        #expect(active["minimum"] == .double(0.5))
+        #expect(active["maximum"] == .double(15))
+        #expect(active["default"] == .double(8))
+        #expect(active["description"] == .string(
+            "Active FPS; must be finite and >= idle_fps (default 8, range 0.5...15)"))
+    }
+
+    @Test
     func `window resolver maps app title selection to stable window id`() async throws {
         let windows = CaptureWindowResolverWindowService(windows: [
             Self.window(id: 7, title: "", index: 0, bounds: CGRect(x: 0, y: 0, width: 500, height: 30)),
