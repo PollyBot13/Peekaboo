@@ -56,6 +56,87 @@ struct RemoteCaptureGateOwnershipTests {
     }
 
     @Test
+    func `remote OCR rejects a host without capability before transport`() async {
+        let remote = RemoteDesktopObservationService(client: PeekabooBridgeClient(
+            socketPath: "/tmp/nonexistent-ocr-\(UUID().uuidString).sock",
+            requestTimeoutSec: 1))
+
+        let error = await #expect(throws: PeekabooBridgeErrorEnvelope.self) {
+            _ = try await remote.observe(DesktopObservationRequest(
+                target: .screen(index: 0),
+                detection: DesktopDetectionOptions(mode: .accessibilityAndOCR)))
+        }
+
+        #expect(error?.code == .operationNotSupported)
+        #expect(error?.message.contains(PeekabooBridgeHostCapability.desktopObservationOCR) == true)
+        #expect(error?.message.contains("--no-remote") == true)
+    }
+
+    @Test
+    func `legacy remote observation rejects OCR before local fallback capture transport`() async {
+        let remote = RemotePeekabooServices(client: PeekabooBridgeClient(
+            socketPath: "/tmp/nonexistent-legacy-ocr-\(UUID().uuidString).sock",
+            requestTimeoutSec: 1))
+
+        let error = await #expect(throws: PeekabooBridgeErrorEnvelope.self) {
+            _ = try await remote.desktopObservation.observe(DesktopObservationRequest(
+                target: .screen(index: 0),
+                detection: DesktopDetectionOptions(mode: .accessibilityAndOCR)))
+        }
+
+        #expect(error?.code == .operationNotSupported)
+        #expect(error?.message.contains(PeekabooBridgeHostCapability.desktopObservationOCR) == true)
+    }
+
+    @Test
+    func `remote OCR gates the new mode but preserves legacy preferred OCR`() async throws {
+        let socketPath = "/tmp/peekaboo-remote-capable-ocr-\(UUID().uuidString).sock"
+        let services = StubServices()
+        let server = PeekabooBridgeServer(
+            services: services,
+            allowlistedTeams: [],
+            allowlistedBundles: [],
+            allowedOperations: [.desktopObservation],
+            permissionStatusEvaluator: { _ in
+                PermissionsStatus(
+                    screenRecording: true,
+                    accessibility: true,
+                    appleScript: false,
+                    postEvent: true)
+            })
+        let host = PeekabooBridgeHost(
+            socketPath: socketPath,
+            server: server,
+            allowedTeamIDs: [],
+            requestTimeoutSec: 1)
+        try await host.startChecked()
+        defer { Task { await host.stop() } }
+        let client = PeekabooBridgeClient(socketPath: socketPath, requestTimeoutSec: 1)
+        let remote = RemoteDesktopObservationService(
+            client: client,
+            supportsDesktopObservationOCR: true)
+        let explicitOCRRequest = DesktopObservationRequest(
+            target: .screen(index: 0),
+            detection: DesktopDetectionOptions(mode: .accessibilityAndOCR))
+
+        _ = try await remote.observe(explicitOCRRequest)
+
+        #expect(services.desktopObservationStub.lastRequest == explicitOCRRequest)
+
+        let legacyRemote = RemoteDesktopObservationService(
+            client: client,
+            supportsDesktopObservationOCR: false)
+        let preferredOCRRequest = DesktopObservationRequest(
+            target: .menubarPopover(hints: [], openIfNeeded: nil),
+            detection: DesktopDetectionOptions(mode: .none, preferOCR: true))
+
+        _ = try await legacyRemote.observe(preferredOCRRequest)
+
+        #expect(services.desktopObservationStub.lastRequest == preferredOCRRequest)
+        await host.stop()
+    }
+
+    @Test
     func `remote ROI rejects an exhausted overall deadline before transport`() async {
         let remote = RemoteDesktopObservationService(
             client: PeekabooBridgeClient(
