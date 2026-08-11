@@ -362,6 +362,55 @@ extension DesktopObservationServiceTests {
         ])
     }
 
+    func testObservationSelectivelyUsesOCRForIdentifierDerivedButtonLabel() async throws {
+        let app = Self.app()
+        let window = Self.window(id: 79, title: "OCR Repair", bounds: CGRect(x: 10, y: 20, width: 200, height: 100))
+        let applications = RecordingApplicationService(applications: [app], windows: [window])
+        let capture = RecordingScreenCaptureService(result: Self.captureResult(app: app, window: window))
+        let automation = RecordingUIAutomationService(elements: DetectedElements(buttons: [
+            DetectedElement(
+                id: "B1",
+                type: .button,
+                label: "permission deny",
+                bounds: CGRect(x: 30, y: 70, width: 100, height: 30),
+                attributes: [
+                    "role": "AXButton",
+                    "description": "button",
+                    "identifier": "permission-deny-button",
+                    "isActionable": "true",
+                ]),
+        ]))
+        let ocr = RecordingOCRRecognizer(result: OCRTextResult(
+            observations: [
+                OCRTextObservation(
+                    text: "Don't Allow",
+                    confidence: 0.9,
+                    boundingBox: CGRect(x: 0.1, y: 0.3, width: 0.4, height: 0.2)),
+            ],
+            imageSize: CGSize(width: 200, height: 100)))
+        let service = DesktopObservationService(
+            screenCapture: capture,
+            automation: automation,
+            applications: applications,
+            ocrRecognizer: ocr)
+
+        let result = try await service.observe(DesktopObservationRequest(
+            target: .app(identifier: "Fixture", window: .automatic),
+            detection: DesktopDetectionOptions(mode: .accessibility)))
+
+        XCTAssertEqual(ocr.recognizeCalls, 1)
+        XCTAssertEqual(ocr.targetedRegions.count, 1)
+        XCTAssertEqual(ocr.targetedRegions.first?.normalizedBounds, CGRect(
+            x: 0.06,
+            y: 0.42,
+            width: 0.58,
+            height: 0.46))
+        XCTAssertEqual(result.elements?.elements.buttons.first?.label, "Don't Allow")
+        XCTAssertEqual(result.elements?.elements.buttons.first?.attributes["labelSource"], "ocr")
+        XCTAssertEqual(result.elements?.metadata.method, "fake+OCR")
+        XCTAssertTrue(result.timings.spans.map(\.name).contains("detection.ocr"))
+    }
+
     func testObservationPreferOCRCanRunWithoutAccessibilityDetection() async throws {
         let app = Self.app()
         let window = Self.window(id: 79, title: "OCR Only", bounds: CGRect(x: 10, y: 20, width: 200, height: 100))
@@ -1407,6 +1456,11 @@ private final class RecordingOCRRecognizer: OCRRecognizing, @unchecked Sendable 
     private let lock = NSLock()
     private let result: OCRTextResult
     var recognizeCalls = 0
+    private var recordedTargetedRegions: [OCRRecognitionRegion] = []
+
+    var targetedRegions: [OCRRecognitionRegion] {
+        self.lock.withLock { self.recordedTargetedRegions }
+    }
 
     init(result: OCRTextResult) {
         self.result = result
@@ -1414,6 +1468,18 @@ private final class RecordingOCRRecognizer: OCRRecognizing, @unchecked Sendable 
 
     func recognizeText(in _: Data, timeoutSeconds _: TimeInterval) async throws -> OCRTextResult {
         self.lock.withLock { self.recognizeCalls += 1 }
+        return self.result
+    }
+
+    func recognizeText(
+        in _: Data,
+        timeoutSeconds _: TimeInterval,
+        regions: [OCRRecognitionRegion]) async throws -> OCRTextResult
+    {
+        self.lock.withLock {
+            self.recognizeCalls += 1
+            self.recordedTargetedRegions = regions
+        }
         return self.result
     }
 }

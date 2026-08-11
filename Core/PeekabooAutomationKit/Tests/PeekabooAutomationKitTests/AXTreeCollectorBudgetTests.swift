@@ -377,4 +377,68 @@ final class AXTreeCollectorBudgetTests: XCTestCase {
         XCTAssertEqual(merged.metadata.truncationInfo, truncationInfo)
         XCTAssertTrue(merged.metadata.warnings.contains("ax_truncated_count"))
     }
+
+    func testOCRMergeRepairsOnlyGenericAXButtonLabels() {
+        let weakButton = DetectedElement(
+            id: "elem_1",
+            type: .button,
+            label: "permission deny",
+            bounds: CGRect(x: 10, y: 10, width: 100, height: 30),
+            attributes: [
+                "role": "AXButton",
+                "description": "button",
+                "identifier": "permission-deny-button",
+                "isActionable": "true",
+            ])
+        let strongButton = DetectedElement(
+            id: "elem_2",
+            type: .button,
+            label: "Save",
+            bounds: CGRect(x: 130, y: 10, width: 60, height: 30),
+            attributes: [
+                "role": "AXButton",
+                "identifier": "save-primary",
+                "isActionable": "true",
+            ])
+        let detection = ElementDetectionResult(
+            snapshotId: "snapshot",
+            screenshotPath: "",
+            elements: DetectedElements(buttons: [weakButton, strongButton]),
+            metadata: DetectionMetadata(detectionTime: 0, elementCount: 2, method: "AX"))
+        let ocrElements = [
+            DetectedElement(
+                id: "ocr_1",
+                type: .staticText,
+                label: "Don't Allow",
+                bounds: CGRect(x: 25, y: 16, width: 70, height: 14),
+                attributes: ["description": "ocr"]),
+            DetectedElement(
+                id: "ocr_2",
+                type: .staticText,
+                label: "Wrong",
+                bounds: CGRect(x: 135, y: 16, width: 45, height: 14),
+                attributes: ["description": "ocr"]),
+        ]
+
+        XCTAssertTrue(ObservationOCRMapper.needsSemanticLabelRecovery(in: detection))
+        let recovered = ObservationOCRMapper.recoverSemanticLabels(
+            in: detection.elements,
+            from: ocrElements)
+
+        XCTAssertEqual(recovered.buttons[0].label, "Don't Allow")
+        XCTAssertEqual(recovered.buttons[0].attributes["labelSource"], "ocr")
+        XCTAssertEqual(recovered.buttons[1].label, "Save")
+        XCTAssertNil(recovered.buttons[1].attributes["labelSource"])
+    }
+
+    func testTargetedOCRMapsCropBoundsBackToFullImageCoordinates() {
+        let mapped = OCRService.fullImageBoundingBox(
+            CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),
+            region: CGRect(x: 0.25, y: 0.5, width: 0.25, height: 0.25))
+
+        XCTAssertEqual(mapped.origin.x, 0.275, accuracy: 0.000_001)
+        XCTAssertEqual(mapped.origin.y, 0.3, accuracy: 0.000_001)
+        XCTAssertEqual(mapped.width, 0.075, accuracy: 0.000_001)
+        XCTAssertEqual(mapped.height, 0.1, accuracy: 0.000_001)
+    }
 }

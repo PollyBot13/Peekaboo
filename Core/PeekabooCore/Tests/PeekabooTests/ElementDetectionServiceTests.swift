@@ -454,6 +454,9 @@ struct ElementClassifierTests {
         #expect(ElementClassifier.shouldLookupActions(for: "AXGroup"))
         #expect(ElementClassifier.shouldLookupActions(for: "AXImage"))
         #expect(!ElementClassifier.shouldLookupActions(for: "AXStaticText"))
+        #expect(ElementClassifier.supportsValueMetadata(for: "AXSlider"))
+        #expect(ElementClassifier.supportsValueMetadata(for: "AXDateField"))
+        #expect(!ElementClassifier.supportsValueMetadata(for: "AXStaticText"))
     }
 
     @Test
@@ -532,6 +535,52 @@ struct ElementTypeAdjusterTests {
     }
 
     @Test
+    func `Placeholder-bearing static text proxy recovers hidden text field identity`() {
+        let input = ElementTypeAdjustmentInput(
+            role: "AXStaticText",
+            roleDescription: "text",
+            title: nil,
+            label: nil,
+            placeholder: "name@example.com",
+            isEditable: false)
+
+        let resolved = ElementTypeAdjuster.resolve(
+            baseType: .other,
+            input: input,
+            hasTextFieldDescendant: false)
+
+        #expect(resolved == .textField)
+        #expect(ElementTypeAdjuster.resolveIdentifier(
+            "group-hidden-email-field",
+            baseType: .other,
+            resolvedType: resolved) == "hidden-email-field")
+    }
+
+    @Test
+    func `Ordinary static text and native field identifiers are unchanged`() {
+        let staticText = ElementTypeAdjustmentInput(
+            role: "AXStaticText",
+            roleDescription: "text",
+            title: "Email",
+            label: nil,
+            placeholder: nil,
+            isEditable: false)
+
+        #expect(ElementTypeAdjuster.resolve(
+            baseType: .other,
+            input: staticText,
+            hasTextFieldDescendant: false) == .other)
+        #expect(ElementTypeAdjuster.resolveIdentifier(
+            "group-heading",
+            baseType: .other,
+            resolvedType: .other) == "group-heading")
+        #expect(ElementTypeAdjuster.resolveIdentifier(
+            "group-native-field",
+            baseType: .textField,
+            resolvedType: .textField) == "group-native-field")
+    }
+
+    @Test
     func `Generic groups scan descendants only when hints are missing`() {
         let input = ElementTypeAdjustmentInput(
             role: "AXGroup",
@@ -567,6 +616,11 @@ struct AXDescriptorReaderTests {
     func `Scalar coercion accepts expected AX attribute value shapes`() {
         #expect(AXDescriptorReader.stringValue("Save") == "Save")
         #expect(AXDescriptorReader.stringValue(42) == nil)
+        #expect(AXDescriptorReader.displayValue("Save") == "Save")
+        #expect(AXDescriptorReader.displayValue(NSNumber(value: 0.5)) == "0.5")
+        #expect(AXDescriptorReader.displayValue(NSNumber(value: true)) == "true")
+        #expect(AXDescriptorReader.displayValue(NSNumber(value: false)) == "false")
+        #expect(AXDescriptorReader.displayValue(NSNull()) == nil)
         #expect(AXDescriptorReader.boolValue(true) == true)
         #expect(AXDescriptorReader.boolValue(false) == false)
         #expect(AXDescriptorReader.boolValue(NSNumber(value: true)) == true)
@@ -584,6 +638,30 @@ struct AXDescriptorReaderTests {
         let sizeValue = AXValueCreate(.cgSize, &size)
         #expect(AXDescriptorReader.cgSizeValue(sizeValue) == size)
         #expect(AXDescriptorReader.cgPointValue(sizeValue) == nil)
+    }
+}
+
+@Suite(.tags(.fast))
+struct DetectedElementMetadataTests {
+    @Test
+    func `Explicit actionability and settable metadata remain distinct from enabled state`() {
+        let staticText = DetectedElement(
+            id: "text",
+            type: .staticText,
+            bounds: .zero,
+            isEnabled: true,
+            attributes: ["isActionable": "false"])
+        let slider = DetectedElement(
+            id: "slider",
+            type: .slider,
+            bounds: .zero,
+            isEnabled: true,
+            attributes: ["isActionable": "true", "isValueSettable": "true"])
+
+        #expect(!staticText.isActionable)
+        #expect(staticText.isValueSettable == nil)
+        #expect(slider.isActionable)
+        #expect(slider.isValueSettable == true)
     }
 }
 

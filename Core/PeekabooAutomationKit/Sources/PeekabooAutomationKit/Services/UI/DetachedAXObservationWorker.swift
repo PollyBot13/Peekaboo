@@ -176,6 +176,10 @@ enum DetachedAXObservationWorker {
         return deadlineExpired ? .deadline : nil
     }
 
+    static func valueSettableMetadata(error: AXError, isSettable: Bool) -> Bool? {
+        error == .success ? isSettable : nil
+    }
+
     static func exactWindowCandidates<Window>(
         windows: [Window],
         remainingTimeout: () -> Float?,
@@ -436,8 +440,30 @@ enum DetachedAXObservationWorker {
         }
         guard let descriptor = descriptorRead.descriptor else { return }
         let normalizedRole = descriptor.role.lowercased()
-        let isActionable = self.actionableRoles.contains(normalizedRole) ||
+        let baseType = self.elementType(role: normalizedRole, isEditable: descriptor.isEditable)
+        let elementTypeInput = ElementTypeAdjustmentInput(
+            role: descriptor.role,
+            roleDescription: descriptor.roleDescription,
+            title: descriptor.title,
+            label: descriptor.label,
+            placeholder: descriptor.placeholder,
+            isEditable: descriptor.isEditable)
+        let elementType = ElementTypeAdjuster.resolve(
+            baseType: baseType,
+            input: elementTypeInput,
+            hasTextFieldDescendant: false)
+        let identifier = ElementTypeAdjuster.resolveIdentifier(
+            descriptor.identifier,
+            baseType: baseType,
+            resolvedType: elementType)
+        let exposesAction = self.actionableRoles.contains(normalizedRole) ||
             (self.actionLookupRoles.contains(normalizedRole) && self.actions(of: element).contains(kAXPressAction))
+        let isValueSettable = self.valueSettable(
+            of: element,
+            role: descriptor.role,
+            recoveredType: elementType,
+            deadline: request.deadline)
+        let isActionable = exposesAction || isValueSettable == true
         let elementID = request.source == nil ?
             "elem_\(state.elements.count)" : "menuitem_\(state.elements.count)"
         var attributes = ["role": descriptor.role, "axEnabledKnown": String(descriptor.isEnabled != nil)]
@@ -453,7 +479,7 @@ enum DetachedAXObservationWorker {
         if let roleDescription = descriptor.roleDescription {
             attributes["roleDescription"] = roleDescription
         }
-        if let identifier = descriptor.identifier {
+        if let identifier {
             attributes["identifier"] = identifier
         }
         if let placeholder = descriptor.placeholder {
@@ -465,13 +491,16 @@ enum DetachedAXObservationWorker {
         if isActionable {
             attributes["isActionable"] = "true"
         }
+        if let isValueSettable {
+            attributes["isValueSettable"] = String(isValueSettable)
+        }
         if let source = request.source {
             attributes["source"] = source
         }
 
         state.elements.append(DetectedElement(
             id: elementID,
-            type: self.elementType(role: normalizedRole, isEditable: descriptor.isEditable),
+            type: elementType,
             label: self.label(for: descriptor),
             value: descriptor.value,
             bounds: descriptor.frame,
@@ -550,7 +579,7 @@ enum DetachedAXObservationWorker {
             role: role,
             title: self.stringValue(byName[kAXTitleAttribute]),
             label: self.stringValue(byName["AXLabel"]),
-            value: self.stringValue(byName[kAXValueAttribute]),
+            value: AXDescriptorReader.displayValue(byName[kAXValueAttribute]),
             description: self.stringValue(byName[kAXDescriptionAttribute]),
             help: self.stringValue(byName[kAXHelpAttribute]),
             roleDescription: self.stringValue(byName[kAXRoleDescriptionAttribute]),
@@ -585,7 +614,7 @@ enum DetachedAXObservationWorker {
             role: role,
             title: self.stringValue(valuesByName[kAXTitleAttribute]),
             label: self.stringValue(valuesByName["AXLabel"]),
-            value: self.stringValue(valuesByName[kAXValueAttribute]),
+            value: AXDescriptorReader.displayValue(valuesByName[kAXValueAttribute]),
             description: self.stringValue(valuesByName[kAXDescriptionAttribute]),
             help: self.stringValue(valuesByName[kAXHelpAttribute]),
             roleDescription: self.stringValue(valuesByName[kAXRoleDescriptionAttribute]),
@@ -640,6 +669,23 @@ enum DetachedAXObservationWorker {
         var names: CFArray?
         guard AXUIElementCopyActionNames(element, &names) == .success else { return [] }
         return names as? [String] ?? []
+    }
+
+    private static func valueSettable(
+        of element: AXUIElement,
+        role: String,
+        recoveredType: ElementType,
+        deadline: ContinuousClock.Instant) -> Bool?
+    {
+        guard recoveredType == .textField || ElementClassifier.supportsValueMetadata(for: role) else { return nil }
+        guard let timeout = self.remainingMessagingTimeout(until: deadline) else { return nil }
+        AXUIElementSetMessagingTimeout(element, timeout)
+        var isSettable = DarwinBoolean(false)
+        let error = AXUIElementIsAttributeSettable(
+            element,
+            kAXValueAttribute as CFString,
+            &isSettable)
+        return self.valueSettableMetadata(error: error, isSettable: isSettable.boolValue)
     }
 
     private static func prepare(_ element: AXUIElement, deadline: ContinuousClock.Instant) {
@@ -748,27 +794,21 @@ enum DetachedAXObservationWorker {
     }
 
     private static func label(for descriptor: Descriptor) -> String? {
-        let candidates = [
-            descriptor.label,
-            descriptor.title,
-            descriptor.value,
-            descriptor.placeholder,
-            descriptor.roleDescription,
-            descriptor.description,
-        ]
-        for candidate in candidates {
-            let normalized = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let normalized, !normalized.isEmpty, normalized.lowercased() != "button" {
-                return normalized
-            }
-        }
-        if let identifier = descriptor.identifier?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !identifier.isEmpty
-        {
-            return identifier.replacingOccurrences(of: "-button", with: "")
-                .replacingOccurrences(of: "-", with: " ")
-        }
-        return nil
+        ElementLabelResolver.resolve(
+            info: ElementLabelInfo(
+                role: descriptor.role,
+                label: descriptor.label,
+                title: descriptor.title,
+                value: descriptor.value,
+                roleDescription: descriptor.roleDescription,
+                description: descriptor.description,
+                identifier: descriptor.identifier,
+                placeholder: descriptor.placeholder),
+            childTexts: [],
+            identifierCleaner: {
+                $0.replacingOccurrences(of: "-button", with: "")
+                    .replacingOccurrences(of: "-", with: " ")
+            })
     }
 
     private static func isFileDialogTitle(_ title: String) -> Bool {

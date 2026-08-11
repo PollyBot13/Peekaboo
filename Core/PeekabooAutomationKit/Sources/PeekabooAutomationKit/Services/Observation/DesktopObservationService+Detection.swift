@@ -39,12 +39,21 @@ extension DesktopObservationService {
 
     func recognizeOCRIfNeeded(
         capture: CaptureResult,
+        detection: ElementDetectionResult?,
         request: DesktopObservationRequest,
         tracer: DesktopObservationTraceRecorder) async throws -> OCRTextResult?
     {
-        guard request.detection.mode == .accessibilityAndOCR || request.detection.preferOCR else {
+        let explicitlyRequested = request.detection.mode == .accessibilityAndOCR || request.detection.preferOCR
+        let needsSemanticRepair = ObservationOCRMapper.needsSemanticLabelRecovery(in: detection)
+        guard explicitlyRequested || needsSemanticRepair else {
             return nil
         }
+        let semanticRegions = needsSemanticRepair && !explicitlyRequested
+            ? ObservationOCRMapper.semanticLabelRecognitionRegions(
+                in: detection,
+                windowBounds: Self.captureBounds(from: capture))
+            : []
+        guard explicitlyRequested || !semanticRegions.isEmpty else { return nil }
 
         return try await tracer.span("detection.ocr") {
             let timeout = request.timeout.ocr ?? request.timeout.detection ?? OCRService.defaultTimeoutSeconds
@@ -52,7 +61,13 @@ extension DesktopObservationService {
                 let recognizer = self.ocrRecognizer
                 let imageData = capture.imageData
                 return try await OCRExecutionRunner.runAsync(seconds: timeout) {
-                    try await recognizer.recognizeText(in: imageData, timeoutSeconds: timeout)
+                    if !semanticRegions.isEmpty {
+                        return try await recognizer.recognizeText(
+                            in: imageData,
+                            timeoutSeconds: timeout,
+                            regions: semanticRegions)
+                    }
+                    return try await recognizer.recognizeText(in: imageData, timeoutSeconds: timeout)
                 }
             } catch let CaptureError.detectionTimedOut(seconds) {
                 return OCRTextResult.incomplete(

@@ -92,10 +92,10 @@ When `--json` is supplied, the CLI prints:
 
 - `snapshot_id` – reference for subsequent `click --snapshot …` and `type --snapshot …`.
 - `ui_map` – path to the persisted snapshot file (`~/.peekaboo/snapshots/<id>/snapshot.json`).
-- `ui_elements` – flattened list of actionable nodes (buttons, text fields, links, etc.).
+- `ui_elements` – flattened AX nodes with honest `is_actionable` and optional `is_value_settable` capability metadata.
 - `coordinate_context` – capture-owned raster mapping. ROI results include the full-window and cropped viewport rectangles described above.
 - `interactable_count`, `element_count`, `capture_mode`, and performance metadata for debugging.
-- Each `ui_elements[n]` entry now mirrors the raw AX metadata we capture—`title`, `label`, **`description`**, `role_description`, `help`, `identifier`, and the keyboard shortcut if one exists. That makes Chrome toolbar icons (which frequently hide their name in `AXDescription`) searchable without relying on coordinates.
+- Each `ui_elements[n]` entry mirrors the raw AX metadata we capture—semantic `role`, raw `ax_role`, `title`, `label`, scalar `value`, **`description`**, `role_description`, `help`, `identifier`, known enabled/selected state, value-settable capability, and the keyboard shortcut if one exists. The persisted `ui_map` keeps the same fields for follow-up tools. That makes controls whose name lives only in `AXDescription`, including Chrome toolbar icons and unlabeled sliders, searchable without relying on coordinates.
 - GLM vision model analysis responses are converted from the model's 0-1000 bounding box coordinate space into screenshot pixel coordinates before they are printed, so follow-up `click --at` calls can use returned box centers directly.
 
 Use `jq` or any JSON parser to find elements:
@@ -114,7 +114,7 @@ peekaboo see --app "Google Chrome" --json --path /tmp/chrome-see.png \
 - If the CLI reports **blind typing**, pass an explicit `--app`, `--pid`, `--window-id`, or fresh `--snapshot` so `type` can resolve a background target process, or add `--foreground` when the target app requires focused keyboard input.
 - If JSON/text output reports an AX time deadline, rerun with a longer `--timeout` or a narrower exact-window target. Increase `--depth`, `--max-elements`, or `--max-children` only when the corresponding structural cap is reported. A tree-only inspection that reaches a cap before finding any element exits nonzero instead of publishing an unusable empty snapshot; useful partial evidence remains successful and explicitly truncated.
 - Missing text fields after an explicit `--web-focus` retry usually means the page is shielding its inputs from AX entirely. For Chrome targets, use the `browser` tool (`status` → `connect` → `snapshot`/`fill`/`click`) after enabling Chrome remote debugging; otherwise rely on image-based hit tests.
-- For repeatable local tests, run `RUN_LOCAL_TESTS=true swift test --filter SeeCommandPlaygroundTests` to exercise the Playground fixtures mentioned in `docs/research/interaction-debugging.md`.
+- For repeatable local tests, run `pnpm run test:automation:local`; the runner builds the real external CLI, exports its exact `PEEKABOO_CLI_PATH`, launches one owned Playground instance with current v4 syntax, and cleans it up by process-generation receipt. Set `PEEKABOO_PLAYGROUND_APP=/absolute/path/Playground.app` when LaunchServices cannot resolve the signed fixture by name.
 - Rapid repeated `see` calls for the same window reuse a short-lived AX cache (~1.5s); wait a beat if you need a fully fresh traversal.
 
 ## Smart label placement (`--annotate`)
