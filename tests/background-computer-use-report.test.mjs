@@ -25,6 +25,12 @@ function caseById(report, id) {
   return entry;
 }
 
+function invariantByName(caseResult, name) {
+  const entry = caseResult.invariants.find((candidate) => candidate.name === name);
+  assert.ok(entry, `Missing test fixture invariant ${name}`);
+  return entry;
+}
+
 test("passing report covers the complete 34-case catalog", () => {
   const report = makePassingReport(catalog);
   const result = validateCertification(catalog, report);
@@ -156,11 +162,97 @@ test("effect and delivery drift are rejected", () => {
 test("probe canary and invariant violations are unsuppressible", () => {
   const report = makePassingReport(catalog);
   report.probe_canary = false;
-  caseById(report, "type-text").invariant_violations = 1;
+  invariantByName(caseById(report, "type-text"), "physical_cursor").passed = false;
 
   const result = validateCertification(catalog, report);
 
   assert.equal(result.success, false);
   assert.ok(rules(result).has("canary"));
-  assert.ok(rules(result).has("invariant"));
+  assert.ok(rules(result).has("violated_invariant"));
+});
+
+test("catalog invariants are required nonempty and unique", () => {
+  const corruptions = [
+    [[], "schema"],
+    [[...catalog.invariants, catalog.invariants[0]], "duplicate_catalog_invariant"],
+    [[...catalog.invariants, ""], "schema"],
+  ];
+
+  for (const [invariants, expectedRule] of corruptions) {
+    const corruptCatalog = structuredClone(catalog);
+    corruptCatalog.invariants = invariants;
+    const result = validateCertification(corruptCatalog, makePassingReport(catalog));
+
+    assert.equal(result.success, false);
+    assert.ok(rules(result).has(expectedRule));
+  }
+});
+
+test("catalog contamination retry policy is explicitly boolean", () => {
+  const corruptCatalog = structuredClone(catalog);
+  corruptCatalog.cases[0].contamination_retry_safe = "yes";
+
+  const result = validateCertification(corruptCatalog, makePassingReport(catalog));
+
+  assert.equal(result.success, false);
+  assert.ok(rules(result).has("schema"));
+});
+
+test("missing unknown and violated invariant results fail closed", () => {
+  const report = makePassingReport(catalog);
+  const typeCase = caseById(report, "type-text");
+  typeCase.invariants = typeCase.invariants.filter((entry) => entry.name !== "frontmost_window");
+  invariantByName(typeCase, "physical_cursor").passed = false;
+  typeCase.invariants.push({ name: "not_cataloged", passed: true });
+
+  const result = validateCertification(catalog, report);
+
+  assert.equal(result.success, false);
+  assert.ok(rules(result).has("missing_invariant"));
+  assert.ok(rules(result).has("violated_invariant"));
+  assert.ok(rules(result).has("unknown_invariant"));
+});
+
+test("duplicate invariant results remain visible after JSON parsing and fail closed", () => {
+  const report = makePassingReport(catalog);
+  const typeCase = caseById(report, "type-text");
+  invariantByName(typeCase, "physical_cursor").passed = false;
+  typeCase.invariants.push({ name: "physical_cursor", passed: true });
+  const parsedReport = JSON.parse(JSON.stringify(report));
+
+  const result = validateCertification(catalog, parsedReport);
+
+  assert.equal(result.success, false);
+  assert.ok(rules(result).has("duplicate_invariant_result"));
+  assert.ok(rules(result).has("violated_invariant"));
+});
+
+test("invariant result entries have a closed typed schema", () => {
+  const corruptions = [
+    "not-an-entry",
+    { name: "physical_cursor", passed: "yes" },
+    { name: "", passed: true },
+    { name: "physical_cursor", passed: true, ignored: false },
+  ];
+  for (const corruption of corruptions) {
+    const report = makePassingReport(catalog);
+    caseById(report, "type-text").invariants[0] = corruption;
+
+    const result = validateCertification(catalog, report);
+
+    assert.equal(result.success, false);
+    assert.ok(rules(result).has("invariant_schema"));
+  }
+});
+
+test("legacy violation counts and invariant objects cannot stand in for named invariant results", () => {
+  const report = makePassingReport(catalog);
+  const typeCase = caseById(report, "type-text");
+  typeCase.invariants = { physical_cursor: true };
+  typeCase.invariant_violations = 0;
+
+  const result = validateCertification(catalog, report);
+
+  assert.equal(result.success, false);
+  assert.ok(rules(result).has("invariant_schema"));
 });
