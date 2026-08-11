@@ -35,6 +35,36 @@ diagnostic-only unless selected with `--bridge-socket` or `PEEKABOO_BRIDGE_SOCKE
 
 There is **no auto-launch** of Peekaboo.app.
 
+`pnpm app:restart` remains the contributor workflow: it builds Debug with the repository's ordinary
+local Xcode signing configuration. It does not require or inject an OpenClaw Foundation identity.
+Managed replacement of the stable TCC app is deliberately
+separate:
+
+```bash
+pnpm app:install-companion -- --source-app /absolute/path/Peekaboo.app --healthcheck-cli /absolute/path/peekaboo
+```
+
+You can also pass `--deployment` directly to `scripts/restart-peekaboo.sh`. Deployment mode requires the trusted signed artifact and current
+signed CLI, then retains the transactional signer/native-only/readiness/rollback gates described
+below.
+
+Deployment may launch the GUI permission broker with the process argument
+`--background-bridge-host`. That unattended mode still initializes the menu-bar status item,
+permission state, and GUI Bridge listener, but startup never presents API-key or permission
+onboarding, opens the main/Settings/Inspector windows, promotes the app into the Dock, or handles
+an invisible-window reopen by activating UI. It also leaves Sparkle stopped so an automatic update
+check or installer relaunch cannot drop the required host mode. Update actions stay hidden in this
+managed process; quit it and launch Peekaboo with `--interactive` before updating. Explicit later user
+intent from the status item or a configured shortcut still opens the requested interface. If its
+Bridge listener cannot take
+ownership after bounded legacy-host migration retries, the app exits nonzero instead of remaining
+alive without a usable Bridge. The managed host binds the main-app Launch at Login mode to the
+exact installed bundle version and code-signature hash. A registered main-app login
+service can therefore restart that same build unattended, while a rolled-back or independently
+updated build ignores the stale receipt. Quit the managed host and run
+`open -a Peekaboo --args --interactive` for an explicit update session; the next ordinary login
+launch remains background-only.
+
 `peekaboo mcp` never hosts a Bridge listener. When it must run services locally, its in-process daemon is limited to
 the window tracker and other process-local support.
 
@@ -46,6 +76,8 @@ the window tracker and other process-local support.
 - Payloads are `Codable` JSON with a small handshake for:
   - protocol version negotiation
   - capability/operation advertisement
+  - optional host PID/process-start identity, bundle version, code-signature hash, and launch-mode
+    capabilities for exact-generation deployment readiness checks
 - Each listener holds an exclusive lease beside its socket for its full lifetime.
 - A host removes an existing socket only after acquiring the lease and matching the path to the exact device/inode
   recorded by the previous lease owner. Pre-lease sockets are recovered only after proving no same-user process has the
@@ -92,6 +124,13 @@ Protocol `1.18` adds immutable capture-time bounds to destructive window mutatio
 Exact background PID/window reads are coordinated at the host on generation-pinned process/window read lanes. Each live frame acquires and releases its own lane, so different-process mutations overlap and queued same-process writers cannot be starved by the next frame. The host revalidates owner, process generation, and bounds after admission and completion; drift fails the request without redispatching it against a broader or recycled target. Screen, frontmost, area, unresolved, foreground, web-focus, and menu-opening paths remain globally exclusive. IPC-backed services acquire only in the execution host, never in both client and host.
 
 Protocol `1.21` extends `desktopObservation` with exact-window ROI requests, capture viewport receipts, and one host-owned snapshot-publication transaction. ROI clients require a negotiated 1.21 host with enabled desktop observation and atomic snapshot publication before dispatch so an older or restricted host cannot ignore the optional crop, return full-window pixels, or acknowledge only a raw raster. The client then validates the window ID, owner PID/process generation, full-window bounds, requested and pixel-aligned delivered rectangles, output scale, and every quarantined artifact dimension before publishing caller-visible files or snapshots. Ordinary full-window desktop observation remains compatible with protocol 1.5 hosts.
+
+Current hosts add optional `hostIdentity` and `hostCapabilities` fields to every successful
+handshake without advancing the protocol. New clients decode those fields when present and retain
+compatibility with older hosts that omit them; older clients ignore the additive keys. Deployment
+can require the `backgroundBridgeHost`, `hostGenerationIdentity`, and
+`codeSignatureBuildIdentity` capabilities, then compare the reported PID/process-start identity
+and code-signature hash with the newly installed app generation before committing an update.
 
 ## Security
 

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import KeyboardShortcuts
 import Observation
 import os.log
@@ -12,6 +13,7 @@ import Tachikoma
 struct PeekabooApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.openWindow) private var openWindow
+    private let launchPolicy = PeekabooAppLaunchPolicy.current
 
     @State private var services = PeekabooServices(
         snapshotManager: InMemorySnapshotManager(
@@ -167,9 +169,8 @@ struct PeekabooApp: App {
         }
         .windowResizability(.automatic)
         .defaultSize(width: 900, height: 700)
-        // The sessions window must only appear on explicit user intent (menu,
-        // shortcut, dock). Without these, SwiftUI presents/restores it on
-        // every app launch — very noticeable with dev rebuild-relaunch loops.
+        // Sessions are explicit-user-only in every launch mode. Restoring the scene on an ordinary
+        // app/login launch used to reopen it without consent and could steal focus.
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
 
@@ -192,6 +193,8 @@ struct PeekabooApp: App {
         .defaultSize(width: 450, height: 700)
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified(showsTitle: true))
+        .defaultLaunchBehavior(self.launchPolicy.suppressesAutomaticScenePresentation ? .suppressed : .automatic)
+        .restorationBehavior(self.launchPolicy.disablesSceneRestoration ? .disabled : .automatic)
 
         // Settings scene
         Settings {
@@ -222,9 +225,10 @@ private struct AppStateConnectionContext {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "boo.peekaboo.app", category: "App")
+    private let launchPolicy: PeekabooAppLaunchPolicy
     private var statusBarController: StatusBarController?
     private let automationTargetTracker = AutomationTargetTracker()
-    let updaterController: any UpdaterProviding = makeUpdaterController()
+    let updaterController: any UpdaterProviding
     var windowOpener: ((String) -> Void)?
     private var bridgeHost: PeekabooBridgeHost?
     private var bridgeStartTask: Task<Void, Never>?
@@ -245,11 +249,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didSetupNotificationObservers = false
     private var didObserveAgentMode = false
 
+    override init() {
+        let launchPolicy = PeekabooAppLaunchPolicy.current
+        self.launchPolicy = launchPolicy
+        self.updaterController = makeUpdaterController(launchPolicy: launchPolicy)
+        super.init()
+    }
+
+    func applicationWillFinishLaunching(_: Notification) {
+        do {
+            try self.launchPolicy.persistManagedBackgroundHostReceipt()
+        } catch {
+            self.handlePermanentBridgeStartFailure(
+                "Could not persist managed background-host identity: \(error.localizedDescription)")
+            return
+        }
+        if let activationPolicy = self.launchPolicy.initialActivationPolicy {
+            NSApp.setActivationPolicy(activationPolicy)
+        }
+    }
+
     func applicationDidFinishLaunching(_: Notification) {
         self.logger.info("Peekaboo launching...")
         NSLog("PeekabooApp: applicationDidFinishLaunching")
 
-        // Don't set activation policy here - let DockIconManager handle it
+        if self.launchPolicy.isBackgroundBridgeHost {
+            DockIconManager.shared.setBackgroundBridgeHostMode(true)
+        }
 
         // Initialize visualizer components
         self.visualizerCoordinator = VisualizerCoordinator()
@@ -278,6 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Connect dock icon manager to settings
         if !self.didConnectDockIconManager {
+            DockIconManager.shared.setBackgroundBridgeHostMode(self.launchPolicy.isBackgroundBridgeHost)
             DockIconManager.shared.connectToSettings(context.settings)
             self.didConnectDockIconManager = true
         }
@@ -314,16 +341,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Nudge towards API-key setup once, not on every launch — repeated
         // launches (dev rebuild loops, login item) must not pop the window.
         let apiKeyNudgeKey = "peekaboo.agentAPIKeyNudgeShown"
-        if self.settings?.agentModeEnabled == true,
+        if self.launchPolicy.allowsAPIKeyNudge,
+           self.settings?.agentModeEnabled == true,
            self.settings?.hasValidAPIKey != true,
            !UserDefaults.standard.bool(forKey: apiKeyNudgeKey)
         {
             UserDefaults.standard.set(true, forKey: apiKeyNudgeKey)
-            self.showMainWindow()
+            self.showMainWindow(intent: .automatic)
         }
     }
 
     func maybeShowPermissionsOnboardingIfNeeded() {
+        guard self.launchPolicy.allowsPermissionsOnboarding else { return }
         guard !self.didSchedulePermissionsOnboarding else { return }
         self.didSchedulePermissionsOnboarding = true
 
@@ -358,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !self.launchPolicy.isBackgroundBridgeHost || flag else { return false }
         // Reopen fires for dock clicks and for `open`/relaunch attempts while
         // the app is already running. A dock click is real user intent, but a
         // dock icon only exists while the activation policy is .regular — in
@@ -384,7 +414,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Window Management
 
-    func showMainWindow() {
+    func showMainWindow(intent: PeekabooAppLaunchPolicy.PresentationIntent = .explicitUser) {
+        guard self.launchPolicy.allowsPresentation(intent) else {
+            self.logger.info("Ignoring main window request in background Bridge host mode")
+            return
+        }
         guard let settings = self.settings,
               AgentSessionUI.isAvailable(agentModeEnabled: settings.agentModeEnabled)
         else {
@@ -441,10 +475,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func showSettings() {
+        guard self.launchPolicy.allowsPresentation(.explicitUser) else { return }
         SettingsOpener.openSettings()
     }
 
     func showInspector() {
+        guard self.launchPolicy.allowsPresentation(.explicitUser) else {
+            self.logger.info("Ignoring Inspector request in background Bridge host mode")
+            return
+        }
         self.logger.info("showInspector called")
 
         // Mark that Inspector has been requested
@@ -565,6 +604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             defer { self.bridgeStartTask = nil }
             var retryDelayNanoseconds: UInt64 = 250_000_000
+            var ownershipRetryCount = 0
             while !Task.isCancelled {
                 do {
                     self.bridgeHost = try await PeekabooBridgeBootstrap.startHostChecked(
@@ -574,9 +614,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         allowlistedTeams: allowlistedTeams,
                         allowlistedBundles: allowlistedBundles,
                         automationActivityObserver: automationActivityObserver,
-                        allowedOperations: PeekabooBridgeOperation.remoteDefaultAllowlist)
+                        allowedOperations: PeekabooBridgeOperation.remoteDefaultAllowlist,
+                        hostCapabilities: self.launchPolicy.isBackgroundBridgeHost
+                            ? [PeekabooBridgeHostCapability.backgroundBridgeHost]
+                            : [])
                     return
                 } catch PeekabooBridgeHostError.socketAlreadyOwned {
+                    ownershipRetryCount += 1
+                    if let retryLimit = self.launchPolicy.maximumBridgeOwnershipRetries,
+                       ownershipRetryCount >= retryLimit
+                    {
+                        self.handlePermanentBridgeStartFailure(
+                            "Bridge socket remained owned after \(ownershipRetryCount) attempts")
+                        return
+                    }
                     self.logger.info(
                         "Peekaboo Bridge socket is busy; retrying after legacy host migration")
                     do {
@@ -588,10 +639,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } catch {
                     self.logger
                         .error("Failed to start Peekaboo Bridge: \(error.localizedDescription, privacy: .public)")
+                    self.handlePermanentBridgeStartFailure(error.localizedDescription)
                     return
                 }
             }
         }
+    }
+
+    private func handlePermanentBridgeStartFailure(_ description: String) {
+        guard self.launchPolicy.terminatesOnPermanentBridgeFailure else { return }
+        self.logger.fault(
+            "Background Bridge host cannot become ready; terminating: \(description, privacy: .public)")
+        Darwin.exit(EXIT_FAILURE)
     }
 
     private func makeAutomationActivityObserver() -> @Sendable (pid_t) -> Void {
