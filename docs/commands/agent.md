@@ -13,23 +13,44 @@ read_when:
 | Command or flag | Description |
 | --- | --- |
 | `run [task]` | Run a task. `run` is the default, so `peekaboo agent "task"` remains valid. |
-| `resume [session-id]` | Resume the most recent session, or the specified session, in chat mode. |
-| `sessions` | Print cached sessions; accepts only the global `--json` output switch. |
+| `resume [session-id]` | Resume the most recent session, or the exact full session ID, in chat mode. |
+| `sessions` | Print cached sessions with full IDs, tasks, lifecycle status, and stored policy maximum; accepts only the global `--json` output switch. |
 | `chat [initial-prompt]` | Start the interactive chat loop. |
-| `--dry-run` | Validate and echo the task without calling a model, invoking tools, or creating a session. |
+| `--dry-run` | Emit a deterministic preview of a required text task without calling a model, invoking tools, transcribing audio, or creating a session. JSON includes `dryRun`, the normalized `instruction`, and zero tool/trace counts. |
 | `--max-steps <n>` | Cap model turns to `1...100` (default: 100). One turn may contain multiple tool calls. |
 | `--model gpt-5.6|gpt-5-mini|claude-opus-5|claude-fable-5|claude-sonnet-5|gemini-3-flash|minimax|minimax-cn/<model>|openrouter/<provider>/<model>|ollama/<model>|lmstudio/<model>` | Override the configured model. Concrete OpenAI and Anthropic selections are preserved; generic `gpt`/`openai` select GPT-5.6 Sol. Input is validated against supported hosted providers and local model providers. |
 | `--no-cache` | Run ephemerally without saving a resumable session. Cannot be combined with resume/list flags. |
+| `--allow-foreground` | Human opt-in for this invocation to use foreground/global UI routes. New sessions persist it as an immutable maximum; each later resume must opt in again. It never exposes the Shell tool. |
 | `--quiet` / `--simple` / `--no-color` / `--debug-terminal` | Control output mode; the command auto-detects terminal capabilities when you don’t override it. |
 | `--audio` / `--audio-file <path>` | Use microphone input or pipe audio from disk. |
 
 ## Implementation notes
 - The command resolves output “modes” (`minimal`, `compact`, `enhanced`, `quiet`, `verbose`) using terminal detection heuristics; `--simple` and `--no-color` force minimal mode, while `--quiet` suppresses progress output entirely.
 - Session metadata lives inside `agentService` (PeekabooCore). `agent resume` grabs the most recent session, `agent sessions` prints the cached list, and `--no-cache` keeps a run in memory.
+- Copy the full ID printed by `agent sessions`; shortened prefixes are display hints, not valid resume identifiers. A status
+  of `active` means the saved session is resumable, not that a process is currently executing or that the session is
+  free for concurrent use. Use one process per session; if another run is using it, wait and retry the same full ID.
+- Every new Agent session is background-only by default. The runtime enforces that ceiling before tool validation or
+  dispatch, including foreground aliases, shared-pointer tools, focus/activation, foreground capture, global
+  shared system UI mutations, Space switch/follow, dialog mutations, raw `press`, persistent clipboard writes,
+  browser setup, and
+  browser page fronting. Space listing and unfollowed window moves remain available. Refusals report `effect: refused`,
+  `mutation_dispatched: false`, and `retry_safe: true`.
+- `--allow-foreground` is accepted only as human authority. A new session saves foreground permission as its immutable
+  maximum, but every later process invocation defaults back to background-only and must pass the flag again. A
+  background-only session cannot be broadened on resume, and editing session JSON cannot authorize foreground work.
+- Background-only Agent typing requires an exact non-dialog snapshot/element target. Paste is refused until its window
+  receipt can distinguish sheets as well as dialogs. Process-only typing and paste remain available to standalone
+  CLI/MCP callers but cannot prove that an Agent is not mutating process-focused modal UI.
+- Foreground permission never exposes the Shell tool. Normal Agent toolsets omit `shell`, and the execution boundary
+  still refuses it after `--allow-foreground`. Foreground UI authority is not a process sandbox: a trusted prompt can
+  operate terminal or scripting apps through their UI, so grant `--allow-foreground` only to trusted prompts. Use
+  Peekaboo's native app/window/Accessibility/browser tools for UI automation.
 - Agent execution stays in the caller process by default. Pass the global `--bridge-socket <path>` option to route its tools through one specific Bridge host; `--no-remote` keeps the run strictly caller-local.
 - All agent executions run under `CommandRuntime.makeDefault()`, so environment variables, credentials, and logging levels match the top-level CLI state.
 - New configurations select GPT-5.6 and Opus 5. Credential-only Anthropic discovery uses Opus 4.8 for zero-retention compatibility, while saved configuration and session model pins remain unchanged.
-- `--dry-run` is a zero-provider task preview: it echoes the task without model reasoning, tool calls, or a resumable session.
+- `--dry-run` is a zero-provider text-task preview: it echoes the normalized instruction with explicit zero
+  model/tool/session effects. A missing task or audio input is invalid instead of entering chat/help or transcription.
 - Audio flags wire into Tachikoma’s audio stack: `--audio` opens the microphone and `--audio-file` loads a WAV/CAF file.
 - Generation uses `agent.temperature` and `agent.maxTokens` from the shared config written by the macOS Settings UI.
   Token requests are capped to model capability; unsupported temperature controls are omitted automatically.
@@ -90,11 +111,17 @@ peekaboo agent "Check the current window" --model ollama/llama3.3
 # Use an OpenRouter-hosted model
 peekaboo agent "Check the current window" --model openrouter/xiaomi/mimo-v2.5-pro
 
+# Explicitly authorize foreground/global UI for this new resumable session
+peekaboo agent "Demonstrate the workflow visibly" --allow-foreground
+
 # Dry-run the same task without executing any tools
 peekaboo agent "Install the nightly build" --dry-run
 
 # Resume the most recent session
 peekaboo agent resume
+
+# Resume one exact session from the full ID printed by `agent sessions`
+peekaboo agent resume 12345678-1234-1234-1234-123456789abc
 
 # List cached sessions as JSON
 peekaboo agent sessions --json

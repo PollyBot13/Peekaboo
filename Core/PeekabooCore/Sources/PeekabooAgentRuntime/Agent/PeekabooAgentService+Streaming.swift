@@ -52,6 +52,7 @@ extension PeekabooAgentService {
         let sessionId: String
         let eventHandler: EventHandler?
         let enhancementOptions: AgentEnhancementOptions?
+        let executionPolicy: MCPToolExecutionPolicy
 
         init(
             model: LanguageModel,
@@ -59,7 +60,8 @@ extension PeekabooAgentService {
             tools: [AgentTool],
             sessionId: String,
             eventHandler: EventHandler?,
-            enhancementOptions: AgentEnhancementOptions?)
+            enhancementOptions: AgentEnhancementOptions?,
+            executionPolicy: MCPToolExecutionPolicy = .backgroundOnly)
         {
             self.model = model
             self.provider = provider
@@ -67,6 +69,7 @@ extension PeekabooAgentService {
             self.sessionId = sessionId
             self.eventHandler = eventHandler
             self.enhancementOptions = enhancementOptions
+            self.executionPolicy = executionPolicy
         }
     }
 
@@ -80,6 +83,7 @@ extension PeekabooAgentService {
         let imageContextID: String
         let turnBoundary: AgentTurnBoundary
         let enhancementOptions: AgentEnhancementOptions?
+        let executionPolicy: MCPToolExecutionPolicy
 
         init(
             model: LanguageModel,
@@ -89,7 +93,8 @@ extension PeekabooAgentService {
             sessionId: String,
             imageContextID: String = UUID().uuidString,
             initialMessages: [ModelMessage] = [],
-            enhancementOptions: AgentEnhancementOptions? = nil)
+            enhancementOptions: AgentEnhancementOptions? = nil,
+            executionPolicy: MCPToolExecutionPolicy = .unrestricted)
         {
             self.model = model
             self.supportsVision = model.supportsVision && (providerSupportsVision ?? true)
@@ -99,6 +104,7 @@ extension PeekabooAgentService {
             self.imageContextID = imageContextID
             self.turnBoundary = PeekabooAgentService.restoredTurnBoundary(from: initialMessages)
             self.enhancementOptions = enhancementOptions
+            self.executionPolicy = executionPolicy
         }
 
         func tool(named name: String) -> AgentTool? {
@@ -109,6 +115,15 @@ extension PeekabooAgentService {
     private struct ToolCallExecutionOptions {
         let stepIndex: Int
         let allowSuccessfulToolBoundary: Bool
+    }
+
+    private struct ToolResultCancellationContext {
+        let stepIndex: Int
+        let stepText: String
+        let toolCalls: [AgentToolCall]
+        let handlingContext: ToolHandlingContext
+        let emitToolStartEvents: Bool
+        let checkpoint: ((GenerationStep) -> Void)?
     }
 
     struct StreamingLoopState {
@@ -162,7 +177,8 @@ extension PeekabooAgentService {
             sessionId: configuration.sessionId,
             imageContextID: imageContextID,
             initialMessages: initialMessages,
-            enhancementOptions: configuration.enhancementOptions)
+            enhancementOptions: configuration.enhancementOptions,
+            executionPolicy: configuration.executionPolicy)
         return try await self.withAgentToolImageLifecycle(
             executionID: imageContextID,
             imageStore: imageStore)
@@ -847,33 +863,29 @@ extension PeekabooAgentService {
                 }
             }
 
-            guard let tool = context.tool(named: toolCall.name) else {
-                let unavailableResult = self.makeUnavailableToolResult(for: toolCall)
+            if let preflightResult = self.makeToolPreflightResult(for: toolCall, context: context) {
                 await self.sendToolCompletionEvent(
                     name: toolCall.name,
-                    payload: self.toolResultPayload(from: unavailableResult.result, toolName: toolCall.name),
+                    payload: self.toolResultPayload(from: preflightResult.result, toolName: toolCall.name),
                     eventHandler: context.eventHandler)
-                currentMessages.append(ModelMessage(role: .tool, content: [.toolResult(unavailableResult)]))
-                toolResults.append(unavailableResult)
-                do {
-                    try Task.checkCancellation()
-                } catch {
-                    await self.appendCancelledToolResults(
-                        toolCalls: toolCalls,
-                        startingAt: index + 1,
-                        activeToolCallId: nil,
-                        context: context,
-                        currentMessages: &currentMessages,
-                        toolResults: &toolResults,
-                        emitToolStartEvents: emitToolStartEvents)
-                    onCancellationCheckpoint?(GenerationStep(
+                currentMessages.append(ModelMessage(role: .tool, content: [.toolResult(preflightResult)]))
+                toolResults.append(preflightResult)
+                try await self.checkCancellationAfterToolResult(
+                    nextIndex: index + 1,
+                    cancellationContext: ToolResultCancellationContext(
                         stepIndex: stepIndex,
-                        text: stepText,
+                        stepText: stepText,
                         toolCalls: toolCalls,
-                        toolResults: toolResults))
-                    throw CancellationError()
-                }
+                        handlingContext: context,
+                        emitToolStartEvents: emitToolStartEvents,
+                        checkpoint: onCancellationCheckpoint),
+                    currentMessages: &currentMessages,
+                    toolResults: &toolResults)
                 continue
+            }
+
+            guard let tool = context.tool(named: toolCall.name) else {
+                preconditionFailure("Tool preflight must handle unavailable tools")
             }
             let result: AgentToolResult
             do {
@@ -904,29 +916,24 @@ extension PeekabooAgentService {
             }
             toolResults.append(result)
 
-            do {
-                try Task.checkCancellation()
-            } catch {
-                await self.appendCancelledToolResults(
-                    toolCalls: toolCalls,
-                    startingAt: index + 1,
-                    activeToolCallId: nil,
-                    context: context,
-                    currentMessages: &currentMessages,
-                    toolResults: &toolResults,
-                    emitToolStartEvents: emitToolStartEvents)
-                onCancellationCheckpoint?(GenerationStep(
+            try await self.checkCancellationAfterToolResult(
+                nextIndex: index + 1,
+                cancellationContext: ToolResultCancellationContext(
                     stepIndex: stepIndex,
-                    text: stepText,
+                    stepText: stepText,
                     toolCalls: toolCalls,
-                    toolResults: toolResults))
-                throw CancellationError()
-            }
+                    handlingContext: context,
+                    emitToolStartEvents: emitToolStartEvents,
+                    checkpoint: onCancellationCheckpoint),
+                currentMessages: &currentMessages,
+                toolResults: &toolResults)
 
             if let boundarySignal = self.turnBoundarySignal(from: result) {
                 let remainingToolCalls = toolCalls.dropFirst(index + 1)
                 for skippedToolCall in remainingToolCalls {
-                    let skippedResult = self.makeSkippedToolResult(
+                    let skippedResult = self.makeToolPreflightResult(
+                        for: skippedToolCall,
+                        context: context) ?? self.makeSkippedToolResult(
                         for: skippedToolCall,
                         boundarySignal: boundarySignal)
                     if emitToolStartEvents {
@@ -1054,15 +1061,6 @@ extension PeekabooAgentService {
             return normalizedContent
         }
         return "\(normalizedContent)\n\n\(normalizedReason)"
-    }
-
-    private func makeUnavailableToolResult(for toolCall: AgentToolCall) -> AgentToolResult {
-        AgentToolResult(
-            toolCallId: toolCall.id,
-            result: AnyAgentToolValue(object: [
-                "error": AnyAgentToolValue(string: "Tool '\(toolCall.name)' is not available in this context"),
-            ]),
-            isError: true)
     }
 
     private func executeToolCall(
@@ -1285,6 +1283,32 @@ extension PeekabooAgentService {
     func turnBoundaryStopReason(from toolResult: AgentToolResult) -> String? {
         guard case let .stopAgent(reason)? = self.turnBoundarySignal(from: toolResult) else { return nil }
         return reason
+    }
+
+    private func checkCancellationAfterToolResult(
+        nextIndex: Int,
+        cancellationContext: ToolResultCancellationContext,
+        currentMessages: inout [ModelMessage],
+        toolResults: inout [AgentToolResult]) async throws
+    {
+        do {
+            try Task.checkCancellation()
+        } catch {
+            await self.appendCancelledToolResults(
+                toolCalls: cancellationContext.toolCalls,
+                startingAt: nextIndex,
+                activeToolCallId: nil,
+                context: cancellationContext.handlingContext,
+                currentMessages: &currentMessages,
+                toolResults: &toolResults,
+                emitToolStartEvents: cancellationContext.emitToolStartEvents)
+            cancellationContext.checkpoint?(GenerationStep(
+                stepIndex: cancellationContext.stepIndex,
+                text: cancellationContext.stepText,
+                toolCalls: cancellationContext.toolCalls,
+                toolResults: toolResults))
+            throw CancellationError()
+        }
     }
 
     private func logStepCompletion(

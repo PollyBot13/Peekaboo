@@ -28,15 +28,23 @@ public struct MCPAgentTool: MCPTool {
         The agent has access to all Peekaboo automation tools including:
         - Screen capture and analysis
         - UI element interaction (click, type, scroll)
-        - Application control (launch, quit, focus)
+        - Background application control (already-running launch readiness checks, quit, inspect)
         - Window management (move, resize, close)
-        - System interaction (keyboard chords, shell commands)
+        - Background text delivery and native Accessibility actions
+
+        MCP-started Agent sessions are always background-only. They refuse raw keyboard press, focus/activation,
+        shared-pointer/global input, foreground capture, persistent clipboard writes, dialog/shared system UI
+        mutations, Space switch/follow, browser setup/fronting, and Shell-tool access before dispatch. Dialog listing
+        remains available. Space listing and unfollowed window placement remain available. This UI authority boundary
+        is not a process sandbox; trusted prompts can operate terminal or scripting apps through their UI. Only the
+        human-facing CLI can explicitly authorize foreground UI for a session. Background typing requires an exact
+        non-dialog snapshot/element; background paste is refused until dialog/sheet ownership is exact.
 
         Example tasks:
-        - "Open Safari and navigate to apple.com"
+        - "Inspect the current page in an already-running Safari window"
         - "Take a screenshot of the current window and save it to Desktop"
         - "Find the login button and click it, then type my credentials"
-        - "Open TextEdit, write 'Hello World', and save the document"
+        - "In an already-running TextEdit document, write 'Hello World'"
 
         Requires a configured provider credential or local model runtime.
         \(PeekabooMCPVersion.banner)
@@ -139,6 +147,9 @@ public struct MCPAgentTool: MCPTool {
                 "createdAt": .string(isoFormatter.string(from: session.createdAt)),
                 "updatedAt": .string(isoFormatter.string(from: session.lastAccessedAt)),
                 "messageCount": .string(String(session.messageCount)),
+                "status": .string(session.status.rawValue),
+                "task": .string(session.summary ?? ""),
+                "toolExecutionPolicy": .string(session.toolExecutionPolicy.rawValue),
             ])
         }
 
@@ -165,7 +176,10 @@ public struct MCPAgentTool: MCPTool {
                 "ID: \(session.id)",
                 "Created: \(formatter.string(from: session.createdAt))",
                 "Updated: \(formatter.string(from: session.lastAccessedAt))",
+                "Task: \(session.summary ?? "Unknown task")",
+                "Status: \(session.status.rawValue)",
                 "Message Count: \(session.messageCount)",
+                "Tool Policy: \(session.toolExecutionPolicy.rawValue)",
             ].joined(separator: "\n")
         }.joined(separator: "\n---\n")
     }

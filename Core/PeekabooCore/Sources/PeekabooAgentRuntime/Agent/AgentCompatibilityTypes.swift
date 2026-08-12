@@ -122,6 +122,9 @@ public struct SessionSummary: Sendable, Codable {
     /// Brief description of the session
     public let summary: String?
 
+    /// Immutable maximum tool authority retained by the session.
+    public let toolExecutionPolicy: MCPToolExecutionPolicy
+
     public init(
         id: String,
         modelName: String,
@@ -129,7 +132,8 @@ public struct SessionSummary: Sendable, Codable {
         lastAccessedAt: Date,
         messageCount: Int,
         status: SessionStatus,
-        summary: String? = nil)
+        summary: String? = nil,
+        toolExecutionPolicy: MCPToolExecutionPolicy = .backgroundOnly)
     {
         self.id = id
         self.modelName = modelName
@@ -138,6 +142,44 @@ public struct SessionSummary: Sendable, Codable {
         self.messageCount = messageCount
         self.status = status
         self.summary = summary
+        self.toolExecutionPolicy = toolExecutionPolicy
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case modelName
+        case createdAt
+        case lastAccessedAt
+        case messageCount
+        case status
+        case summary
+        case toolExecutionPolicy
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.modelName = try container.decode(String.self, forKey: .modelName)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.lastAccessedAt = try container.decode(Date.self, forKey: .lastAccessedAt)
+        self.messageCount = try container.decode(Int.self, forKey: .messageCount)
+        self.status = try container.decode(SessionStatus.self, forKey: .status)
+        self.summary = try container.decodeIfPresent(String.self, forKey: .summary)
+        self.toolExecutionPolicy = try container.decodeIfPresent(
+            MCPToolExecutionPolicy.self,
+            forKey: .toolExecutionPolicy) ?? .backgroundOnly
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(self.id, forKey: .id)
+        try container.encode(self.modelName, forKey: .modelName)
+        try container.encode(self.createdAt, forKey: .createdAt)
+        try container.encode(self.lastAccessedAt, forKey: .lastAccessedAt)
+        try container.encode(self.messageCount, forKey: .messageCount)
+        try container.encode(self.status, forKey: .status)
+        try container.encodeIfPresent(self.summary, forKey: .summary)
+        try container.encode(self.toolExecutionPolicy, forKey: .toolExecutionPolicy)
     }
 }
 
@@ -166,6 +208,11 @@ public struct AgentSession: Sendable, Codable {
     /// Credential-free provider kind used to prevent namespace or protocol drift.
     public let modelProviderIdentity: String?
 
+    /// Immutable maximum tool authority for this resumable session.
+    ///
+    /// Older session files omit this field and are interpreted conservatively as background-only.
+    public let toolExecutionPolicy: MCPToolExecutionPolicy?
+
     /// Complete conversation history
     public let messages: [ModelMessage]
 
@@ -184,6 +231,7 @@ public struct AgentSession: Sendable, Codable {
         modelSelection: String? = nil,
         modelEndpointIdentity: String? = nil,
         modelProviderIdentity: String? = nil,
+        toolExecutionPolicy: MCPToolExecutionPolicy? = .backgroundOnly,
         messages: [ModelMessage],
         metadata: SessionMetadata,
         createdAt: Date,
@@ -194,10 +242,20 @@ public struct AgentSession: Sendable, Codable {
         self.modelSelection = modelSelection
         self.modelEndpointIdentity = modelEndpointIdentity
         self.modelProviderIdentity = modelProviderIdentity
+        self.toolExecutionPolicy = toolExecutionPolicy
         self.messages = messages
         self.metadata = metadata
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    public var effectiveToolExecutionPolicy: MCPToolExecutionPolicy {
+        switch self.toolExecutionPolicy {
+        case .foregroundAllowed:
+            .foregroundAllowed
+        case .backgroundOnly, .unrestricted, nil:
+            .backgroundOnly
+        }
     }
 }
 
@@ -296,7 +354,8 @@ public final class AgentSessionManager: @unchecked Sendable {
                         lastAccessedAt: session.updatedAt,
                         messageCount: session.messages.count,
                         status: self.sessionStatus(for: session, lastAccessedAt: session.updatedAt),
-                        summary: self.generateSessionSummary(from: session.messages))
+                        summary: self.generateSessionSummary(from: session.messages),
+                        toolExecutionPolicy: session.effectiveToolExecutionPolicy)
                 } catch {
                     return nil
                 }
@@ -378,7 +437,7 @@ public final class AgentSessionManager: @unchecked Sendable {
         let sessionFile = self.sessionDirectory
             .appendingPathComponent(fileName, isDirectory: false)
             .standardizedFileURL
-        guard sessionFile.deletingLastPathComponent().standardizedFileURL == self.sessionDirectory,
+        guard sessionFile.deletingLastPathComponent().standardizedFileURL.path == self.sessionDirectory.path,
               sessionFile.lastPathComponent == fileName
         else {
             throw AgentSessionManagerError.invalidSessionID
@@ -409,7 +468,7 @@ public final class AgentSessionManager: @unchecked Sendable {
 
     private func generateSessionSummary(from messages: [ModelMessage]) -> String? {
         messages.firstNonNil { message in
-            guard message.role == .user else { return nil }
+            guard message.role == .user, !message.isDesktopContextDataMessage else { return nil }
             if case let .text(text) = message.content.first {
                 return String(text.prefix(100))
             }

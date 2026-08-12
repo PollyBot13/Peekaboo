@@ -13,6 +13,8 @@ struct AgentSessionInfo: Codable {
     let created: Date
     let lastModified: Date
     let messageCount: Int
+    let status: String
+    let toolExecutionPolicy: String
 }
 
 @available(macOS 14.0, *)
@@ -23,6 +25,7 @@ extension AgentCommand {
         let requestedModel: LanguageModel?
         let maxSteps: Int
         let queueMode: QueueMode
+        let requestedToolExecutionPolicy: MCPToolExecutionPolicy?
     }
 
     func validateSessionOptions() throws {
@@ -36,20 +39,24 @@ extension AgentCommand {
 
     func requireRequestedSession(_ agentService: PeekabooAgentService) async throws {
         if let sessionId = self.resumeSession {
-            guard try await agentService.getSessionInfo(sessionId: sessionId) != nil else {
+            guard let session = try await agentService.getSessionInfo(sessionId: sessionId) else {
                 try self.failAgentCommand(
                     message: "Session not found or expired: \(sessionId)",
                     code: .SESSION_NOT_FOUND
                 )
             }
+            try self.validateRequestedResumePolicy(session)
         } else if self.resume {
             let sessions = try await agentService.listSessions()
-            guard sessions.first != nil else {
+            guard let first = sessions.first else {
                 try self.failAgentCommand(
                     message: "No sessions found to resume",
                     code: .SESSION_NOT_FOUND,
                     hint: "Run 'peekaboo agent run \"<task>\"' to start a session."
                 )
+            }
+            if let session = try await agentService.getSessionInfo(sessionId: first.id) {
+                try self.validateRequestedResumePolicy(session)
             }
         }
     }
@@ -75,7 +82,8 @@ extension AgentCommand {
                     task: continuationTask,
                     requestedModel: requestedModel,
                     maxSteps: maxSteps,
-                    queueMode: queueMode
+                    queueMode: queueMode,
+                    requestedToolExecutionPolicy: self.requestedResumeToolExecutionPolicy
                 )
             )
             return true
@@ -100,7 +108,8 @@ extension AgentCommand {
                         task: continuationTask,
                         requestedModel: requestedModel,
                         maxSteps: maxSteps,
-                        queueMode: queueMode
+                        queueMode: queueMode,
+                        requestedToolExecutionPolicy: self.requestedResumeToolExecutionPolicy
                     )
                 )
             } else {
@@ -129,7 +138,9 @@ extension AgentCommand {
                 task: summary.summary ?? "Unknown task",
                 created: summary.createdAt,
                 lastModified: summary.lastAccessedAt,
-                messageCount: summary.messageCount
+                messageCount: summary.messageCount,
+                status: summary.status.rawValue,
+                toolExecutionPolicy: summary.toolExecutionPolicy.rawValue
             )
         }
 
@@ -156,19 +167,23 @@ extension AgentCommand {
     }
 
     private func printSessionsJSON(_ sessions: [AgentSessionInfo]) {
-        let sessionData = sessions.map { session in
-            [
-                "id": session.id,
-                "task": session.task,
-                "createdAt": ISO8601DateFormatter().string(from: session.created),
-                "updatedAt": ISO8601DateFormatter().string(from: session.lastModified),
-                "messageCount": session.messageCount,
-            ]
-        }
+        let sessionData = sessions.map(self.sessionJSONObject)
         let response = ["success": true, "sessions": sessionData] as [String: Any]
         if let jsonData = try? JSONSerialization.data(withJSONObject: response, options: .prettyPrinted) {
             print(String(data: jsonData, encoding: .utf8) ?? "{}")
         }
+    }
+
+    func sessionJSONObject(_ session: AgentSessionInfo) -> [String: Any] {
+        [
+            "id": session.id,
+            "task": session.task,
+            "createdAt": ISO8601DateFormatter().string(from: session.created),
+            "updatedAt": ISO8601DateFormatter().string(from: session.lastModified),
+            "messageCount": session.messageCount,
+            "status": session.status,
+            "toolExecutionPolicy": session.toolExecutionPolicy,
+        ]
     }
 
     private func printSessionsList(_ sessions: [AgentSessionInfo]) {
@@ -178,12 +193,8 @@ extension AgentCommand {
         ].joined()
         print(headerLine)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateStyle = .short
-        dateFormatter.timeStyle = .short
-
         for (index, session) in sessions.prefix(10).indexed() {
-            self.printSessionLine(index: index, session: session, dateFormatter: dateFormatter)
+            self.printSessionLine(index: index, session: session)
             if index < sessions.count - 1 {
                 print()
             }
@@ -204,16 +215,59 @@ extension AgentCommand {
         print(resumeHintLine)
     }
 
-    private func printSessionLine(index: Int, session: AgentSessionInfo, dateFormatter: DateFormatter) {
+    private func printSessionLine(index: Int, session: AgentSessionInfo) {
+        for line in self.sessionDisplayLines(index: index, session: session) {
+            print(line)
+        }
+    }
+
+    func sessionDisplayLines(index: Int, session: AgentSessionInfo) -> [String] {
         let timeAgo = formatTimeAgo(session.lastModified)
+        let task = Self.terminalSafeSessionTask(session.task)
         let sessionLine = [
             "\(TerminalColor.blue)\(index + 1).\(TerminalColor.reset)",
             " ",
-            "\(TerminalColor.bold)\(session.id.prefix(8))\(TerminalColor.reset)",
+            "\(TerminalColor.bold)\(task)\(TerminalColor.reset)",
         ].joined()
-        print(sessionLine)
-        print("   Messages: \(session.messageCount)")
-        print("   Last activity: \(timeAgo)")
+        let status = self.sessionStatusDescription(session.status)
+        return [
+            sessionLine,
+            "   ID: \(session.id)",
+            "   Status: \(status)",
+            "   Stored policy maximum: \(session.toolExecutionPolicy)",
+            "   Next resume default: background_only",
+            "   Messages: \(session.messageCount)",
+            "   Last activity: \(timeAgo)",
+        ]
+    }
+
+    private func sessionStatusDescription(_ status: String) -> String {
+        switch status {
+        case SessionStatus.active.rawValue:
+            "active (saved/resumable; not a live-process signal)"
+        case SessionStatus.completed.rawValue:
+            "completed (saved/resumable; last run finished)"
+        case SessionStatus.failed.rawValue:
+            "failed (saved/resumable; last run failed or was cancelled)"
+        case SessionStatus.expired.rawValue:
+            "expired (past the retention window)"
+        default:
+            status
+        }
+    }
+
+    private static func terminalSafeSessionTask(_ task: String) -> String {
+        let space = UnicodeScalar(32)!
+        let scalars = task.unicodeScalars.compactMap { scalar in
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                return space
+            }
+            return CharacterSet.controlCharacters.contains(scalar) ? nil : scalar
+        }
+        let flattened = String(String.UnicodeScalarView(scalars))
+            .split(whereSeparator: \Character.isWhitespace)
+            .joined(separator: " ")
+        return flattened.isEmpty ? "Unknown task" : flattened
     }
 
     private func resumeAgentSession(
@@ -241,7 +295,8 @@ extension AgentCommand {
                 maxSteps: request.maxSteps,
                 dryRun: self.dryRun,
                 queueMode: request.queueMode,
-                eventDelegate: streamingDelegate
+                eventDelegate: streamingDelegate,
+                requestedToolExecutionPolicy: request.requestedToolExecutionPolicy
             )
             self.displayResult(result, delegate: outputDelegate)
         } catch let error as PeekabooError {
@@ -261,5 +316,18 @@ extension AgentCommand {
             }
             throw ExitCode.failure
         }
+    }
+
+    private func validateRequestedResumePolicy(_ session: AgentSession) throws {
+        guard self.requestedResumeToolExecutionPolicy == .foregroundAllowed,
+              session.effectiveToolExecutionPolicy != .foregroundAllowed
+        else {
+            return
+        }
+        try self.failAgentCommand(
+            message: "Session \(session.id) is background-only and cannot be broadened while resuming.",
+            code: .VALIDATION_ERROR,
+            hint: "Start a new session with --allow-foreground when foreground interaction is intentionally authorized."
+        )
     }
 }

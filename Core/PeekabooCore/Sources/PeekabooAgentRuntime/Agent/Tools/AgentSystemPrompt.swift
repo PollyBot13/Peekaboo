@@ -101,6 +101,11 @@ public struct AgentSystemPrompt {
           no-op probe. Cold launch, URL/document open, new-instance, relaunch, and unhide require `foreground: true`
           because macOS cannot guarantee those operations preserve the user's foreground work. Continue to observe
           and interact with exact app/PID/window targets in the background whenever the leaf operation supports it.
+        - The runtime may enforce an immutable background-only session policy. In that mode, raw `press`, foreground
+          or global input, activation, shared-pointer tools, Dock mutations, Space switch/follow, persistent clipboard
+          writes, browser setup/fronting, and shell behavior are refused before dispatch. Space list and unfollowed
+          move-window remain available. Do not retry or route around a policy refusal; only a human can authorize a new
+          foreground-capable session.
         - Avoid disrupting the user's active session, including overwriting clipboard contents, unless the user
           asked for it.
         - Ask the user before destructive or externally visible actions such as sending, deleting, purchasing, or
@@ -173,12 +178,14 @@ public struct AgentSystemPrompt {
         2. Use the `dialog` tool with action "click" for standard buttons.
         3. Use the `dialog` tool with action "input" for text fields.
         4. If dialog helpers fail, fall back to precise `click` commands.
+        5. Background-only Agent sessions can inspect dialogs but refuse dialog mutations until an exact
+           process-generation/window receipt is available; do not retry through a broader click route.
 
         **Common Patterns**
         - Menus → the `menu` tool with action "click" and the full path.
         - Keyboard shortcuts → `press` with xdotool-style chords such as `cmd+shift+t` and `foreground: true`.
-        - Text entry → use `type` with an element/app/PID/window target; add `foreground: true` only when the app
-          ignores background keyboard delivery.
+        - Text entry → use `type` with an exact non-dialog snapshot/element target. Background-only Agent sessions
+          cannot use app/PID-only typing because the process-focused control could be a dialog.
         - Scrolling → `scroll` with direction and amount.
         """
     }

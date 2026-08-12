@@ -26,6 +26,7 @@ public struct MCPToolContext: @unchecked Sendable {
     public let browser: any BrowserMCPClientProviding
     public let snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)?
     public let snapshotExecutionGate: MCPToolSnapshotExecutionGate
+    public let executionPolicy: MCPToolExecutionPolicy
 
     @TaskLocal
     private static var taskOverride: MCPToolContext?
@@ -137,7 +138,8 @@ public struct MCPToolContext: @unchecked Sendable {
         browser: any BrowserMCPClientProviding,
         permissionsStatusProvider: (any PermissionsStatusProviding)? = nil,
         snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)? = nil,
-        snapshotExecutionGate: MCPToolSnapshotExecutionGate? = nil)
+        snapshotExecutionGate: MCPToolSnapshotExecutionGate? = nil,
+        executionPolicy: MCPToolExecutionPolicy = .unrestricted)
     {
         self.automation = automation
         self.menu = menu
@@ -158,13 +160,15 @@ public struct MCPToolContext: @unchecked Sendable {
         self.snapshotExecutionGate = snapshotExecutionGate
             ?? (agent as? PeekabooAgentService)?.snapshotExecutionGate
             ?? MCPToolSnapshotExecutionGate()
+        self.executionPolicy = executionPolicy
     }
 
     @MainActor
     public init(
         services: any PeekabooServiceProviding,
         snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)? = nil,
-        snapshotExecutionGate: MCPToolSnapshotExecutionGate? = nil)
+        snapshotExecutionGate: MCPToolSnapshotExecutionGate? = nil,
+        executionPolicy: MCPToolExecutionPolicy = .unrestricted)
     {
         let resolvedSnapshotExecutionGate = snapshotExecutionGate
             ?? (services.agent as? PeekabooAgentService)?.snapshotExecutionGate
@@ -186,7 +190,8 @@ public struct MCPToolContext: @unchecked Sendable {
             browser: services.browser,
             permissionsStatusProvider: services,
             snapshotMutationCoordinator: snapshotMutationCoordinator,
-            snapshotExecutionGate: resolvedSnapshotExecutionGate)
+            snapshotExecutionGate: resolvedSnapshotExecutionGate,
+            executionPolicy: executionPolicy)
     }
 
     @MainActor
@@ -194,6 +199,9 @@ public struct MCPToolContext: @unchecked Sendable {
         tool: any MCPTool,
         arguments: ToolArguments) async throws -> ToolResponse
     {
+        if let rejection = self.executionPolicy.rejection(toolName: tool.name, arguments: arguments) {
+            return rejection
+        }
         if let rejection = MCPToolArgumentValidator.rejection(tool: tool, arguments: arguments) {
             return rejection
         }
@@ -226,11 +234,33 @@ public struct MCPToolContext: @unchecked Sendable {
             throw error
         }
 
+        // Target authorization and leaf dispatch stay inside the same shared gate. Observation tools therefore cannot
+        // replace either snapshot store between the identity check and the exact pinned tool invocation.
+        let targetAuthorization = await self.backgroundTargetAuthorization(
+            toolName: tool.name,
+            arguments: arguments)
+        if let rejection = targetAuthorization.rejection {
+            await self.snapshotExecutionGate.release()
+            return rejection
+        }
+        if let rejection = await self.backgroundTargetRevalidation(
+            targetAuthorization,
+            toolName: tool.name)
+        {
+            await self.snapshotExecutionGate.release()
+            return rejection
+        }
+        let executionArguments = targetAuthorization.arguments
+
+        // All potentially suspending coordinator work completed before authorization. From this generation check to
+        // entering the leaf there is no suspension; app/window/type/paste leaves then retain their own dispatch
+        // receipt.
+
         let scope = MCPToolSnapshotMutationScope(
             toolName: tool.name,
             effect: effect,
             preservedSnapshotID: effect == .mutationProducingFreshObservation
-                ? arguments.getString("snapshot")
+                ? executionArguments.getString("snapshot")
                 : nil)
         var toolStarted = false
         do {
@@ -240,7 +270,7 @@ public struct MCPToolContext: @unchecked Sendable {
             let response = try await Self.$snapshotObservationStartedAt.withValue(
                 effect == .mutationProducingFreshObservation ? scope.startedAt : nil)
             {
-                try await tool.execute(arguments: arguments)
+                try await tool.execute(arguments: executionArguments)
             }
             try Task.checkCancellation()
             if Self.explicitlyNotDispatched(response) {
@@ -298,6 +328,275 @@ public struct MCPToolContext: @unchecked Sendable {
             await self.snapshotExecutionGate.release()
             throw error
         }
+    }
+
+    private struct BackgroundTargetAuthorization {
+        let arguments: ToolArguments
+        let rejection: ToolResponse?
+        var processIdentities: [ApplicationProcessIdentity] = []
+    }
+
+    private func backgroundTargetAuthorization(
+        toolName: String,
+        arguments: ToolArguments) async -> BackgroundTargetAuthorization
+    {
+        func permitted(_ arguments: ToolArguments) -> BackgroundTargetAuthorization {
+            BackgroundTargetAuthorization(arguments: arguments, rejection: nil)
+        }
+        func refused(_ response: ToolResponse?) -> BackgroundTargetAuthorization {
+            BackgroundTargetAuthorization(arguments: arguments, rejection: response)
+        }
+
+        guard self.executionPolicy == .backgroundOnly else { return permitted(arguments) }
+        let usesSnapshotTarget = ["action", "click", "scroll", "set_value"].contains(toolName) ||
+            (toolName == "type" &&
+                (arguments.getValue(for: "on") != nil || arguments.getValue(for: "snapshot") != nil))
+        guard usesSnapshotTarget else {
+            // BrowserTool mutates DevTools page targets rather than macOS desktop targets. Its policy separately
+            // requires background pages and forbids page fronting before dispatch.
+            if toolName == "type" {
+                return BackgroundTargetAuthorization(
+                    arguments: arguments,
+                    rejection: self.executionPolicy.unresolvedTargetRejection(
+                        toolName: toolName,
+                        detail: "background Agent typing requires an exact non-dialog snapshot or element target"))
+            }
+            return await self.backgroundApplicationTargetAuthorization(
+                toolName: toolName,
+                arguments: arguments)
+        }
+        if toolName == "type",
+           ["app", "pid", "window_id", "window_title", "window_index"].contains(where: {
+               arguments.getValue(for: $0) != nil
+           })
+        {
+            return BackgroundTargetAuthorization(
+                arguments: arguments,
+                rejection: self.executionPolicy.unresolvedTargetRejection(
+                    toolName: toolName,
+                    detail: "snapshot/element typing cannot include competing app, PID, or window selectors"))
+        }
+        let snapshotSelector = Self.strictString(arguments, key: "snapshot")
+        let coordinateSelector = Self.strictString(arguments, key: "coordinate_reference")
+        if snapshotSelector.isInvalid {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "snapshot must be a nonempty string containing an exact observation ID"))
+        }
+        if coordinateSelector.isInvalid {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "coordinate_reference must be a nonempty string containing an exact observation ID"))
+        }
+        let snapshotID = snapshotSelector.value
+        let coordinateReference = coordinateSelector.value
+        if let snapshotID, let coordinateReference, snapshotID != coordinateReference {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "snapshot and coordinate_reference identify different targets"))
+        }
+        let requestedSnapshotID = snapshotID ?? coordinateReference
+        // ClickTool intentionally accepts either selector as the same capture-owned coordinate receipt. Its leaf
+        // revalidates the exact PID/window/generation/bounds and rejects points outside that captured window.
+        if toolName == "click", arguments.getValue(for: "coords") != nil, requestedSnapshotID == nil {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "background coordinates require an explicit exact snapshot or coordinate_reference"))
+        }
+        let mirroredSnapshot = await UISnapshotManager.shared.getSnapshot(id: requestedSnapshotID)
+        let effectiveSnapshotID = requestedSnapshotID ?? mirroredSnapshot?.id
+        guard let effectiveSnapshotID else {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "no current snapshot identifies the target"))
+        }
+        let detectionResult = try? await self.snapshots.getDetectionResult(snapshotId: effectiveSnapshotID)
+        guard let detectionResult,
+              detectionResult.snapshotId == effectiveSnapshotID,
+              let windowContext = detectionResult.metadata.windowContext
+        else {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "snapshot '\(effectiveSnapshotID)' has no authoritative application identity"))
+        }
+        guard !detectionResult.metadata.isDialog else {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "dialog mutation is unavailable until an exact dialog ownership receipt is preserved"))
+        }
+        let applicationBundleIdentifier = Self.nonEmpty(windowContext.applicationBundleId)
+        let applicationName = Self.nonEmpty(windowContext.applicationName)
+        guard applicationBundleIdentifier != nil || applicationName != nil else {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "snapshot '\(effectiveSnapshotID)' has no authoritative application name or bundle ID"))
+        }
+        if let rejection = self.executionPolicy.systemSurfaceRejection(
+            toolName: toolName,
+            applicationBundleIdentifier: applicationBundleIdentifier,
+            applicationName: applicationName)
+        {
+            return refused(rejection)
+        }
+        guard let mirroredSnapshot, mirroredSnapshot.id == effectiveSnapshotID else {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "snapshot '\(effectiveSnapshotID)' is absent from the tool snapshot store"))
+        }
+        guard Self.sameTarget(mirroredSnapshot, windowContext) else {
+            return refused(self.executionPolicy.unresolvedTargetRejection(
+                toolName: toolName,
+                detail: "the tool and automation snapshots disagree about target ownership"))
+        }
+        if requestedSnapshotID == nil {
+            let authoritativeLatestID = await self.snapshots.getMostRecentSnapshot()
+            guard authoritativeLatestID == effectiveSnapshotID else {
+                return refused(self.executionPolicy.unresolvedTargetRejection(
+                    toolName: toolName,
+                    detail: "the implicit tool and automation snapshots do not identify the same target"))
+            }
+        }
+        var pinnedArguments = arguments.rawDictionary
+        pinnedArguments["snapshot"] = effectiveSnapshotID
+        if coordinateReference != nil {
+            pinnedArguments["coordinate_reference"] = effectiveSnapshotID
+        }
+        return permitted(ToolArguments(raw: pinnedArguments))
+    }
+
+    private func backgroundApplicationTargetAuthorization(
+        toolName: String,
+        arguments: ToolArguments) async -> BackgroundTargetAuthorization
+    {
+        guard let schema = Self.backgroundApplicationTargetSchema(toolName: toolName) else {
+            return BackgroundTargetAuthorization(arguments: arguments, rejection: nil)
+        }
+
+        do {
+            var identifiers = try Self.applicationIdentifiers(arguments: arguments, schema: schema)
+            let windowProcessIdentities = try await self.windowProcessIdentities(
+                arguments: arguments,
+                keys: schema.windowIDKeys)
+            identifiers.append(contentsOf: windowProcessIdentities.map { "PID:\($0.processIdentifier)" })
+            guard !identifiers.isEmpty else {
+                throw BackgroundTargetResolutionError(
+                    "the mutation has no explicit application or exact-window owner")
+            }
+            let applications = try await self.resolveApplications(identifiers)
+            let processIdentity = try Self.validatedProcessIdentity(
+                applications: applications,
+                windowProcessIdentities: windowProcessIdentities)
+            for application in applications {
+                if let rejection = self.executionPolicy.systemSurfaceRejection(
+                    toolName: toolName,
+                    applicationBundleIdentifier: application.bundleIdentifier,
+                    applicationName: application.name)
+                {
+                    return BackgroundTargetAuthorization(arguments: arguments, rejection: rejection)
+                }
+            }
+            return BackgroundTargetAuthorization(
+                arguments: Self.argumentsPinnedToProcess(
+                    arguments,
+                    toolName: toolName,
+                    processIdentifier: processIdentity.processIdentifier),
+                rejection: nil,
+                processIdentities: [processIdentity])
+        } catch let error as BackgroundTargetResolutionError {
+            let detail = if toolName == "app",
+                            arguments.getString("action")?.lowercased() == "launch"
+            {
+                "background launch is limited to an exact already-running application readiness check; " +
+                    "cold launch requires explicit foreground consent: \(error.detail)"
+            } else {
+                error.detail
+            }
+            return BackgroundTargetAuthorization(
+                arguments: arguments,
+                rejection: self.executionPolicy.unresolvedTargetRejection(
+                    toolName: toolName,
+                    detail: detail))
+        } catch {
+            return BackgroundTargetAuthorization(
+                arguments: arguments,
+                rejection: self.executionPolicy.unresolvedTargetRejection(
+                    toolName: toolName,
+                    detail: "the selected target owner could not be validated before dispatch"))
+        }
+    }
+
+    private func backgroundTargetRevalidation(
+        _ authorization: BackgroundTargetAuthorization,
+        toolName: String) async -> ToolResponse?
+    {
+        for identity in authorization.processIdentities {
+            let application: ServiceApplicationInfo
+            do {
+                application = try await self.applications.findApplication(
+                    identifier: "PID:\(identity.processIdentifier)")
+            } catch {
+                return self.executionPolicy.unresolvedTargetRejection(
+                    toolName: toolName,
+                    detail: "the selected application disappeared before dispatch")
+            }
+            guard application.processStartIdentity == identity.processStartIdentity else {
+                return self.executionPolicy.unresolvedTargetRejection(
+                    toolName: toolName,
+                    detail: "the selected application changed process generation before dispatch")
+            }
+            if let rejection = self.executionPolicy.systemSurfaceRejection(
+                toolName: toolName,
+                applicationBundleIdentifier: application.bundleIdentifier,
+                applicationName: application.name)
+            {
+                return rejection
+            }
+        }
+        return nil
+    }
+
+    static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+
+    struct StrictStringSelector {
+        let isInvalid: Bool
+        let value: String?
+    }
+
+    static func strictString(_ arguments: ToolArguments, key: String) -> StrictStringSelector {
+        guard let raw = arguments.getValue(for: key) else {
+            return StrictStringSelector(isInvalid: false, value: nil)
+        }
+        guard case let .string(value) = raw, let value = Self.nonEmpty(value) else {
+            return StrictStringSelector(isInvalid: true, value: nil)
+        }
+        return StrictStringSelector(isInvalid: false, value: value)
+    }
+
+    private static func sameTarget(_ snapshot: UISnapshot, _ context: WindowContext) -> Bool {
+        guard let processIdentifier = context.applicationProcessId,
+              snapshot.applicationProcessId == processIdentifier,
+              let windowID = context.windowID,
+              snapshot.windowID == windowID,
+              let bounds = context.windowBounds,
+              snapshot.windowBounds == bounds,
+              let identity = context.windowMutationIdentity,
+              snapshot.windowMutationIdentity == identity,
+              identity.windowID == windowID,
+              identity.ownerProcessIdentifier == processIdentifier,
+              identity.capturedBounds == bounds
+        else {
+            return false
+        }
+        if let applicationName = Self.nonEmpty(context.applicationName),
+           let mirroredName = Self.nonEmpty(snapshot.applicationName),
+           applicationName.caseInsensitiveCompare(mirroredName) != .orderedSame
+        {
+            return false
+        }
+        return true
     }
 
     @MainActor

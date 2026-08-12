@@ -9,6 +9,77 @@ import TauTUI
 
 @available(macOS 14.0, *)
 extension AgentCommand {
+    var isNewTaskDryRunRequest: Bool {
+        self.dryRun && !self.chat && !self.resume && self.resumeSession == nil && !self.listSessions
+    }
+
+    var newTaskDryRunInstruction: String? {
+        self.isNewTaskDryRunRequest ? self.normalizedTaskInput : nil
+    }
+
+    func validateDryRunRequest() throws {
+        guard self.isNewTaskDryRunRequest else { return }
+        guard self.normalizedTaskInput != nil else {
+            throw PeekabooError.invalidInput("Task argument is required for --dry-run.")
+        }
+        guard !self.audio, self.audioFile == nil else {
+            throw PeekabooError.invalidInput(
+                "--dry-run accepts a text task only; audio input would require transcription."
+            )
+        }
+    }
+
+    func displayDryRunPreview(instruction: String) {
+        if self.jsonOutput {
+            let response = self.makeDryRunJSONResponse(instruction: instruction)
+            if let jsonData = try? JSONSerialization.data(
+                withJSONObject: response,
+                options: [.prettyPrinted, .sortedKeys]
+            ) {
+                print(String(data: jsonData, encoding: .utf8) ?? "{}")
+            }
+            return
+        }
+
+        for line in self.dryRunHumanLines(instruction: instruction) {
+            print(line)
+        }
+    }
+
+    func dryRunHumanLines(instruction: String) -> [String] {
+        [
+            "Dry run preview",
+            "Instruction: \(instruction)",
+            "Model execution: skipped",
+            "Tool calls: 0",
+            "Session saved: no",
+        ]
+    }
+
+    func makeDryRunJSONResponse(instruction: String) -> [String: Any] {
+        let now = Date(timeIntervalSince1970: 0)
+        let result = AgentExecutionResult(
+            content: "Dry run preview. No model or tools were invoked.",
+            messages: [],
+            sessionId: nil,
+            usage: nil,
+            metadata: AgentMetadata(
+                executionTime: 0,
+                toolCallCount: 0,
+                modelName: "not_invoked",
+                startTime: now,
+                endTime: now
+            )
+        )
+        var response = self.makeAgentJSONResponse(result)
+        guard var payload = response["result"] as? [String: Any] else { return response }
+        payload["dryRun"] = true
+        payload["instruction"] = instruction
+        payload["modelExecution"] = "skipped"
+        response["result"] = payload
+        return response
+    }
+
     func requireAgentCredentials(
         selectedModel: LanguageModel
     ) throws {
@@ -165,7 +236,8 @@ extension AgentCommand {
                 queueMode: queueMode,
                 eventDelegate: streamingDelegate,
                 verbose: self.verbose,
-                persistSession: !self.noCache
+                persistSession: !self.noCache,
+                toolExecutionPolicy: self.newSessionToolExecutionPolicy
             )
             self.displayResult(result, delegate: outputDelegate)
             let duration = String(format: "%.2f", result.metadata.executionTime)
