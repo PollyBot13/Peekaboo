@@ -12,9 +12,13 @@ public final class HotkeyService {
     private let logger = Logger(subsystem: "boo.peekaboo.core", category: "HotkeyService")
     private let postEventAccessEvaluator: @MainActor @Sendable () -> Bool
     private let eventPoster: @MainActor @Sendable (CGEvent, pid_t) -> Void
+    private let frontmostApplicationResolver: @MainActor @Sendable () -> NSRunningApplication?
     private let runningApplicationResolver: @MainActor @Sendable (pid_t) -> NSRunningApplication?
+    private let processStartIdentityProvider: @Sendable (pid_t) -> UInt64?
     let inputPolicy: UIInputPolicy
     private let actionInputDriver: any ActionInputDriving
+    private let desktopOperationExecutor: DesktopOperationExecutor
+    private let operationFinalizer: @MainActor () -> Void
 
     public convenience init(
         inputPolicy: UIInputPolicy = .currentBehavior,
@@ -30,7 +34,9 @@ public final class HotkeyService {
             actionInputDriver: ActionInputDriver(),
             postEventAccessEvaluator: postEventAccessEvaluator,
             eventPoster: eventPoster ?? Self.defaultTargetedEventPoster,
-            runningApplicationResolver: runningApplicationResolver)
+            runningApplicationResolver: runningApplicationResolver,
+            processStartIdentityProvider: SystemIdentityResolver.processStartIdentity,
+            desktopOperationExecutor: DesktopOperationExecutor())
     }
 
     init(
@@ -39,15 +45,26 @@ public final class HotkeyService {
         postEventAccessEvaluator: @escaping @MainActor @Sendable ()
             -> Bool = { CGPreflightPostEventAccess() },
         eventPoster: @escaping @MainActor @Sendable (CGEvent, pid_t) -> Void = HotkeyService.defaultTargetedEventPoster,
+        frontmostApplicationResolver: @escaping @MainActor @Sendable () -> NSRunningApplication? = {
+            NSWorkspace.shared.frontmostApplication
+        },
         runningApplicationResolver: @escaping @MainActor @Sendable (pid_t) -> NSRunningApplication? = {
             NSRunningApplication(processIdentifier: $0)
-        })
+        },
+        processStartIdentityProvider: @escaping @Sendable (pid_t) -> UInt64? =
+            SystemIdentityResolver.processStartIdentity,
+        desktopOperationExecutor: DesktopOperationExecutor = DesktopOperationExecutor(),
+        operationFinalizer: @escaping @MainActor () -> Void = {})
     {
         self.inputPolicy = inputPolicy
         self.actionInputDriver = actionInputDriver
         self.postEventAccessEvaluator = postEventAccessEvaluator
         self.eventPoster = eventPoster
+        self.frontmostApplicationResolver = frontmostApplicationResolver
         self.runningApplicationResolver = runningApplicationResolver
+        self.processStartIdentityProvider = processStartIdentityProvider
+        self.desktopOperationExecutor = desktopOperationExecutor
+        self.operationFinalizer = operationFinalizer
     }
 
     private static func defaultTargetedEventPoster(_ event: CGEvent, _ pid: pid_t) {
@@ -58,26 +75,51 @@ public final class HotkeyService {
     /// Keys are comma-separated (e.g. "cmd,shift,4" or "ctrl,alt,backspace").
     @discardableResult
     public func hotkey(keys: String, holdDuration: Int) async throws -> UIInputExecutionResult {
+        try await self.hotkeyWithLanePreparation(keys: keys, holdDuration: holdDuration)
+    }
+
+    func hotkeyWithLanePreparation(
+        keys: String,
+        holdDuration: Int,
+        lanePreparation: @escaping @MainActor () async -> Void = {},
+        laneCompletion: @escaping @MainActor (UIInputExecutionResult) async -> Void = { _ in }) async throws
+        -> UIInputExecutionResult
+    {
         self.logger.debug("Hotkey requested: '\(keys)', hold: \(holdDuration)ms")
         let parsedKeys = try self.parsedKeys(keys)
-        let application = NSWorkspace.shared.frontmostApplication
-        let bundleIdentifier = application?.bundleIdentifier
-        let result = try await UIInputDispatcher.run(
+        var application: NSRunningApplication?
+        var bundleIdentifier: String?
+        let plan = try DesktopOperationPlan(
             verb: .hotkey,
-            strategy: self.inputPolicy.strategy(for: .hotkey, bundleIdentifier: bundleIdentifier),
-            bundleIdentifier: bundleIdentifier,
-            action: {
+            selector: .focused,
+            captureReceipt: DesktopOperationPlan.CaptureReceipt(),
+            deliveryIntent: .foreground,
+            strategy: self.inputPolicy.strategy(for: .hotkey),
+            prepare: {
+                application = self.frontmostApplicationResolver()
+                bundleIdentifier = application?.bundleIdentifier
+                await lanePreparation()
+            },
+            routing: {
+                DesktopOperationPlan.Routing(
+                    strategy: self.inputPolicy.strategy(for: .hotkey, bundleIdentifier: bundleIdentifier),
+                    bundleIdentifier: bundleIdentifier)
+            },
+            action: DesktopOperationPlan.ActionRoute {
                 guard let application else {
                     throw ActionInputError.unsupported(.missingElement)
                 }
                 return try self.actionInputDriver.tryHotkey(application: application, keys: parsedKeys)
             },
-            synth: {
+            synthesis: DesktopOperationPlan.SynthesisRoute {
                 try await self.performSyntheticHotkey(keys: parsedKeys, holdDuration: holdDuration)
                 return .dispatchedUnverified(
                     delivery: DesktopActionOutcome.Delivery(mechanism: .globalEvents, mode: .foreground),
                     evidence: .deliveryAccepted)
-            })
+            },
+            success: laneCompletion,
+            finalize: self.operationFinalizer)
+        let result = try await self.desktopOperationExecutor.execute(plan)
 
         self.logger.debug("Hotkey completed via \(result.path.rawValue, privacy: .public)")
         return result
@@ -93,7 +135,8 @@ public final class HotkeyService {
         keys: String,
         holdDuration: Int,
         targetProcessIdentifier: pid_t,
-        deliveryValidator: (@MainActor @Sendable () async throws -> Void)? = nil) async throws
+        deliveryValidator: (@MainActor @Sendable () async throws -> Void)? = nil,
+        expectedProcessIdentity: ApplicationProcessIdentity? = nil) async throws
         -> UIInputExecutionResult
     {
         self.logger.debug(
@@ -101,15 +144,38 @@ public final class HotkeyService {
 
         try BackgroundHotkeyPolicy.validate(keys: keys)
         let parsedKeys = try self.parsedKeys(keys)
-        let application = self.runningApplicationResolver(targetProcessIdentifier)
-        let bundleIdentifier = application?.bundleIdentifier
-        let result = try await UIInputDispatcher.run(
+        let targetValidator: @MainActor @Sendable () async throws -> Void = {
+            if let expectedProcessIdentity,
+               self.processStartIdentityProvider(targetProcessIdentifier) !=
+               expectedProcessIdentity.processStartIdentity
+            {
+                throw PeekabooError.invalidInput(
+                    "Background hotkey target process exited or changed process generation")
+            }
+            try await deliveryValidator?()
+        }
+        var application: NSRunningApplication?
+        var bundleIdentifier: String?
+        let plan = try DesktopOperationPlan(
             verb: .hotkey,
-            strategy: self.inputPolicy.strategy(for: .hotkey, bundleIdentifier: bundleIdentifier),
-            bundleIdentifier: bundleIdentifier,
-            action: {
+            selector: .focused,
+            captureReceipt: DesktopOperationPlan.CaptureReceipt(
+                processIdentifier: targetProcessIdentifier,
+                processIdentity: expectedProcessIdentity),
+            deliveryIntent: .background,
+            strategy: self.inputPolicy.strategy(for: .hotkey),
+            prepare: {
+                application = self.runningApplicationResolver(targetProcessIdentifier)
+                bundleIdentifier = application?.bundleIdentifier
+            },
+            routing: {
+                DesktopOperationPlan.Routing(
+                    strategy: self.inputPolicy.strategy(for: .hotkey, bundleIdentifier: bundleIdentifier),
+                    bundleIdentifier: bundleIdentifier)
+            },
+            action: DesktopOperationPlan.ActionRoute {
                 try await self.validateDelivery(
-                    deliveryValidator,
+                    targetValidator,
                     emittedUnitCount: 0)
                 try Self.validateTargetProcess(targetProcessIdentifier)
                 guard let application else {
@@ -117,13 +183,13 @@ public final class HotkeyService {
                 }
                 let actionResult = try self.actionInputDriver.tryHotkey(application: application, keys: parsedKeys)
                 try await self.validateDelivery(
-                    deliveryValidator,
+                    targetValidator,
                     emittedUnitCount: 1)
                 return actionResult
             },
-            synth: {
+            synthesis: DesktopOperationPlan.SynthesisRoute {
                 try await self.validateDelivery(
-                    deliveryValidator,
+                    targetValidator,
                     emittedUnitCount: 0)
                 try Self.validateTargetProcess(targetProcessIdentifier)
                 let plan = try self.makeHotkeyPlan(parsedKeys)
@@ -133,7 +199,7 @@ public final class HotkeyService {
                     targetProcessIdentifier: targetProcessIdentifier)
                 {
                     try await self.validateDelivery(
-                        deliveryValidator,
+                        targetValidator,
                         emittedUnitCount: 1)
                     return .dispatchedUnverified(
                         delivery: DesktopActionOutcome.Delivery(
@@ -147,14 +213,14 @@ public final class HotkeyService {
                     plan,
                     holdNanoseconds: holdNanoseconds,
                     targetProcessIdentifier: targetProcessIdentifier,
-                    deliveryValidator: deliveryValidator)
+                    deliveryValidator: targetValidator)
 
                 do {
                     if holdDuration <= 0 {
                         try await Task.sleep(nanoseconds: 10_000_000)
                     }
                     try await self.validateDelivery(
-                        deliveryValidator,
+                        targetValidator,
                         emittedUnitCount: emittedUnitCount)
                 } catch let error as InputDeliveryIndeterminateError {
                     throw error
@@ -169,7 +235,9 @@ public final class HotkeyService {
                         mechanism: .processTargetedEvents,
                         mode: .background),
                     evidence: .deliveryAccepted)
-            })
+            },
+            finalize: self.operationFinalizer)
+        let result = try await self.desktopOperationExecutor.execute(plan)
 
         self.logger.debug("Targeted hotkey completed via \(result.path.rawValue, privacy: .public)")
         return result

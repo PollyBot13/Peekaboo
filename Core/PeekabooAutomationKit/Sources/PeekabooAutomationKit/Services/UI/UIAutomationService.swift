@@ -2,6 +2,13 @@ import Foundation
 import os.log
 import PeekabooFoundation
 
+@MainActor
+struct HotkeyServiceFactoryContext {
+    let desktopOperationExecutor: DesktopOperationExecutor
+    let operationFinalizer: @MainActor () -> Void
+    let processStartIdentityProvider: @Sendable (pid_t) -> UInt64?
+}
+
 /**
  * Primary UI automation service orchestrating specialized automation components.
  *
@@ -68,6 +75,7 @@ public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedT
     let exactWindowIdentityValidator: @Sendable (WindowMutationIdentity, CGRect) -> Bool
     let processStartIdentityProvider: @Sendable (pid_t) -> UInt64?
     let operationLaneCoordinator: DesktopOperationLaneCoordinator
+    let desktopOperationExecutor: DesktopOperationExecutor
 
     // Search constraints to prevent unbounded AX traversals
     var searchLimits: UIAutomationSearchLimits
@@ -139,7 +147,7 @@ public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedT
         actionInputDriver: any ActionInputDriving,
         syntheticInputDriver: any SyntheticInputDriving = SyntheticInputDriver(),
         automationElementResolver: any AutomationElementResolving,
-        hotkeyService: HotkeyService? = nil,
+        hotkeyServiceFactory: ((HotkeyServiceFactoryContext) -> HotkeyService)? = nil,
         feedbackClient: any AutomationFeedbackClient = NoopAutomationFeedbackClient(),
         exactWindowFocusReader: @escaping @Sendable (pid_t) -> ExactWindowFocusSnapshot? =
             DetachedExactWindowFocusReader.read,
@@ -147,7 +155,8 @@ public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedT
             SystemIdentityResolver.validateWindowMutationIdentity,
         processStartIdentityProvider: @escaping @Sendable (pid_t) -> UInt64? =
             SystemIdentityResolver.processStartIdentity,
-        operationLaneCoordinator: DesktopOperationLaneCoordinator = .shared)
+        operationLaneCoordinator: DesktopOperationLaneCoordinator = .shared,
+        desktopOperationExecutor: DesktopOperationExecutor? = nil)
     {
         let manager = snapshotManager ?? SnapshotManager()
         self.snapshotManager = manager
@@ -165,9 +174,15 @@ public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedT
         self.exactWindowIdentityValidator = exactWindowIdentityValidator
         self.processStartIdentityProvider = processStartIdentityProvider
         self.operationLaneCoordinator = operationLaneCoordinator
+        let executor = desktopOperationExecutor ?? DesktopOperationExecutor(laneCoordinator: operationLaneCoordinator)
+        self.desktopOperationExecutor = executor
 
         // Initialize specialized services
-        self.elementDetectionService = ElementDetectionService(snapshotManager: manager)
+        let elementDetectionService = ElementDetectionService(snapshotManager: manager)
+        self.elementDetectionService = elementDetectionService
+        let operationFinalizer: @MainActor () -> Void = {
+            elementDetectionService.invalidateCache()
+        }
         self.clickService = ClickService(
             snapshotManager: manager,
             inputPolicy: inputPolicy,
@@ -175,24 +190,42 @@ public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedT
             syntheticInputDriver: syntheticInputDriver,
             automationElementResolver: automationElementResolver,
             exactWindowIdentityValidator: exactWindowIdentityValidator,
-            processStartIdentityProvider: processStartIdentityProvider)
+            processStartIdentityProvider: processStartIdentityProvider,
+            desktopOperationExecutor: executor,
+            operationFinalizer: operationFinalizer)
         self.typeService = TypeService(
             snapshotManager: manager,
             clickService: nil,
             inputPolicy: inputPolicy,
             actionInputDriver: actionInputDriver,
             syntheticInputDriver: syntheticInputDriver,
-            automationElementResolver: automationElementResolver)
+            automationElementResolver: automationElementResolver,
+            desktopOperationExecutor: executor,
+            operationFinalizer: operationFinalizer)
         self.scrollService = ScrollService(
             snapshotManager: manager,
             clickService: nil,
             inputPolicy: inputPolicy,
             actionInputDriver: actionInputDriver,
             syntheticInputDriver: syntheticInputDriver,
-            automationElementResolver: automationElementResolver)
-        self.hotkeyService = hotkeyService ?? HotkeyService(
-            inputPolicy: inputPolicy,
-            actionInputDriver: actionInputDriver)
+            automationElementResolver: automationElementResolver,
+            exactWindowIdentityValidator: exactWindowIdentityValidator,
+            processStartIdentityProvider: processStartIdentityProvider,
+            desktopOperationExecutor: executor,
+            operationFinalizer: operationFinalizer)
+        if let hotkeyServiceFactory {
+            self.hotkeyService = hotkeyServiceFactory(HotkeyServiceFactoryContext(
+                desktopOperationExecutor: executor,
+                operationFinalizer: operationFinalizer,
+                processStartIdentityProvider: processStartIdentityProvider))
+        } else {
+            self.hotkeyService = HotkeyService(
+                inputPolicy: inputPolicy,
+                actionInputDriver: actionInputDriver,
+                processStartIdentityProvider: processStartIdentityProvider,
+                desktopOperationExecutor: executor,
+                operationFinalizer: operationFinalizer)
+        }
         self.gestureService = GestureService()
         let baseCaptureDeps = ScreenCaptureService.Dependencies.live()
         let captureDeps = ScreenCaptureService.Dependencies(

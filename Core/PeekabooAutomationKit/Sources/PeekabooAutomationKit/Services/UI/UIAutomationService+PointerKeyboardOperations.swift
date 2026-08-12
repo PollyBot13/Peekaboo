@@ -19,18 +19,20 @@ extension UIAutomationService {
      * ```
      */
     public func scroll(_ request: ScrollRequest) async throws {
-        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
-            self.logger.debug("Delegating scroll to ScrollService")
-            defer { self.elementDetectionService.invalidateCache() }
-            let visualizerTarget = await self.visualizerTargetWindow(snapshotId: request.snapshotId)
-            let result = try await self.normalizingSnapshotErrors {
-                try await self.scrollService.scroll(request)
-            }
-
-            await self.visualizeScroll(
+        self.logger.debug("Delegating scroll to ScrollService")
+        var visualizerTarget: VisualizerTargetWindow?
+        _ = try await self.normalizingSnapshotErrors {
+            try await self.scrollService.scrollWithLanePreparation(
                 request,
-                actionAnchor: result.anchorPoint,
-                visualizerTarget: visualizerTarget)
+                lanePreparation: {
+                    visualizerTarget = await self.visualizerTargetWindow(snapshotId: request.snapshotId)
+                },
+                laneCompletion: { result in
+                    await self.visualizeScroll(
+                        request,
+                        actionAnchor: result.anchorPoint,
+                        visualizerTarget: visualizerTarget)
+                })
         }
     }
 
@@ -80,30 +82,30 @@ extension UIAutomationService {
      * ```
      */
     public func hotkey(keys: String, holdDuration: Int) async throws {
-        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
-            self.logger.debug("Delegating hotkey to HotkeyService")
-            defer { self.elementDetectionService.invalidateCache() }
-            let visualizerTarget = VisualizerTargetWindowResolver.frontmostWindow()
-            _ = try await self.hotkeyService.hotkey(keys: keys, holdDuration: holdDuration)
-
-            await self.visualizeHotkey(
-                keys: keys,
-                targetProcessIdentifier: nil,
-                visualizerTarget: visualizerTarget)
-        }
+        self.logger.debug("Delegating hotkey to HotkeyService")
+        var visualizerTarget: VisualizerTargetWindow?
+        _ = try await self.hotkeyService.hotkeyWithLanePreparation(
+            keys: keys,
+            holdDuration: holdDuration,
+            lanePreparation: {
+                visualizerTarget = VisualizerTargetWindowResolver.frontmostWindow()
+            },
+            laneCompletion: { _ in
+                await self.visualizeHotkey(
+                    keys: keys,
+                    targetProcessIdentifier: nil,
+                    visualizerTarget: visualizerTarget)
+            })
     }
 
     public func hotkey(keys: String, holdDuration: Int, targetProcessIdentifier: pid_t) async throws {
-        try await self.operationLaneCoordinator.run(scope: .global, access: .write) {
-            self.logger.debug("Delegating targeted hotkey to HotkeyService")
-            defer { self.elementDetectionService.invalidateCache() }
-            _ = try await self.hotkeyService.hotkey(
-                keys: keys,
-                holdDuration: holdDuration,
-                targetProcessIdentifier: targetProcessIdentifier)
+        self.logger.debug("Delegating targeted hotkey to HotkeyService")
+        _ = try await self.hotkeyService.hotkey(
+            keys: keys,
+            holdDuration: holdDuration,
+            targetProcessIdentifier: targetProcessIdentifier)
 
-            await self.visualizeHotkey(keys: keys, targetProcessIdentifier: targetProcessIdentifier)
-        }
+        await self.visualizeHotkey(keys: keys, targetProcessIdentifier: targetProcessIdentifier)
     }
 
     public func hotkey(
@@ -111,22 +113,20 @@ extension UIAutomationService {
         holdDuration: Int,
         expectedProcessIdentity: ApplicationProcessIdentity) async throws
     {
-        try await self.operationLaneCoordinator.run(scope: .process(expectedProcessIdentity), access: .write) {
-            let validator: @MainActor @Sendable () async throws -> Void = {
-                guard self.processStartIdentityProvider(expectedProcessIdentity.processIdentifier) ==
-                    expectedProcessIdentity.processStartIdentity
-                else {
-                    throw PeekabooError.invalidInput(
-                        "Background hotkey target process exited or changed process generation")
-                }
+        let validator: @MainActor @Sendable () async throws -> Void = {
+            guard self.processStartIdentityProvider(expectedProcessIdentity.processIdentifier) ==
+                expectedProcessIdentity.processStartIdentity
+            else {
+                throw PeekabooError.invalidInput(
+                    "Background hotkey target process exited or changed process generation")
             }
-            defer { self.elementDetectionService.invalidateCache() }
-            _ = try await self.hotkeyService.hotkey(
-                keys: keys,
-                holdDuration: holdDuration,
-                targetProcessIdentifier: expectedProcessIdentity.processIdentifier,
-                deliveryValidator: validator)
         }
+        _ = try await self.hotkeyService.hotkey(
+            keys: keys,
+            holdDuration: holdDuration,
+            targetProcessIdentifier: expectedProcessIdentity.processIdentifier,
+            deliveryValidator: validator,
+            expectedProcessIdentity: expectedProcessIdentity)
     }
 
     public func hotkey(
@@ -138,19 +138,17 @@ extension UIAutomationService {
         let processIdentity = ApplicationProcessIdentity(
             processIdentifier: expectedWindowIdentity.ownerProcessIdentifier,
             processStartIdentity: expectedWindowIdentity.ownerProcessStartIdentity)
-        try await self.operationLaneCoordinator.run(scope: .process(processIdentity), access: .write) {
-            let validator: @MainActor @Sendable () async throws -> Void = {
-                try await self.requireExactWindowKeyboardFocus(
-                    expectedWindowIdentity: expectedWindowIdentity,
-                    expectedWindowBounds: expectedWindowBounds)
-            }
-            defer { self.elementDetectionService.invalidateCache() }
-            _ = try await self.hotkeyService.hotkey(
-                keys: keys,
-                holdDuration: holdDuration,
-                targetProcessIdentifier: expectedWindowIdentity.ownerProcessIdentifier,
-                deliveryValidator: validator)
+        let validator: @MainActor @Sendable () async throws -> Void = {
+            try await self.requireExactWindowKeyboardFocus(
+                expectedWindowIdentity: expectedWindowIdentity,
+                expectedWindowBounds: expectedWindowBounds)
         }
+        _ = try await self.hotkeyService.hotkey(
+            keys: keys,
+            holdDuration: holdDuration,
+            targetProcessIdentifier: expectedWindowIdentity.ownerProcessIdentifier,
+            deliveryValidator: validator,
+            expectedProcessIdentity: processIdentity)
     }
 
     public func hotkey(
@@ -161,20 +159,18 @@ extension UIAutomationService {
         let processIdentity = ApplicationProcessIdentity(
             processIdentifier: target.windowIdentity.ownerProcessIdentifier,
             processStartIdentity: target.windowIdentity.ownerProcessStartIdentity)
-        try await self.operationLaneCoordinator.run(scope: .process(processIdentity), access: .write) {
-            let validator: @MainActor @Sendable () async throws -> Void = {
-                try await self.requireExactWindowKeyboardFocus(
-                    expectedWindowIdentity: target.windowIdentity,
-                    expectedWindowBounds: target.windowBounds,
-                    expectedFocusedElement: target.focusedElement)
-            }
-            defer { self.elementDetectionService.invalidateCache() }
-            _ = try await self.hotkeyService.hotkey(
-                keys: keys,
-                holdDuration: holdDuration,
-                targetProcessIdentifier: target.windowIdentity.ownerProcessIdentifier,
-                deliveryValidator: validator)
+        let validator: @MainActor @Sendable () async throws -> Void = {
+            try await self.requireExactWindowKeyboardFocus(
+                expectedWindowIdentity: target.windowIdentity,
+                expectedWindowBounds: target.windowBounds,
+                expectedFocusedElement: target.focusedElement)
         }
+        _ = try await self.hotkeyService.hotkey(
+            keys: keys,
+            holdDuration: holdDuration,
+            targetProcessIdentifier: target.windowIdentity.ownerProcessIdentifier,
+            deliveryValidator: validator,
+            expectedProcessIdentity: processIdentity)
     }
 
     /// PID-routed hotkeys are background operations and never emit foreground feedback.
