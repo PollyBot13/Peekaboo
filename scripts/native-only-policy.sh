@@ -6,7 +6,11 @@
 NATIVE_ONLY_APPLE_EVENT_SOURCE_PATTERN='NSAppleScript|NSUserAppleScriptTask|OSAKit|OSAScript|kOSAComponentType|(^|[^[:alnum:]_])(AE[A-Z][[:lower:]][[:alnum:]_]*|OSA[A-Z][[:lower:]][[:alnum:]_]*)([^[:alnum:]_]|$)|/usr/bin/osascript'
 # shellcheck disable=SC2016
 NATIVE_ONLY_APPLE_EVENT_IMPORT_PATTERN='(^|[[:space:]])_?(AE[A-Z][[:lower:]][[:alnum:]_]*|OSA[A-Z][[:lower:]][[:alnum:]_]*|OBJC_(CLASS|METACLASS)_\$_NSAppleScript)([^[:alnum:]_]|$)'
-NATIVE_ONLY_APPLE_EVENT_STRING_PATTERN='<key>NSAppleEventsUsageDescription</key>|NSAppleScript|NSUserAppleScriptTask|OSAKit\.framework|OSAScript|kOSAComponentType|/usr/bin/osascript|(^|[^[:alnum:]_])(AE[A-Z][[:lower:]][[:alnum:]_]*|OSA[A-Z][[:lower:]][[:alnum:]_]*)([^[:alnum:]_]|$)'
+NATIVE_ONLY_APPLE_EVENT_STRING_PATTERN='<key>NSAppleEventsUsageDescription</key>|NSAppleScript|NSUserAppleScriptTask|OSAKit\.framework|OSAScript|kOSAComponentType|/usr/bin/osascript'
+# `strings` also emits compiler metadata and symbol fragments. Match dynamic lookup names only when
+# the entire string has an API shape. Apple Event APIs have a multi-letter verb (apart from Is/Do),
+# while OSA names keep the original CamelCase boundary because the Release app has no OSA collision.
+NATIVE_ONLY_DYNAMIC_APPLE_EVENT_STRING_PATTERN='^_?(AE([A-Z][[:lower:]]{2}[[:alnum:]_]*|(Is|Do)[A-Z][[:alnum:]_]*)|OSA[A-Z][[:lower:]][[:alnum:]_]*)$'
 
 native_only_verify_macho() {
   local binary_path="$1"
@@ -29,7 +33,8 @@ native_only_verify_macho() {
     printf 'Could not inspect %s embedded strings' "${label}"
     return 1
   fi
-  if grep -Eq "${NATIVE_ONLY_APPLE_EVENT_STRING_PATTERN}" <<<"${embedded_strings}"; then
+  if grep -Eq "${NATIVE_ONLY_APPLE_EVENT_STRING_PATTERN}" <<<"${embedded_strings}" ||
+     grep -Eq "${NATIVE_ONLY_DYNAMIC_APPLE_EVENT_STRING_PATTERN}" <<<"${embedded_strings}"; then
     printf '%s embeds an AppleScript or Apple Events execution surface' "${label}"
     return 1
   fi
