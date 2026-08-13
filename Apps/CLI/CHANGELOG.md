@@ -5,7 +5,16 @@ All notable changes to Peekaboo CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.0.1] - Unreleased
+## [4.1.0] - 2026-08-13
+
+### Highlights
+
+- **Background is the fail-closed default.** CLI interactions revalidate exact process, window, bounds, snapshot, capability, and focused-element receipts, demand explicit consent for foreground or shared-pointer input, and refuse stale, ambiguous, or targetless requests before dispatch.
+- **JSON action semantics are canonical.** Bridge outcomes, snapshot mutation leases, and the shared sequence accumulator expose consistent effect, dispatch, retry, evidence, and escalation fields while read-only errors remain free of mutation metadata.
+- **Observation gained exact OCR and ROI paths.** `see` can run host-local Vision OCR or exact-window regions while preserving Retina coordinates, snapshot provenance, and background-only routing; AX-only inspection no longer claims a capture backend.
+- **Agent runs are safer to resume and overlap.** Sessions are immutable background-only by default, tool providers and UI snapshots are generation/session owned, and typed failures survive persistence, terminal handling, and execution traces.
+- **Capture and Bridge startup are faster without hidden fallbacks.** Reusable capture plans, bounded one-shot ScreenCaptureKit capture, event-driven listener wakeups, concurrent diagnostics, and strict explicit-socket routing avoid polling, persistent streams, and silent caller-local work.
+- **The CLI and companion runtime are native-only and externally consumable.** AppleScript permission and execution surfaces are gone, release gates reject Apple Events/OSA behavior, and the restored SwiftPM facade exports the lean Foundation, Protocols, AutomationKit, and Bridge products.
 
 ### Added
 - Add receipt-pinned exact-window background `type`, `paste`, and `press`, with focused-element revalidation and fail-closed app/PID ambiguity handling.
@@ -17,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Encode annotated observations directly from their rendered bitmap, removing redundant PNG/TIFF round trips while preserving exact pixels, metadata, and output paths.
 - Reuse two-second, owner-host-local ScreenCaptureKit exact-window screenshot plans without caching pixels, revalidating process generation, window receipt, display topology, and scale around every capture while exposing miss/hit generation diagnostics.
 - Wake Bridge hosts on kernel listener readiness instead of polling `accept` every 25 ms, draining queued clients per notification while preserving bounded, descriptor-safe shutdown.
+- Make Agent sessions immutable background-only by default, centrally refusing foreground/global input, activation, raw press, shared-pointer, persistent clipboard mutation, shared system UI mutations, Space switch/follow, browser setup/fronting, and Shell-tool access before dispatch while retaining Space listing and unfollowed window placement; `--allow-foreground` sets a new session's immutable maximum, must be explicitly repeated on resume, and never exposes the Shell tool, while session output exposes full copyable IDs, tasks, lifecycle meaning, and stored policy.
 
 ### Fixed
 - Compose setup, delivery, cleanup, cancellation, and refusal receipts through one Foundation action-sequence owner so foreground focus cannot be erased by a no-dispatch leaf and CLI/MCP target refusals expose complete retry guidance.
@@ -35,8 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refresh AXorcist to refuse element-scoped typing when focus cannot be established, preserve exact PID targets, reject conflicting application/PID selectors, and report point lookup misses as errors.
 - Refresh AXorcist point-to-app resolution to keep exact-app misses fail-closed and replace the former ~5-second all-app Accessibility scan with one native on-screen window snapshot; the source-blind exact-head validator measured 43–67 ms for these lookup cases.
 - Carry canonical desktop-action outcomes through capability-gated Bridge protocol 1.23 requests, preserving exact refused, partial, unverified, and indeterminate failures while older hosts remain conservative after a response is lost.
-- Project canonical desktop-action outcomes into MCP metadata, so partial failures retain recovery-side-effect semantics instead of incorrectly demanding a fresh observation.
-- Preserve successful native outcomes for click, type, type-actions, scroll, hotkey, action, and set-value across projected Bridge requests, and expose the validated canonical projection in CLI JSON and human output without changing legacy response payloads.
+- Preserve successful native outcomes for click, type, type sequences, scroll, press, action, and set-value across projected Bridge requests, and expose the validated canonical projection in CLI JSON and human output without changing legacy response payloads.
 - Embed one canonical 40-hex source commit in clean stamped CLI and macOS app builds, expose it through `--version --json` and Bridge identity receipts, and leave raw unstamped builds explicitly `unknown`.
 - Project canonical desktop-action outcomes into MCP metadata for click, type, scroll, press, action, and set-value successes and failures, preserving exact partial recovery and observation-before-retry semantics without inventing receipts for legacy hosts or collapsing composite setup focus into a no-change leaf.
 - Correct `peekaboo bridge --help` and Bridge docs to describe capability-aware reusable-daemon, Peekaboo.app, on-demand-daemon, and local-fallback routing.
@@ -49,10 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce reusable-daemon window-tracker MainActor work by retaining only bounds and owner PID, avoiding unused per-window application and Accessibility metadata on every reconciliation pass.
 - Keep generated help honest about background coordinate receipts, foreground permissions, type targets, legacy background aliases, and verification predicates; deduplicate permission runtime flags and translate legacy AppleScript denials into native-host upgrade guidance.
 - Refresh AXorcist to dispatch native accessibility actions once with typed AX errors and route legacy `AXSetValue` requests through the `AXValue` attribute instead of action discovery.
-- Preserve terminal input and rendering across fragmented UTF-8 and bracketed paste, exact literal paste state, display-width-safe Unicode, BEL/ST/C1-terminated ANSI and OSC-8 links, styled table truncation, and viewport-bounded Markdown and images, while keeping stop/restart idempotent and preventing queued renders from escaping a stopped session.
+- Preserve terminal input and rendering across fragmented UTF-8 and bracketed paste, exact literal paste state, display-width-safe Unicode, complete 7-bit/8-bit ANSI string controls and OSC-8 links, styled table truncation, and viewport-bounded Markdown and images; clear removed trailing rows during partial updates, keep stop/restart idempotent, and prevent queued renders from escaping a stopped session.
 - Cancel stale MCP SSE readers and fail pending requests when a stream ends or reconnects, and reject unrepresentable audio abort timeouts instead of trapping.
 - Make `agent --dry-run` emit a deterministic text/JSON preview with the normalized instruction and explicit zero model/tool/session effects, and reject taskless previews as typed invalid usage before chat/help routing.
-- Make Agent sessions immutable background-only by default, centrally refusing foreground/global input, activation, raw press, shared-pointer, persistent clipboard mutation, shared system UI mutations, Space switch/follow, browser setup/fronting, and Shell-tool access before dispatch while retaining Space listing and unfollowed window placement; `--allow-foreground` sets a new session's immutable maximum, must be explicitly repeated on resume, and never exposes the Shell tool, while session output exposes full copyable IDs, tasks, lifecycle meaning, and stored policy.
 - Serialize ScreenCaptureKit ownership across Peekaboo processes for the lifetime of the first explicit local-modern claimant or real SCK caller, with build-bound process-awareness receipts, owner-affine auto/modern routing, current-policy capability checks for every transported engine, and fail-closed rolling-upgrade detection for old Bridge and long-running local processes; explicit classic remains a process-isolated, in-process-SCK-free escape hatch and refuses false-preflight captures unless protected WindowServer metadata independently proves access.
 - Keep modern capture inside bounded, coordinator-owned `SCScreenshotManager` calls instead of service-lifetime `SCStream` sessions, eliminating persistent stream overlap and rechecking ownership before every new framework dispatch.
 - Preserve negative numeric options, attached long-option values, and option-looking capture-action tails through Commander parsing, while enforcing genuinely required positionals instead of silently accepting incomplete commands.

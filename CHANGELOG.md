@@ -1,6 +1,15 @@
 # Changelog
 
-## [4.0.1] - Unreleased
+## [4.1.0] - 2026-08-13
+
+### Highlights
+
+- **Background automation now fails closed end to end.** Input, application, window, and Agent routes revalidate exact process, window, bounds, snapshot, capability, and focused-element receipts; targetless, ambiguous, stale, and foreground-only work refuses before it can fall through to the user's active app.
+- **One canonical action truth crosses process boundaries.** Bridge-carried outcomes, snapshot mutation leases, and the shared Foundation sequence accumulator keep dispatch, retry, evidence, and fresh-observation semantics consistent across CLI, MCP, and Agent surfaces.
+- **Concurrent agents keep separate state.** UI snapshots, latest selection, invalidation, retention, and cleanup are isolated by MCP server or Agent session, while immutable background-only policy and generation-bound tool ownership prevent one run from widening or replacing another's authority.
+- **Observation and capture are richer and faster.** Host-local Vision OCR, exact-window ROI, AX-only inspection independent of capture ownership, owner-affine ScreenCaptureKit plan reuse, bounded one-shot capture, and native app lookup preserve Retina geometry and actionable receipts without persistent streams or multi-second scans.
+- **Native-only deployment and external integration are first-class.** The transactional signed companion installer, unattended Bridge host, restored four-product SwiftPM facade, and native-only release gates support verified embedding without AppleScript or full Agent/Core dependencies.
+- **Long-lived hosts do less work and recover honestly.** Event-driven Bridge listener wakeups, deadline-bounded inventory, strict explicit-socket routing, and exact-window background keyboard delivery remove hidden fallbacks while incomplete evidence remains explicit.
 
 ### Added
 
@@ -10,12 +19,15 @@
 - Stateless exact-window ROI capture for CLI/MCP `see`, with generation-pinned
   full-window receipts, AX/OCR filtering, snapshot-bound pixel mapping, and
   fail-closed remote-host validation.
+- Add explicit `app:install-companion` deployment for built or exact signed companion artifacts with crash recovery, signer/TCC/native-only verification, unattended launch, exact GUI Bridge readiness, and fail-closed rollback, while preserving contributor `app:restart` as the Debug/local-signing workflow.
+- Add a fail-closed unattended GUI Bridge-host launch mode for deployment, suppressing all unsolicited app UI and Dock promotion while exposing exact host generation/build readiness evidence.
 
 ### Changed
 - Default new agent configurations to GPT-5.6 and Claude Opus 5 while keeping credential-only Anthropic discovery on Opus 4.8 for zero-retention compatibility and preserving explicit model selections.
 - Encode annotated observations directly from their rendered bitmap, removing redundant PNG/TIFF round trips while preserving exact pixels, metadata, and output paths.
 - Reuse two-second, owner-host-local ScreenCaptureKit exact-window screenshot plans without caching pixels, revalidating process generation, window receipt, display topology, and scale around every capture while exposing miss/hit generation diagnostics.
 - Wake Bridge hosts on kernel listener readiness instead of polling `accept` every 25 ms, draining queued clients per notification while preserving bounded, descriptor-safe shutdown.
+- Make Agent sessions immutable background-only by default, centrally refusing foreground/global input, activation, raw press, shared-pointer, persistent clipboard mutation, shared system UI mutations, Space switch/follow, browser setup/fronting, and Shell-tool access before dispatch while retaining Space listing and unfollowed window placement; `--allow-foreground` sets a new session's immutable maximum, must be explicitly repeated on resume, and never exposes the Shell tool, while session output exposes full copyable IDs, tasks, lifecycle meaning, and stored policy.
 
 ### Fixed
 - Compose setup, delivery, cleanup, cancellation, and refusal receipts through one Foundation action-sequence owner so foreground focus cannot be erased by a no-dispatch leaf and CLI/MCP target refusals expose complete retry guidance.
@@ -34,8 +46,7 @@
 - Refresh AXorcist to refuse element-scoped typing when focus cannot be established, preserve exact PID targets, reject conflicting application/PID selectors, and report point lookup misses as errors.
 - Refresh AXorcist point-to-app resolution to keep exact-app misses fail-closed and replace the former ~5-second all-app Accessibility scan with one native on-screen window snapshot; the source-blind exact-head validator measured 43–67 ms for these lookup cases.
 - Carry canonical desktop-action outcomes through capability-gated Bridge protocol 1.23 requests, preserving exact refused, partial, unverified, and indeterminate failures while older hosts remain conservative after a response is lost.
-- Project canonical desktop-action outcomes into MCP metadata, so partial failures retain recovery-side-effect semantics instead of incorrectly demanding a fresh observation.
-- Preserve successful native outcomes for click, type, type-actions, scroll, hotkey, action, and set-value across projected Bridge requests, and expose the validated canonical projection in CLI JSON and human output without changing legacy response payloads.
+- Preserve successful native outcomes for click, type, type sequences, scroll, press, action, and set-value across projected Bridge requests, and expose the validated canonical projection in CLI JSON and human output without changing legacy response payloads.
 - Embed one canonical 40-hex source commit in clean stamped CLI and macOS app builds, expose it through JSON/Bridge identity receipts, and require matching per-case socket/process-generation provenance for background certification while leaving raw unstamped builds explicitly `unknown`.
 - Project canonical desktop-action outcomes into MCP metadata for click, type, scroll, press, action, and set-value successes and failures, preserving exact partial recovery and observation-before-retry semantics without inventing receipts for legacy hosts or collapsing composite setup focus into a no-change leaf.
 - Correct `peekaboo bridge --help` and Bridge docs to describe capability-aware reusable-daemon, Peekaboo.app, on-demand-daemon, and local-fallback routing.
@@ -52,7 +63,6 @@
 - Cancel stale MCP SSE readers and fail pending requests when a stream ends or reconnects, and reject unrepresentable audio abort timeouts instead of trapping.
 - Preserve MCP tool failure status, bounded content, structured values, and allowlisted metadata through Agent generation, persisted sessions, terminal handling, and execution traces instead of reshaping failures as successful results.
 - Make `agent --dry-run` emit a deterministic text/JSON preview with the normalized instruction and explicit zero model/tool/session effects, and reject taskless previews as typed invalid usage before chat/help routing.
-- Make Agent sessions immutable background-only by default, centrally refusing foreground/global input, activation, raw press, shared-pointer, persistent clipboard mutation, shared system UI mutations, Space switch/follow, browser setup/fronting, and Shell-tool access before dispatch while retaining Space listing and unfollowed window placement; `--allow-foreground` sets a new session's immutable maximum, must be explicitly repeated on resume, and never exposes the Shell tool, while session output exposes full copyable IDs, tasks, lifecycle meaning, and stored policy.
 - Reject non-finite, fractional, and overflowing MCP numeric arguments before dispatch, and expose integer-shaped delays, durations, counts, process IDs, window selectors, and Space targets as integers in tool schemas.
 - Reject MCP clipboard `outputPath: "-"` before reading or writing anything, with structured filesystem/text guidance, so arbitrary clipboard bytes can never corrupt the stdio JSON-RPC stream or create a literal `-` file.
 - Report Screen Recording, Accessibility, and Event Synthesizing from one selected-host permission snapshot across CLI and MCP, treating missing Accessibility as required while keeping Event Synthesizing action-specific.
@@ -73,9 +83,7 @@
 - Probe Bridge diagnostic sockets concurrently under a one-second per-host deadline with bounded cancellation while preserving runtime selection and candidate order, so `bridge status --verbose` neither accumulates nor inherits a wedged host's full handshake latency.
 - Keep application inventory responsive when hidden processes stall LaunchServices metadata: reuse one WindowServer snapshot, cap/coalesce generation-scoped reads behind per-process and overall deadlines, return explicit partial warnings instead of guessing hidden state, and keep incomplete/system-helper rows out of bulk quit and agent context.
 - Require exactly one CLI/MCP `click` target shape, make the MCP schema require a fresh exact-window receipt for background coordinates, reject PID-only shapes before dispatch, and keep explicit foreground pointer calls discoverable.
-- Add explicit `app:install-companion` deployment for built or exact signed companion artifacts with crash recovery, signer/TCC/native-only verification, unattended launch, exact GUI Bridge readiness, and fail-closed rollback, while preserving contributor `app:restart` as the Debug/local-signing workflow.
 - Accept pnpm's documented installer-option separator and build Developer ID companion artifacts with manual Xcode signing instead of failing on conflicting automatic provisioning.
-- Add a fail-closed unattended GUI Bridge-host launch mode for deployment, suppressing all unsolicited app UI and Dock promotion while exposing exact host generation/build readiness evidence.
 - Require explicit foreground consent before Dock/menu-bar global UI or targetless frontmost application-menu clicks; keep discovery read-only/background and return typed refusals before lookup or dispatch.
 - Preserve semantic AX labels, scalar values, roles, descriptions, enabled/selected state, and bounded value-settable capability through background `see` output, persisted snapshots, and agent summaries instead of reducing controls to generic role names.
 - Restrict background app launch to a generation-pinned already-running no-op on a host that advertises the same contract, preserve exact PID selectors and zero-dispatch readiness failures, pin focus/switch/unhide activation to the selected process generation, reject ambiguous selector combinations, and refuse cold launch, document/URL delivery, new instances, relaunch, and unhide before dispatch unless explicit foreground consent is present.
