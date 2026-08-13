@@ -406,6 +406,220 @@ struct PeekabooBridgeHostOwnershipTests {
         #expect(await host.activeConnectionCountForTesting() == 0)
     }
 
+    @Test
+    func `listener stays dormant while idle and wakes once per sequential request`() async throws {
+        let socketPath = Self.socketPath()
+        defer { Self.removeSocketArtifacts(socketPath) }
+
+        let host = await Self.makeHost(socketPath: socketPath)
+        try await host.startChecked()
+        defer { Task { await host.stop() } }
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await host.listenerReadinessNotificationCountForTesting() == 0)
+
+        let client = Self.client(socketPath: socketPath)
+        let identity = Self.clientIdentity()
+        var durationsMS: [Double] = []
+        durationsMS.reserveCapacity(100)
+        for _ in 0..<100 {
+            let startedAt = ContinuousClock.now
+            _ = try await client.handshake(client: identity)
+            durationsMS.append(Self.milliseconds(startedAt.duration(to: .now)))
+        }
+
+        let notificationsAfterRequests = await host.listenerReadinessNotificationCountForTesting()
+        #expect(notificationsAfterRequests == 100)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await host.listenerReadinessNotificationCountForTesting() == notificationsAfterRequests)
+
+        let sorted = durationsMS.sorted()
+        print(
+            "bridge listener 100-request benchmark: " +
+                "p50=\(String(format: "%.3f", sorted[49]))ms " +
+                "p95=\(String(format: "%.3f", sorted[94]))ms " +
+                "max=\(String(format: "%.3f", sorted[99]))ms " +
+                "notifications=\(notificationsAfterRequests ?? -1)")
+    }
+
+    @Test
+    func `listener coalesces clients queued before activation and closes its descriptor once`() async throws {
+        let socketPath = Self.socketPath()
+        defer { Self.removeSocketArtifacts(socketPath) }
+
+        let listener = try Self.bindSocket(path: socketPath, listen: true)
+        try PeekabooBridgeSocketIO.configureConnectedSocket(listener)
+        var clients: [Int32] = []
+        defer { clients.forEach { close($0) } }
+        for _ in 0..<64 {
+            let client = socket(AF_UNIX, SOCK_STREAM, 0)
+            #expect(client >= 0)
+            #expect(Self.connect(fd: client, path: socketPath) == 0)
+            clients.append(client)
+        }
+
+        let readiness = PeekabooBridgeListenerReadiness(fileDescriptor: listener)
+        #expect(await Self.receivesReadinessEvent(from: readiness))
+        #expect(readiness.notificationCountForTesting == 1)
+
+        var acceptedClients: [Int32] = []
+        defer { acceptedClients.forEach { close($0) } }
+        while true {
+            let accepted = accept(listener, nil, nil)
+            if accepted >= 0 {
+                acceptedClients.append(accepted)
+                continue
+            }
+            if errno == EINTR {
+                continue
+            }
+            #expect(errno == EAGAIN || errno == EWOULDBLOCK)
+            break
+        }
+        #expect(acceptedClients.count == clients.count)
+        readiness.rearm()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(readiness.notificationCountForTesting == 1)
+
+        readiness.finishEvents()
+        readiness.cancel()
+        await readiness.waitUntilCancelled()
+        errno = 0
+        let closedResult = fcntl(listener, F_GETFD)
+        let closedError = errno
+        #expect(closedResult == -1)
+        #expect(closedError == EBADF)
+
+        let replacement = socket(AF_UNIX, SOCK_STREAM, 0)
+        #expect(replacement >= 0)
+        defer { close(replacement) }
+        readiness.cancel()
+        #expect(fcntl(replacement, F_GETFD) >= 0)
+    }
+
+    @Test
+    func `accept drain hands off each connection before reaching EAGAIN`() async throws {
+        var sockets = [Int32](repeating: -1, count: 2)
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let transportFD = sockets[0]
+        let peerFD = sockets[1]
+        defer { close(peerFD) }
+
+        let connection = try PeekabooBridgeConnectionLiveness(fd: transportFD)
+        defer { connection.close() }
+        let prepared = PeekabooBridgeAcceptLoop.PreparedConnection(transportFD, connection)
+        let state = BridgeAcceptLoopTestState()
+
+        let outcome = await PeekabooBridgeAcceptLoop.drainConnections(
+            listenFD: -1,
+            acceptConnection: { _ in
+                switch state.nextAcceptCall() {
+                case 1:
+                    return .prepared(prepared)
+                default:
+                    let started = await Self.waitUntil { state.handlerCallCount == 1 }
+                    state.recordHandlerStartedBeforeDrain(started)
+                    return .drained
+                }
+            },
+            registerConnection: { _ in
+                state.recordRegistration()
+            },
+            unregisterConnection: { _ in
+                state.recordUnregistration()
+            },
+            clientHandler: { fd, _ in
+                state.recordHandler(fd: fd)
+            })
+
+        #expect(outcome == .rearm)
+        #expect(state.handlerStartedBeforeDrain)
+        #expect(state.handlerDescriptors == [transportFD])
+        #expect(await Self.waitUntil { state.unregistrationCount == 1 })
+        #expect(state.registrationCount == 1)
+    }
+
+    @Test
+    func `cancellation after accept registration closes without dispatch or rearm`() async throws {
+        var sockets = [Int32](repeating: -1, count: 2)
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let transportFD = sockets[0]
+        let peerFD = sockets[1]
+        defer { close(peerFD) }
+        let probeFD = fcntl(transportFD, F_DUPFD_CLOEXEC, 0)
+        guard probeFD >= 0 else {
+            close(transportFD)
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        let state = BridgeAcceptLoopTestState()
+        let connection = try PeekabooBridgeConnectionLiveness(
+            fd: transportFD,
+            probeFD: probeFD,
+            closeHandler: { fd in
+                state.recordClosedDescriptor(fd)
+                Darwin.close(fd)
+            })
+        defer { connection.close() }
+        let prepared = PeekabooBridgeAcceptLoop.PreparedConnection(transportFD, connection)
+
+        let drainTask = Task {
+            await PeekabooBridgeAcceptLoop.drainConnections(
+                listenFD: -1,
+                acceptConnection: { _ in
+                    state.recordAcceptCall()
+                    return .prepared(prepared)
+                },
+                registerConnection: { _ in
+                    state.recordRegistration()
+                    while !state.releaseRegistration {
+                        try? await Task.sleep(for: .milliseconds(1))
+                    }
+                },
+                unregisterConnection: { _ in
+                    state.recordUnregistration()
+                },
+                clientHandler: { fd, _ in
+                    state.recordHandler(fd: fd)
+                })
+        }
+
+        #expect(await Self.waitUntil { state.registrationCount == 1 })
+        drainTask.cancel()
+        state.allowRegistrationToReturn()
+        let outcome = await drainTask.value
+
+        #expect(outcome == .stop)
+        #expect(state.handlerCallCount == 0)
+        #expect(state.unregistrationCount == 1)
+        #expect(state.closedDescriptors.sorted() == [transportFD, probeFD].sorted())
+    }
+
+    @Test
+    func `concurrent stop is idempotent and host can restart on the same path`() async throws {
+        let socketPath = Self.socketPath()
+        defer { Self.removeSocketArtifacts(socketPath) }
+
+        let host = await Self.makeHost(socketPath: socketPath)
+        try await host.startChecked()
+
+        async let first = host.stop()
+        async let second = host.stop()
+        let firstOutcome = await first
+        let secondOutcome = await second
+        #expect(firstOutcome == .stopped)
+        #expect(secondOutcome == .stopped)
+
+        try await host.startChecked()
+        let handshake = try await Self.client(socketPath: socketPath).handshake(client: Self.clientIdentity())
+        #expect(handshake.hostKind == .gui)
+        #expect(await host.stop() == .stopped)
+    }
+
     private static func makeHost(
         socketPath: String,
         requestTimeoutSec: TimeInterval = 2) async -> PeekabooBridgeHost
@@ -445,6 +659,43 @@ struct PeekabooBridgeHostOwnershipTests {
 
     private static func socketPath() -> String {
         "/tmp/peekaboo-bridge-ownership-\(UUID().uuidString).sock"
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds * 1000) +
+            Double(duration.components.attoseconds) / 1_000_000_000_000_000
+    }
+
+    private static func receivesReadinessEvent(from readiness: PeekabooBridgeListenerReadiness) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in readiness.events {
+                    return true
+                }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(1))
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private static func waitUntil(
+        timeout: Duration = .seconds(1),
+        condition: @escaping @Sendable () -> Bool) async -> Bool
+    {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if condition() {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return condition()
     }
 
     private static func removeSocketArtifacts(_ socketPath: String) {
@@ -504,5 +755,105 @@ struct PeekabooBridgeHostOwnershipTests {
         guard copied < capacity else { throw POSIXError(.ENAMETOOLONG) }
         address.sun_len = UInt8(MemoryLayout.size(ofValue: address))
         return address
+    }
+}
+
+private final class BridgeAcceptLoopTestState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var acceptCalls = 0
+    private var registrations = 0
+    private var unregistrations = 0
+    private var handlerFDs: [Int32] = []
+    private var closedFDs: [Int32] = []
+    private var handlerWasStartedBeforeDrain = false
+    private var mayReturnFromRegistration = false
+
+    func nextAcceptCall() -> Int {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        self.acceptCalls += 1
+        return self.acceptCalls
+    }
+
+    func recordAcceptCall() {
+        _ = self.nextAcceptCall()
+    }
+
+    func recordRegistration() {
+        self.lock.lock()
+        self.registrations += 1
+        self.lock.unlock()
+    }
+
+    func recordUnregistration() {
+        self.lock.lock()
+        self.unregistrations += 1
+        self.lock.unlock()
+    }
+
+    func recordHandler(fd: Int32) {
+        self.lock.lock()
+        self.handlerFDs.append(fd)
+        self.lock.unlock()
+    }
+
+    func recordHandlerStartedBeforeDrain(_ started: Bool) {
+        self.lock.lock()
+        self.handlerWasStartedBeforeDrain = started
+        self.lock.unlock()
+    }
+
+    func recordClosedDescriptor(_ fd: Int32) {
+        self.lock.lock()
+        self.closedFDs.append(fd)
+        self.lock.unlock()
+    }
+
+    func allowRegistrationToReturn() {
+        self.lock.lock()
+        self.mayReturnFromRegistration = true
+        self.lock.unlock()
+    }
+
+    var registrationCount: Int {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.registrations
+    }
+
+    var unregistrationCount: Int {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.unregistrations
+    }
+
+    var handlerCallCount: Int {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.handlerFDs.count
+    }
+
+    var handlerDescriptors: [Int32] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.handlerFDs
+    }
+
+    var closedDescriptors: [Int32] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.closedFDs
+    }
+
+    var handlerStartedBeforeDrain: Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.handlerWasStartedBeforeDrain
+    }
+
+    var releaseRegistration: Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.mayReturnFromRegistration
     }
 }
