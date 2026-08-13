@@ -40,32 +40,25 @@ import PeekabooFoundation
  * - Note: Part of UIAutomationService's specialized service architecture
  * - Since: PeekabooCore 1.0.0
  */
-private struct ExactWindowClickReceipt {
-    let identity: WindowMutationIdentity
-    let bounds: CGRect
-}
-
-private struct ClickMutationReceipt {
-    let processIdentity: ApplicationProcessIdentity?
-    let exactWindow: ExactWindowClickReceipt?
-}
-
 private struct SyntheticClickDestination {
-    let processIdentifier: pid_t?
-    let windowID: CGWindowID?
-    let exactWindowReceipt: ExactWindowClickReceipt?
-    let expectedProcessIdentity: ApplicationProcessIdentity?
+    let captureReceipt: DesktopOperationPlan.CaptureReceipt
+    let validatesProcessIdentity: Bool
+
+    var processIdentifier: pid_t? {
+        self.captureReceipt.processIdentifier
+    }
+
+    var windowID: CGWindowID? {
+        self.captureReceipt.exactWindow.flatMap { CGWindowID(exactly: $0.identity.windowID) }
+    }
 }
 
 private struct ClickExecutionRequest: Sendable {
     let target: ClickTarget
     let clickType: ClickType
     let snapshotID: String?
-    let targetProcessIdentifier: pid_t?
-    let expectedProcessIdentity: ApplicationProcessIdentity?
-    let targetWindowID: Int?
-    let expectedWindowIdentity: WindowMutationIdentity?
-    let expectedWindowBounds: CGRect?
+    let automationTarget: UIAutomationTarget
+    let validatesProcessIdentity: Bool
     let acquireLane: Bool
     let lanePreparation: @MainActor @Sendable () async -> Void
     let laneCompletion: @MainActor @Sendable (UIInputExecutionResult) async -> Void
@@ -156,9 +149,10 @@ public final class ClickService {
         target: ClickTarget,
         clickType: ClickType,
         snapshotId: String?,
-        targetProcessIdentifier: pid_t?,
-        mutationReceipt: ClickMutationReceipt) async throws -> UIInputExecutionResult.Action
+        captureReceipt: DesktopOperationPlan.CaptureReceipt,
+        validatesProcessIdentity: Bool) async throws -> UIInputExecutionResult.Action
     {
+        let targetProcessIdentifier = captureReceipt.processIdentifier
         guard let element = try await self.resolveAutomationElement(
             target: target,
             snapshotId: snapshotId,
@@ -167,8 +161,10 @@ public final class ClickService {
             throw ActionInputError.unsupported(.missingElement)
         }
 
-        try self.requireCurrentProcess(mutationReceipt.processIdentity, afterDispatch: false)
-        try self.requireCurrentExactWindow(mutationReceipt.exactWindow, afterDispatch: false)
+        try self.requireCurrentTarget(
+            captureReceipt,
+            afterDispatch: false,
+            validateProcessIdentity: validatesProcessIdentity)
         switch clickType {
         case .single:
             let valueBefore = element.intAttribute(AXAttributeNames.kAXValueAttribute)
@@ -368,7 +364,7 @@ public final class ClickService {
         snapshotId: String?,
         targetProcessIdentifier: pid_t?,
         requestedTargetWindowID: Int?,
-        exactWindowReceipt: ExactWindowClickReceipt?) async throws -> CGWindowID?
+        captureReceipt: DesktopOperationPlan.CaptureReceipt) async throws -> CGWindowID?
     {
         let requestedCGWindowID = try validatedClickWindowID(requestedTargetWindowID)
         guard let targetProcessIdentifier else { return nil }
@@ -411,10 +407,15 @@ public final class ClickService {
 
         let snapshotWindowID = detectionResult.metadata.windowContext?.windowID
         let snapshotCGWindowID = try validatedClickWindowID(snapshotWindowID)
-        if let exactWindowReceipt {
-            guard detectionResult.metadata.windowContext?.windowMutationIdentity == exactWindowReceipt.identity,
-                  detectionResult.metadata.windowContext?.windowBounds == exactWindowReceipt.bounds
-            else {
+        if captureReceipt.exactWindow != nil {
+            do {
+                try DesktopOperationSnapshotReceiptValidator.validate(
+                    context: detectionResult.metadata.windowContext,
+                    receipt: captureReceipt,
+                    validateCurrentIdentity: false,
+                    processStartIdentityProvider: self.processStartIdentityProvider,
+                    exactWindowIdentityValidator: self.exactWindowIdentityValidator)
+            } catch {
                 throw PeekabooError.snapshotStale(
                     "Exact-window click snapshot receipt or bounds no longer match the dispatch target")
             }
@@ -637,10 +638,8 @@ public final class ClickService {
                 at: candidate,
                 clickType: .single,
                 destination: SyntheticClickDestination(
-                    processIdentifier: nil,
-                    windowID: nil,
-                    exactWindowReceipt: nil,
-                    expectedProcessIdentity: nil))
+                    captureReceipt: DesktopOperationPlan.CaptureReceipt(target: .foreground),
+                    validatesProcessIdentity: false))
             try await Task.sleep(nanoseconds: 60_000_000) // 60ms
 
             if self.isFocusedTextInput(expectedIdentifier: normalizedExpectedIdentifier) {
@@ -798,24 +797,25 @@ public final class ClickService {
     {
         self.logger.debug("Performing \(clickType) click at (\(point.x), \(point.y))")
 
-        try self.requireCurrentProcess(destination.expectedProcessIdentity, afterDispatch: false)
+        try self.requireCurrentTarget(
+            destination.captureReceipt,
+            afterDispatch: false,
+            validateProcessIdentity: destination.validatesProcessIdentity,
+            validateExactWindow: clickType != .longPress)
         switch clickType {
         case .single:
-            try self.requireCurrentExactWindow(destination.exactWindowReceipt, afterDispatch: false)
             return try await self.performSyntheticClick(
                 at: point,
                 button: .left,
                 count: 1,
                 destination: destination)
         case .right:
-            try self.requireCurrentExactWindow(destination.exactWindowReceipt, afterDispatch: false)
             return try await self.performSyntheticClick(
                 at: point,
                 button: .right,
                 count: 1,
                 destination: destination)
         case .double:
-            try self.requireCurrentExactWindow(destination.exactWindowReceipt, afterDispatch: false)
             return try await self.performSyntheticClick(
                 at: point,
                 button: .left,
@@ -840,7 +840,7 @@ public final class ClickService {
         destination: SyntheticClickDestination) async throws -> DesktopActionOutcome
     {
         if let targetProcessIdentifier = destination.processIdentifier {
-            if let exactWindowReceipt = destination.exactWindowReceipt {
+            if let exactWindowReceipt = destination.captureReceipt.exactWindow {
                 try await self.syntheticInputDriver.click(
                     at: point,
                     button: button,
@@ -869,60 +869,56 @@ public final class ClickService {
 }
 
 extension ClickService {
-    fileprivate static func validateExpectedProcessIdentity(
-        _ expectedProcessIdentity: ApplicationProcessIdentity?,
-        targetProcessIdentifier: pid_t?) throws
-    {
-        guard let expectedProcessIdentity else { return }
-        guard targetProcessIdentifier == expectedProcessIdentity.processIdentifier else {
-            throw PeekabooError.invalidInput(
-                "Generation-pinned click identity does not match its target process identifier")
-        }
-    }
-
-    fileprivate static func validateExpectedProcessIdentity(
-        _ expectedProcessIdentity: ApplicationProcessIdentity?,
-        exactWindowReceipt: ExactWindowClickReceipt?) throws
-    {
-        guard let expectedProcessIdentity, let exactWindowReceipt else { return }
-        guard exactWindowReceipt.identity.ownerProcessIdentifier == expectedProcessIdentity.processIdentifier,
-              exactWindowReceipt.identity.ownerProcessStartIdentity == expectedProcessIdentity.processStartIdentity
-        else {
-            throw PeekabooError.snapshotStale(
-                "Exact-window and process-generation click receipts do not match")
-        }
-    }
-
-    fileprivate static func exactWindowReceipt(
+    fileprivate static func automationTarget(
         targetProcessIdentifier: pid_t?,
+        expectedProcessIdentity: ApplicationProcessIdentity?,
         targetWindowID: Int?,
         expectedWindowIdentity: WindowMutationIdentity?,
-        expectedWindowBounds: CGRect?) throws -> ExactWindowClickReceipt?
+        expectedWindowBounds: CGRect?) throws -> UIAutomationTarget
     {
         guard let targetWindowID else {
             guard expectedWindowIdentity == nil, expectedWindowBounds == nil else {
                 throw PeekabooError.invalidInput(
                     "Exact-window click identity and bounds require a target window ID")
             }
-            return nil
+            if let targetProcessIdentifier {
+                return try .process(UIAutomationTarget.Process(
+                    processIdentifier: targetProcessIdentifier,
+                    identity: expectedProcessIdentity))
+            }
+            if let expectedProcessIdentity {
+                return try .process(UIAutomationTarget.Process(
+                    processIdentifier: expectedProcessIdentity.processIdentifier,
+                    identity: expectedProcessIdentity))
+            }
+            return .foreground
         }
         guard let targetProcessIdentifier,
               let expectedWindowIdentity,
-              let expectedWindowBounds,
-              expectedWindowIdentity.windowID == targetWindowID,
-              expectedWindowIdentity.ownerProcessIdentifier == targetProcessIdentifier
+              let expectedWindowBounds
         else {
             throw PeekabooError.snapshotStale(
                 "Exact-window click requires its capture-time process-generation receipt and bounds")
         }
-        return ExactWindowClickReceipt(identity: expectedWindowIdentity, bounds: expectedWindowBounds)
+        let exactWindow = try UIAutomationTarget.ExactWindow(
+            processIdentifier: targetProcessIdentifier,
+            windowID: targetWindowID,
+            identity: expectedWindowIdentity,
+            bounds: expectedWindowBounds)
+        if let expectedProcessIdentity,
+           expectedProcessIdentity != expectedWindowIdentity.processIdentity
+        {
+            throw PeekabooError.snapshotStale(
+                "Process and exact-window receipts refer to different process generations")
+        }
+        return .exactWindow(exactWindow)
     }
 
     private func resolvedExactWindowReceipt(
-        _ requested: ExactWindowClickReceipt?,
+        _ requested: DesktopOperationPlan.ExactWindowReceipt?,
         snapshotId: String?,
         targetProcessIdentifier: pid_t?,
-        targetWindowID: CGWindowID?) async throws -> ExactWindowClickReceipt?
+        targetWindowID: CGWindowID?) async throws -> DesktopOperationPlan.ExactWindowReceipt?
     {
         if let requested {
             return requested
@@ -939,33 +935,23 @@ extension ClickService {
             throw PeekabooError.snapshotStale(
                 "Exact-window click snapshot has no capture-time process-generation receipt and bounds")
         }
-        return ExactWindowClickReceipt(identity: identity, bounds: bounds)
+        return try DesktopOperationPlan.ExactWindowReceipt(identity: identity, bounds: bounds)
     }
 
-    private func requireCurrentExactWindow(
-        _ receipt: ExactWindowClickReceipt?,
-        afterDispatch: Bool) throws
+    private func requireCurrentTarget(
+        _ receipt: DesktopOperationPlan.CaptureReceipt,
+        afterDispatch: Bool,
+        validateProcessIdentity: Bool,
+        validateExactWindow: Bool = true) throws
     {
-        guard let receipt else { return }
-        guard self.exactWindowIdentityValidator(receipt.identity, receipt.bounds) else {
-            if afterDispatch {
-                throw InputDeliveryIndeterminateError(
-                    operation: .click,
-                    causeDescription: "The exact window changed before completion validation")
-            }
-            throw PeekabooError.snapshotStale(
-                "Exact-window click identity changed before final dispatch; capture a fresh snapshot")
-        }
-    }
-
-    private func requireCurrentProcess(
-        _ expectedProcessIdentity: ApplicationProcessIdentity?,
-        afterDispatch: Bool) throws
-    {
-        guard let expectedProcessIdentity else { return }
-        guard self.processStartIdentityProvider(expectedProcessIdentity.processIdentifier) ==
-            expectedProcessIdentity.processStartIdentity
-        else {
+        let mismatch = DesktopOperationSnapshotReceiptValidator.currentIdentityMismatch(
+            receipt: receipt,
+            validateProcessIdentity: validateProcessIdentity,
+            validateExactWindow: validateExactWindow,
+            processStartIdentityProvider: self.processStartIdentityProvider,
+            exactWindowIdentityValidator: self.exactWindowIdentityValidator)
+        switch mismatch {
+        case .processGeneration:
             if afterDispatch {
                 throw InputDeliveryIndeterminateError(
                     operation: .click,
@@ -974,6 +960,16 @@ extension ClickService {
             }
             throw PeekabooError.invalidInput(
                 "Background click target process exited or changed process generation before final dispatch")
+        case .exactWindow:
+            if afterDispatch {
+                throw InputDeliveryIndeterminateError(
+                    operation: .click,
+                    causeDescription: "The exact window changed before completion validation")
+            }
+            throw PeekabooError.snapshotStale(
+                "Exact-window click identity changed before final dispatch; capture a fresh snapshot")
+        case nil:
+            return
         }
     }
 }
@@ -1004,15 +1000,33 @@ extension ClickService {
         expectedWindowIdentity: WindowMutationIdentity? = nil,
         expectedWindowBounds: CGRect? = nil) async throws -> UIInputExecutionResult
     {
-        try await self.executeClick(ClickExecutionRequest(
-            target: target,
-            clickType: clickType,
-            snapshotID: snapshotId,
+        let automationTarget = try Self.automationTarget(
             targetProcessIdentifier: targetProcessIdentifier,
             expectedProcessIdentity: expectedProcessIdentity,
             targetWindowID: targetWindowID,
             expectedWindowIdentity: expectedWindowIdentity,
-            expectedWindowBounds: expectedWindowBounds,
+            expectedWindowBounds: expectedWindowBounds)
+        return try await self.click(
+            target: target,
+            clickType: clickType,
+            snapshotId: snapshotId,
+            automationTarget: automationTarget,
+            validatesProcessIdentity: expectedProcessIdentity != nil)
+    }
+
+    func click(
+        target: ClickTarget,
+        clickType: ClickType,
+        snapshotId: String?,
+        automationTarget: UIAutomationTarget,
+        validatesProcessIdentity: Bool = false) async throws -> UIInputExecutionResult
+    {
+        try await self.executeClick(ClickExecutionRequest(
+            target: target,
+            clickType: clickType,
+            snapshotID: snapshotId,
+            automationTarget: automationTarget,
+            validatesProcessIdentity: validatesProcessIdentity,
             acquireLane: true,
             lanePreparation: {},
             laneCompletion: { _ in }))
@@ -1030,11 +1044,8 @@ extension ClickService {
             target: target,
             clickType: clickType,
             snapshotID: snapshotId,
-            targetProcessIdentifier: nil,
-            expectedProcessIdentity: nil,
-            targetWindowID: nil,
-            expectedWindowIdentity: nil,
-            expectedWindowBounds: nil,
+            automationTarget: .foreground,
+            validatesProcessIdentity: false,
             acquireLane: true,
             lanePreparation: lanePreparation,
             laneCompletion: laneCompletion))
@@ -1047,11 +1058,8 @@ extension ClickService {
             target: target,
             clickType: clickType,
             snapshotID: snapshotId,
-            targetProcessIdentifier: nil,
-            expectedProcessIdentity: nil,
-            targetWindowID: nil,
-            expectedWindowIdentity: nil,
-            expectedWindowBounds: nil,
+            automationTarget: .foreground,
+            validatesProcessIdentity: false,
             acquireLane: false,
             lanePreparation: {},
             laneCompletion: { _ in }))
@@ -1061,43 +1069,30 @@ extension ClickService {
         let target = request.target
         let clickType = request.clickType
         let snapshotID = request.snapshotID
-        let targetProcessIdentifier = request.targetProcessIdentifier
-        let expectedProcessIdentity = request.expectedProcessIdentity
+        let targetProcessIdentifier = request.automationTarget.processIdentifier
+        let validatesProcessIdentity = request.validatesProcessIdentity
         self.logger.debug("Click requested - target: \(String(describing: target)), type: \(clickType)")
-        try Self.validateExpectedProcessIdentity(
-            expectedProcessIdentity,
-            targetProcessIdentifier: targetProcessIdentifier)
         if targetProcessIdentifier != nil,
-           request.targetWindowID == nil,
+           request.automationTarget.exactWindow == nil,
            case .coordinates = target
         {
             throw PeekabooError.invalidInput(
                 "Background coordinate clicks require an exact capture-time window receipt; " +
                     "PID-only coordinate routing is refused")
         }
-        let requestedExactWindowReceipt = try Self.exactWindowReceipt(
-            targetProcessIdentifier: targetProcessIdentifier,
-            targetWindowID: request.targetWindowID,
-            expectedWindowIdentity: request.expectedWindowIdentity,
-            expectedWindowBounds: request.expectedWindowBounds)
-        let requestedPlanWindowReceipt = try requestedExactWindowReceipt.map {
-            try DesktopOperationPlan.ExactWindowReceipt(identity: $0.identity, bounds: $0.bounds)
-        }
+        let requestedExactWindowReceipt = request.automationTarget.exactWindow
+        let requestedCaptureReceipt = DesktopOperationPlan.CaptureReceipt(
+            snapshotID: snapshotID,
+            target: request.automationTarget)
         var bundleIdentifier: String?
         var strategy = self.inputPolicy.strategy(for: .click)
-        var exactWindowReceipt: ExactWindowClickReceipt?
-        var mutationReceipt: ClickMutationReceipt?
+        var mutationReceipt: DesktopOperationPlan.CaptureReceipt?
         var syntheticDestination: SyntheticClickDestination?
         do {
             let plan = try DesktopOperationPlan(
                 verb: .click,
                 selector: .click(target),
-                captureReceipt: DesktopOperationPlan.CaptureReceipt(
-                    snapshotID: snapshotID,
-                    processIdentifier: targetProcessIdentifier,
-                    processIdentity: expectedProcessIdentity,
-                    exactWindow: requestedPlanWindowReceipt),
-                deliveryIntent: targetProcessIdentifier == nil ? .foreground : .background,
+                captureReceipt: requestedCaptureReceipt,
                 strategy: strategy,
                 prepare: {
                     bundleIdentifier = await self.bundleIdentifier(
@@ -1109,25 +1104,30 @@ extension ClickService {
                         target: target,
                         snapshotId: snapshotID,
                         targetProcessIdentifier: targetProcessIdentifier,
-                        requestedTargetWindowID: request.targetWindowID,
-                        exactWindowReceipt: requestedExactWindowReceipt)
-                    exactWindowReceipt = try await self.resolvedExactWindowReceipt(
+                        requestedTargetWindowID: requestedExactWindowReceipt?.identity.windowID,
+                        captureReceipt: requestedCaptureReceipt)
+                    let exactWindowReceipt = try await self.resolvedExactWindowReceipt(
                         requestedExactWindowReceipt,
                         snapshotId: snapshotID,
                         targetProcessIdentifier: targetProcessIdentifier,
                         targetWindowID: exactTargetWindowID)
-                    try Self.validateExpectedProcessIdentity(
-                        expectedProcessIdentity,
-                        exactWindowReceipt: exactWindowReceipt)
-                    try self.requireCurrentProcess(expectedProcessIdentity, afterDispatch: false)
-                    mutationReceipt = ClickMutationReceipt(
-                        processIdentity: expectedProcessIdentity,
-                        exactWindow: exactWindowReceipt)
+                    let preparedTarget: UIAutomationTarget = if let exactWindowReceipt {
+                        try request.automationTarget.refined(to: exactWindowReceipt)
+                    } else {
+                        request.automationTarget
+                    }
+                    let preparedReceipt = DesktopOperationPlan.CaptureReceipt(
+                        snapshotID: snapshotID,
+                        target: preparedTarget)
+                    try self.requireCurrentTarget(
+                        preparedReceipt,
+                        afterDispatch: false,
+                        validateProcessIdentity: validatesProcessIdentity,
+                        validateExactWindow: false)
+                    mutationReceipt = preparedReceipt
                     syntheticDestination = SyntheticClickDestination(
-                        processIdentifier: targetProcessIdentifier,
-                        windowID: exactTargetWindowID,
-                        exactWindowReceipt: exactWindowReceipt,
-                        expectedProcessIdentity: expectedProcessIdentity)
+                        captureReceipt: preparedReceipt,
+                        validatesProcessIdentity: validatesProcessIdentity)
                 },
                 routing: {
                     DesktopOperationPlan.Routing(
@@ -1143,8 +1143,8 @@ extension ClickService {
                             target: target,
                             clickType: clickType,
                             snapshotId: snapshotID,
-                            targetProcessIdentifier: targetProcessIdentifier,
-                            mutationReceipt: mutationReceipt)
+                            captureReceipt: mutationReceipt,
+                            validatesProcessIdentity: validatesProcessIdentity)
                     } catch let error as ActionInputError
                         where strategy == .actionFirst &&
                         targetProcessIdentifier != nil &&
@@ -1165,8 +1165,13 @@ extension ClickService {
                 },
                 postvalidate: { result in
                     do {
-                        try self.requireCurrentProcess(expectedProcessIdentity, afterDispatch: true)
-                        try self.requireCurrentExactWindow(exactWindowReceipt, afterDispatch: true)
+                        guard let mutationReceipt else {
+                            throw PeekabooError.operationError(message: "Click target was not prepared")
+                        }
+                        try self.requireCurrentTarget(
+                            mutationReceipt,
+                            afterDispatch: true,
+                            validateProcessIdentity: validatesProcessIdentity)
                     } catch {
                         throw clickPostDispatchFailure(
                             outcome: result.outcome,

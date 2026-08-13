@@ -33,7 +33,6 @@ extension UIAutomationService: ElementActionAutomationServiceProtocol {
             verb: .setValue,
             selector: .element(target),
             captureReceipt: captureReceipt,
-            deliveryIntent: .background,
             strategy: self.inputPolicy.strategy(
                 for: .setValue,
                 bundleIdentifier: captureReceipt.bundleIdentifier),
@@ -122,7 +121,6 @@ extension UIAutomationService: ElementActionAutomationServiceProtocol {
             verb: .performAction,
             selector: .element(target),
             captureReceipt: captureReceipt,
-            deliveryIntent: .background,
             strategy: self.inputPolicy.strategy(
                 for: .performAction,
                 bundleIdentifier: captureReceipt.bundleIdentifier),
@@ -258,7 +256,17 @@ extension UIAutomationService: ElementActionAutomationServiceProtocol {
     private func elementMutationCaptureReceipt(snapshotId: String) async throws
         -> DesktopOperationPlan.CaptureReceipt
     {
-        let detectionResult = try? await self.snapshotManager.getDetectionResult(snapshotId: snapshotId)
+        let detectionResult: ElementDetectionResult
+        do {
+            guard let result = try await self.snapshotManager.getDetectionResult(snapshotId: snapshotId) else {
+                throw PeekabooError.snapshotNotFound(snapshotId)
+            }
+            detectionResult = result
+        } catch let error as PeekabooError {
+            throw error
+        } catch {
+            throw PeekabooError.snapshotNotFound(snapshotId)
+        }
         return try DesktopOperationSnapshotReceiptValidator.captureReceipt(
             snapshotID: snapshotId,
             detectionResult: detectionResult,
