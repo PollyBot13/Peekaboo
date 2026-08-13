@@ -10,6 +10,8 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct MCPToolSnapshotMutationTests {
+    private let uiSnapshots = MCPToolUISnapshotStore(owner: MCPToolSnapshotOwner())
+
     @Test
     func `Mutation policy distinguishes reads mutations and fresh observations`() {
         #expect(Self.effect("app", ["action": "list"]) == .none)
@@ -95,7 +97,9 @@ struct MCPToolSnapshotMutationTests {
     @Test
     func `Per-tool execution completes unique mutation scopes for success and error responses`() async throws {
         let coordinator = RecordingMutationCoordinator()
-        let context = await MCPToolTestHelpers.makeContext(snapshotMutationCoordinator: coordinator)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshotMutationCoordinator: coordinator,
+            snapshotOwner: self.uiSnapshots.owner)
 
         _ = try await context.execute(
             tool: StubMCPTool(name: "click", responseIsError: false),
@@ -111,10 +115,12 @@ struct MCPToolSnapshotMutationTests {
 
     @Test
     func `Fresh observation reports an error when snapshot publication fails`() async throws {
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let coordinator = RecordingMutationCoordinator(completionResult: false)
-        let context = await MCPToolTestHelpers.makeContext(snapshotMutationCoordinator: coordinator)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshotMutationCoordinator: coordinator,
+            snapshotOwner: manager.owner)
         let snapshotID = "unpublished-snapshot"
 
         let response = try await context.execute(
@@ -122,6 +128,7 @@ struct MCPToolSnapshotMutationTests {
                 name: "see",
                 responseSnapshotID: snapshotID,
                 createdUISnapshotID: snapshotID,
+                uiSnapshots: manager,
                 expectsObservationStart: true),
             arguments: ToolArguments(raw: ["web_focus": true]))
 
@@ -138,7 +145,8 @@ struct MCPToolSnapshotMutationTests {
         let gate = MCPToolSnapshotExecutionGate()
         let context = await MCPToolTestHelpers.makeContext(
             snapshotMutationCoordinator: coordinator,
-            snapshotExecutionGate: gate)
+            snapshotExecutionGate: gate,
+            snapshotOwner: self.uiSnapshots.owner)
 
         let response = try await context.execute(
             tool: StubMCPTool(name: toolName),
@@ -164,7 +172,8 @@ struct MCPToolSnapshotMutationTests {
         let gate = MCPToolSnapshotExecutionGate()
         let context = await MCPToolTestHelpers.makeContext(
             snapshotMutationCoordinator: coordinator,
-            snapshotExecutionGate: gate)
+            snapshotExecutionGate: gate,
+            snapshotOwner: self.uiSnapshots.owner)
 
         let mutationResponse = try await context.execute(
             tool: StubMCPTool(name: "click"),
@@ -194,9 +203,53 @@ struct MCPToolSnapshotMutationTests {
     }
 
     @Test
+    func `Pending invalidation retries against its originating snapshot owner`() async throws {
+        let coordinator = SequencedMutationCoordinator(results: [false, true])
+        let gate = MCPToolSnapshotExecutionGate()
+        let firstSnapshots = MCPToolUISnapshotStore(owner: MCPToolSnapshotOwner())
+        let secondSnapshots = MCPToolUISnapshotStore(owner: MCPToolSnapshotOwner())
+        await firstSnapshots.removeAllSnapshots()
+        await secondSnapshots.removeAllSnapshots()
+        let firstSnapshot = await firstSnapshots.createSnapshot(id: "session-a")
+        let secondSnapshot = await secondSnapshots.createSnapshot(id: "session-b")
+        let firstContext = await MCPToolTestHelpers.makeContext(
+            snapshotMutationCoordinator: coordinator,
+            snapshotExecutionGate: gate,
+            snapshotOwner: firstSnapshots.owner)
+        let secondContext = await MCPToolTestHelpers.makeContext(
+            snapshotMutationCoordinator: coordinator,
+            snapshotExecutionGate: gate,
+            snapshotOwner: secondSnapshots.owner)
+
+        let mutationResponse = try await firstContext.execute(
+            tool: StubMCPTool(name: "click"),
+            arguments: ToolArguments(raw: [:]))
+        #expect(!mutationResponse.isError)
+        #expect(Self.snapshotInvalidationStatus(mutationResponse) == "pending_retry")
+        #expect(await firstSnapshots.getSnapshot(id: nil) == nil)
+        #expect(await firstSnapshots.getSnapshot(id: firstSnapshot.id) === firstSnapshot)
+        #expect(await secondSnapshots.getSnapshot(id: nil) === secondSnapshot)
+
+        let observationResponse = try await secondContext.execute(
+            tool: StubMCPTool(name: "see"),
+            arguments: ToolArguments(raw: [:]))
+
+        #expect(!observationResponse.isError)
+        #expect(await firstSnapshots.getSnapshot(id: nil) == nil)
+        #expect(await firstSnapshots.getSnapshot(id: firstSnapshot.id) === firstSnapshot)
+        #expect(await secondSnapshots.getSnapshot(id: nil) === secondSnapshot)
+        #expect(coordinator.completions.map(\.succeeded) == [true, false])
+
+        await firstSnapshots.removeOwner()
+        await secondSnapshots.removeOwner()
+    }
+
+    @Test
     func `Original mutation error records pending cleanup without replacing the error`() async throws {
         let coordinator = RecordingMutationCoordinator(completionResult: false)
-        let context = await MCPToolTestHelpers.makeContext(snapshotMutationCoordinator: coordinator)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshotMutationCoordinator: coordinator,
+            snapshotOwner: self.uiSnapshots.owner)
 
         let response = try await context.execute(
             tool: StubMCPTool(name: "click", responseIsError: true),
@@ -223,7 +276,8 @@ struct MCPToolSnapshotMutationTests {
         let gate = MCPToolSnapshotExecutionGate()
         let context = await MCPToolTestHelpers.makeContext(
             snapshotMutationCoordinator: coordinator,
-            snapshotExecutionGate: gate)
+            snapshotExecutionGate: gate,
+            snapshotOwner: self.uiSnapshots.owner)
 
         let mutationResponse = try await context.execute(
             tool: StubMCPTool(name: "click"),
@@ -252,7 +306,9 @@ struct MCPToolSnapshotMutationTests {
     func `Mutation and observation tool executions serialize on their shared gate`() async throws {
         let log = ToolExecutionLog()
         let gate = MCPToolSnapshotExecutionGate()
-        let context = await MCPToolTestHelpers.makeContext(snapshotExecutionGate: gate)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshotExecutionGate: gate,
+            snapshotOwner: self.uiSnapshots.owner)
         let observation = StubMCPTool(name: "inspect_ui", label: "observe", delay: .milliseconds(40), log: log)
         let mutation = StubMCPTool(name: "click", label: "mutate", log: log)
 
@@ -307,7 +363,7 @@ struct MCPToolSnapshotMutationTests {
     @Test
     func `Outer agent execution remains ungated for its nested mutation`() async throws {
         let log = ToolExecutionLog()
-        let context = await MCPToolTestHelpers.makeContext()
+        let context = await MCPToolTestHelpers.makeContext(snapshotOwner: self.uiSnapshots.owner)
 
         let response = try await context.execute(
             tool: NestedAgentMCPTool(context: context, log: log),
@@ -326,7 +382,9 @@ struct MCPToolSnapshotMutationTests {
     func `Canceled waiter never executes after the gate becomes available`() async throws {
         let log = ToolExecutionLog()
         let gate = MCPToolSnapshotExecutionGate()
-        let context = await MCPToolTestHelpers.makeContext(snapshotExecutionGate: gate)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshotExecutionGate: gate,
+            snapshotOwner: self.uiSnapshots.owner)
         try await gate.acquire()
 
         let waiting = Task {
@@ -350,7 +408,8 @@ struct MCPToolSnapshotMutationTests {
         let gate = MCPToolSnapshotExecutionGate()
         let context = await MCPToolTestHelpers.makeContext(
             snapshotMutationCoordinator: coordinator,
-            snapshotExecutionGate: gate)
+            snapshotExecutionGate: gate,
+            snapshotOwner: self.uiSnapshots.owner)
         let canceledExecution = Task {
             try await context.execute(
                 tool: StubMCPTool(name: "click", cancelsCurrentTask: true),
@@ -391,10 +450,12 @@ struct MCPToolSnapshotMutationTests {
 
     @Test
     func `Cancellation during successful completion rolls back observation publication`() async throws {
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let coordinator = CancelingMutationCoordinator()
-        let context = await MCPToolTestHelpers.makeContext(snapshotMutationCoordinator: coordinator)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshotMutationCoordinator: coordinator,
+            snapshotOwner: manager.owner)
         let snapshotID = "canceled-after-completion"
         let canceledExecution = Task {
             try await context.execute(
@@ -402,6 +463,7 @@ struct MCPToolSnapshotMutationTests {
                     name: "see",
                     responseSnapshotID: snapshotID,
                     createdUISnapshotID: snapshotID,
+                    uiSnapshots: manager,
                     expectsObservationStart: true),
                 arguments: ToolArguments(raw: ["web_focus": true]))
         }
@@ -420,7 +482,8 @@ struct MCPToolSnapshotMutationTests {
         let coordinator = RecordingMutationCoordinator()
         let context = await MCPToolTestHelpers.makeContext(
             snapshotMutationCoordinator: coordinator,
-            snapshotExecutionGate: gate)
+            snapshotExecutionGate: gate,
+            snapshotOwner: self.uiSnapshots.owner)
         try await gate.acquire()
         let waiting = Task {
             try await context.execute(
@@ -438,7 +501,7 @@ struct MCPToolSnapshotMutationTests {
 
     @Test
     func `UI snapshot watermark preserves explicit history without resurfacing stale latest`() async {
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let oldDate = Date(timeIntervalSince1970: 100)
         let cutoff = Date(timeIntervalSince1970: 200)
@@ -457,7 +520,7 @@ struct MCPToolSnapshotMutationTests {
 
     @Test
     func `Atomic preservation restores a refreshed UI snapshot unless a newer mutation wins`() async {
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let snapshot = await manager.createSnapshot(at: Date(timeIntervalSince1970: 100))
         let observationStart = Date(timeIntervalSince1970: 200)
@@ -480,16 +543,17 @@ struct MCPToolSnapshotMutationTests {
 
     @Test
     func `pending UI snapshot stays hidden until observation completion`() async throws {
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let snapshotID = "pending-observation"
-        let context = await MCPToolTestHelpers.makeContext()
+        let context = await MCPToolTestHelpers.makeContext(snapshotOwner: manager.owner)
 
         _ = try await context.execute(
             tool: StubMCPTool(
                 name: "see",
                 responseSnapshotID: snapshotID,
                 createdUISnapshotID: snapshotID,
+                uiSnapshots: manager,
                 expectsObservationStart: true),
             arguments: ToolArguments(raw: ["web_focus": true]))
 
@@ -504,12 +568,14 @@ struct MCPToolSnapshotMutationTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = DesktopMutationWatermarkStore(directoryURL: root)
         let snapshots = InMemorySnapshotManager(desktopMutationWatermarkStore: store)
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let stale = await manager.createSnapshot(at: Date().addingTimeInterval(-1))
         let staleID = await stale.id
         _ = try store.advance(through: Date())
-        let context = await MCPToolTestHelpers.makeContext(snapshots: snapshots)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshots: snapshots,
+            snapshotOwner: manager.owner)
 
         _ = try await context.execute(
             tool: StubMCPTool(name: "app"),
@@ -527,16 +593,19 @@ struct MCPToolSnapshotMutationTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = DesktopMutationWatermarkStore(directoryURL: root)
         let snapshots = InMemorySnapshotManager(desktopMutationWatermarkStore: store)
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let snapshotID = "host-completed-observation"
-        let context = await MCPToolTestHelpers.makeContext(snapshots: snapshots)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshots: snapshots,
+            snapshotOwner: manager.owner)
 
         let response = try await context.execute(
             tool: StubMCPTool(
                 name: "see",
                 responseSnapshotID: snapshotID,
                 createdUISnapshotID: snapshotID,
+                uiSnapshots: manager,
                 expectsObservationStart: true,
                 completionWatermarkStore: store),
             arguments: ToolArguments(raw: ["web_focus": true]))
@@ -554,18 +623,20 @@ struct MCPToolSnapshotMutationTests {
         let store = DesktopMutationWatermarkStore(directoryURL: root)
         let snapshots = InMemorySnapshotManager(desktopMutationWatermarkStore: store)
         let coordinator = DurableMutationCoordinator(store: store)
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let snapshotID = "local-barrier-observation"
         let context = await MCPToolTestHelpers.makeContext(
             snapshots: snapshots,
-            snapshotMutationCoordinator: coordinator)
+            snapshotMutationCoordinator: coordinator,
+            snapshotOwner: manager.owner)
 
         let response = try await context.execute(
             tool: StubMCPTool(
                 name: "see",
                 responseSnapshotID: snapshotID,
                 createdUISnapshotID: snapshotID,
+                uiSnapshots: manager,
                 expectsObservationStart: true),
             arguments: ToolArguments(raw: ["web_focus": true]))
 
@@ -583,16 +654,19 @@ struct MCPToolSnapshotMutationTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = DesktopMutationWatermarkStore(directoryURL: root)
         let snapshots = InMemorySnapshotManager(desktopMutationWatermarkStore: store)
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let snapshotID = "superseded-host-observation"
-        let context = await MCPToolTestHelpers.makeContext(snapshots: snapshots)
+        let context = await MCPToolTestHelpers.makeContext(
+            snapshots: snapshots,
+            snapshotOwner: manager.owner)
 
         let response = try await context.execute(
             tool: StubMCPTool(
                 name: "see",
                 responseSnapshotID: snapshotID,
                 createdUISnapshotID: snapshotID,
+                uiSnapshots: manager,
                 expectsObservationStart: true,
                 completionWatermarkStore: store,
                 newerWatermarkAfterCompletion: true),
@@ -606,11 +680,11 @@ struct MCPToolSnapshotMutationTests {
 
     @Test
     func `Successful refresh preserves requested snapshot and failed refresh does not`() async throws {
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
         let snapshot = await manager.createSnapshot(at: Date().addingTimeInterval(-60))
         let snapshotID = await snapshot.id
-        let context = await MCPToolTestHelpers.makeContext()
+        let context = await MCPToolTestHelpers.makeContext(snapshotOwner: manager.owner)
         let arguments = ToolArguments(raw: ["snapshot": snapshotID, "web_focus": true])
 
         _ = try await context.execute(
@@ -649,13 +723,13 @@ struct MCPToolSnapshotMutationTests {
 
     @Test(arguments: ["auto", "foreground"])
     func `Focus-capable image mutation hides snapshots created during execution`(focus: String) async throws {
-        let manager = UISnapshotManager.shared
+        let manager = self.uiSnapshots
         await manager.removeAllSnapshots()
-        let context = await MCPToolTestHelpers.makeContext()
+        let context = await MCPToolTestHelpers.makeContext(snapshotOwner: manager.owner)
         let arguments: [String: Any] = ["capture_focus": focus]
 
         _ = try await context.execute(
-            tool: StubMCPTool(name: "image", createsUISnapshot: true),
+            tool: StubMCPTool(name: "image", createsUISnapshot: true, uiSnapshots: manager),
             arguments: ToolArguments(raw: arguments))
 
         #expect(await manager.getSnapshot(id: nil) == nil)
@@ -828,6 +902,7 @@ private struct StubMCPTool: MCPTool {
     let responseSnapshotID: String?
     let createsUISnapshot: Bool
     let createdUISnapshotID: String?
+    let uiSnapshots: MCPToolUISnapshotStore
     let expectsObservationStart: Bool
     let cancelsCurrentTask: Bool
     let delay: Duration
@@ -850,6 +925,7 @@ private struct StubMCPTool: MCPTool {
         responseSnapshotID: String? = nil,
         createsUISnapshot: Bool = false,
         createdUISnapshotID: String? = nil,
+        uiSnapshots: MCPToolUISnapshotStore = MCPToolUISnapshotStore(owner: .compatibility),
         expectsObservationStart: Bool = false,
         cancelsCurrentTask: Bool = false,
         delay: Duration = .zero,
@@ -863,6 +939,7 @@ private struct StubMCPTool: MCPTool {
         self.responseSnapshotID = responseSnapshotID
         self.createsUISnapshot = createsUISnapshot
         self.createdUISnapshotID = createdUISnapshotID
+        self.uiSnapshots = uiSnapshots
         self.expectsObservationStart = expectsObservationStart
         self.cancelsCurrentTask = cancelsCurrentTask
         self.delay = delay
@@ -881,18 +958,18 @@ private struct StubMCPTool: MCPTool {
             withUnsafeCurrentTask { $0?.cancel() }
         }
         if self.createsUISnapshot {
-            _ = await UISnapshotManager.shared.createSnapshot()
+            _ = await self.uiSnapshots.createSnapshot()
         }
         if let createdUISnapshotID {
             let observationStartedAt = MCPToolContext.snapshotObservationStartedAt
             if self.expectsObservationStart, observationStartedAt == nil {
                 return ToolResponse.error("missing observation start")
             }
-            _ = await UISnapshotManager.shared.createSnapshot(
+            _ = await self.uiSnapshots.createSnapshot(
                 id: createdUISnapshotID,
                 at: observationStartedAt ?? Date(),
                 pending: observationStartedAt != nil)
-            #expect(await UISnapshotManager.shared.getSnapshot(id: nil) == nil)
+            #expect(await self.uiSnapshots.getSnapshot(id: nil) == nil)
         }
         var metadataValues: [String: Value] = [:]
         if let responseSnapshotID {

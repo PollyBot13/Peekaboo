@@ -27,6 +27,7 @@ public struct MCPToolContext: @unchecked Sendable {
     public let snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)?
     public let snapshotExecutionGate: MCPToolSnapshotExecutionGate
     public let executionPolicy: MCPToolExecutionPolicy
+    let uiSnapshots: MCPToolUISnapshotStore
 
     @TaskLocal
     private static var taskOverride: MCPToolContext?
@@ -139,6 +140,7 @@ public struct MCPToolContext: @unchecked Sendable {
         permissionsStatusProvider: (any PermissionsStatusProviding)? = nil,
         snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)? = nil,
         snapshotExecutionGate: MCPToolSnapshotExecutionGate? = nil,
+        snapshotOwner: MCPToolSnapshotOwner = .legacyProcess,
         executionPolicy: MCPToolExecutionPolicy = .unrestricted)
     {
         self.automation = automation
@@ -160,6 +162,7 @@ public struct MCPToolContext: @unchecked Sendable {
         self.snapshotExecutionGate = snapshotExecutionGate
             ?? (agent as? PeekabooAgentService)?.snapshotExecutionGate
             ?? MCPToolSnapshotExecutionGate()
+        self.uiSnapshots = MCPToolUISnapshotStore(owner: snapshotOwner)
         self.executionPolicy = executionPolicy
     }
 
@@ -168,6 +171,7 @@ public struct MCPToolContext: @unchecked Sendable {
         services: any PeekabooServiceProviding,
         snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)? = nil,
         snapshotExecutionGate: MCPToolSnapshotExecutionGate? = nil,
+        snapshotOwner: MCPToolSnapshotOwner = .legacyProcess,
         executionPolicy: MCPToolExecutionPolicy = .unrestricted)
     {
         let resolvedSnapshotExecutionGate = snapshotExecutionGate
@@ -191,6 +195,7 @@ public struct MCPToolContext: @unchecked Sendable {
             permissionsStatusProvider: services,
             snapshotMutationCoordinator: snapshotMutationCoordinator,
             snapshotExecutionGate: resolvedSnapshotExecutionGate,
+            snapshotOwner: snapshotOwner,
             executionPolicy: executionPolicy)
     }
 
@@ -205,7 +210,7 @@ public struct MCPToolContext: @unchecked Sendable {
         if let rejection = MCPToolArgumentValidator.rejection(tool: tool, arguments: arguments) {
             return rejection
         }
-        await UISnapshotManager.shared.synchronizeImplicitLatestInvalidationWatermark(
+        await self.uiSnapshots.synchronizeImplicitLatestInvalidationWatermark(
             self.snapshots.effectiveImplicitLatestInvalidationWatermark)
         let effect = MCPToolSnapshotMutationPolicy.effect(toolName: tool.name, arguments: arguments)
         guard effect != .none else {
@@ -218,16 +223,19 @@ public struct MCPToolContext: @unchecked Sendable {
         try await self.snapshotExecutionGate.acquire()
         do {
             try Task.checkCancellation()
-            if let pendingScope = await self.snapshotExecutionGate.pendingInvalidation() {
-                let retrySucceeded = await self.completeMutation(pendingScope, succeeded: false)
+            if let pending = await self.snapshotExecutionGate.pendingInvalidation() {
+                let retrySucceeded = await self.completeMutation(
+                    pending.scope,
+                    succeeded: false,
+                    uiSnapshots: MCPToolUISnapshotStore(owner: pending.owner))
                 try Task.checkCancellation()
                 guard retrySucceeded else {
                     await self.snapshotExecutionGate.release()
                     return Self.pendingInvalidationResponse(
-                        pendingScope: pendingScope,
+                        pendingScope: pending.scope,
                         blockedToolName: tool.name)
                 }
-                await self.snapshotExecutionGate.clearPendingInvalidation(id: pendingScope.id)
+                await self.snapshotExecutionGate.clearPendingInvalidation(id: pending.scope.id)
             }
         } catch {
             await self.snapshotExecutionGate.release()
@@ -298,13 +306,17 @@ public struct MCPToolContext: @unchecked Sendable {
                     let rollbackSucceeded = await self.completeMutation(completedScope, succeeded: false)
                     try Task.checkCancellation()
                     if !rollbackSucceeded {
-                        await self.snapshotExecutionGate.recordPendingInvalidation(completedScope)
+                        await self.snapshotExecutionGate.recordPendingInvalidation(
+                            completedScope,
+                            owner: self.uiSnapshots.owner)
                     }
                     await self.snapshotExecutionGate.release()
                     return ToolResponse.error("Failed to publish the refreshed UI snapshot")
                 }
 
-                await self.snapshotExecutionGate.recordPendingInvalidation(completedScope)
+                await self.snapshotExecutionGate.recordPendingInvalidation(
+                    completedScope,
+                    owner: self.uiSnapshots.owner)
                 if response.isError {
                     await self.snapshotExecutionGate.release()
                     return response
@@ -322,12 +334,41 @@ public struct MCPToolContext: @unchecked Sendable {
                 let failedScope = scope.completed(at: Date(), preserving: nil)
                 let cleanupSucceeded = await self.completeMutation(failedScope, succeeded: false)
                 if !cleanupSucceeded {
-                    await self.snapshotExecutionGate.recordPendingInvalidation(failedScope)
+                    await self.snapshotExecutionGate.recordPendingInvalidation(
+                        failedScope,
+                        owner: self.uiSnapshots.owner)
                 }
             }
             await self.snapshotExecutionGate.release()
             throw error
         }
+    }
+
+    func releaseSnapshotOwner() async {
+        await self.uiSnapshots.removeOwner()
+    }
+
+    func replacingSnapshotOwner(with owner: MCPToolSnapshotOwner) -> Self {
+        Self(
+            automation: self.automation,
+            menu: self.menu,
+            windows: self.windows,
+            applications: self.applications,
+            dialogs: self.dialogs,
+            dock: self.dock,
+            screenCapture: self.screenCapture,
+            desktopObservation: self.desktopObservation,
+            snapshots: self.snapshots,
+            screens: self.screens,
+            agent: self.agent,
+            permissions: self.permissions,
+            clipboard: self.clipboard,
+            browser: self.browser,
+            permissionsStatusProvider: self.permissionsStatusProvider,
+            snapshotMutationCoordinator: self.snapshotMutationCoordinator,
+            snapshotExecutionGate: self.snapshotExecutionGate,
+            snapshotOwner: owner,
+            executionPolicy: self.executionPolicy)
     }
 
     private struct BackgroundTargetAuthorization {
@@ -403,7 +444,7 @@ public struct MCPToolContext: @unchecked Sendable {
                 toolName: toolName,
                 detail: "background coordinates require an explicit exact snapshot or coordinate_reference"))
         }
-        let mirroredSnapshot = await UISnapshotManager.shared.getSnapshot(id: requestedSnapshotID)
+        let mirroredSnapshot = await self.uiSnapshots.getSnapshot(id: requestedSnapshotID)
         let effectiveSnapshotID = requestedSnapshotID ?? mirroredSnapshot?.id
         guard let effectiveSnapshotID else {
             return refused(self.executionPolicy.unresolvedTargetRejection(
@@ -448,14 +489,9 @@ public struct MCPToolContext: @unchecked Sendable {
                 toolName: toolName,
                 detail: "the tool and automation snapshots disagree about target ownership"))
         }
-        if requestedSnapshotID == nil {
-            let authoritativeLatestID = await self.snapshots.getMostRecentSnapshot()
-            guard authoritativeLatestID == effectiveSnapshotID else {
-                return refused(self.executionPolicy.unresolvedTargetRejection(
-                    toolName: toolName,
-                    detail: "the implicit tool and automation snapshots do not identify the same target"))
-            }
-        }
+        // The in-process implicit latest is session-owned. The authoritative store may be shared by
+        // multiple local or Bridge clients, so its process-wide latest pointer is not evidence about
+        // this session. Exact detection and target receipts above remain the fail-closed authority.
         var pinnedArguments = arguments.rawDictionary
         pinnedArguments["snapshot"] = effectiveSnapshotID
         if coordinateReference != nil {
@@ -600,7 +636,11 @@ public struct MCPToolContext: @unchecked Sendable {
     }
 
     @MainActor
-    private func completeMutation(_ scope: MCPToolSnapshotMutationScope, succeeded: Bool) async -> Bool {
+    private func completeMutation(
+        _ scope: MCPToolSnapshotMutationScope,
+        succeeded: Bool,
+        uiSnapshots: MCPToolUISnapshotStore? = nil) async -> Bool
+    {
         guard scope.effect != .freshObservation else { return true }
         let resolvedScope: MCPToolSnapshotMutationScope
         do {
@@ -633,7 +673,7 @@ public struct MCPToolContext: @unchecked Sendable {
             requestedCutoff,
             sharedWatermark ?? requestedCutoff)
         let preservedSnapshotID = effectiveSucceeded ? resolvedScope.preservedSnapshotID : nil
-        await UISnapshotManager.shared.invalidateImplicitLatestSnapshot(
+        await (uiSnapshots ?? self.uiSnapshots).invalidateImplicitLatestSnapshot(
             through: cutoff,
             preserving: preservedSnapshotID,
             preservedAt: preservedSnapshotID == nil ? nil : resolvedScope.completedAt)
