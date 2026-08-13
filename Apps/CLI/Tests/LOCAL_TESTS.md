@@ -42,6 +42,8 @@ If LaunchServices cannot resolve `Playground` by name, also set `PEEKABOO_PLAYGR
 
 `RUN_AUTOMATION_READ=true` and `RUN_AUTOMATION_ACTIONS=true` select the reusable automation suites used by `test:automation:read` and `test:automation:actions`. `RUN_LOCAL_TESTS=true` enables tests that require locally built companion fixtures or an interactive Aqua session. Do not introduce one-off per-test environment flags; route new tests through these shared selectors.
 
+Tests that read or mutate uncontrolled host state use the shared `PEEKABOO_INCLUDE_AMBIENT_STATE_TESTS=true` selector. Ordinary local and automation-action selectors never imply this consent, and `test:safe` explicitly overrides inherited ambient-state opt-ins. The live clipboard smoke test uses this selector and must only be enabled with fresh authorization to read, replace, and restore the ambient clipboard.
+
 ## Test Categories
 
 ### Screenshot Validation Tests (`ScreenshotValidationTests.swift`)

@@ -3,10 +3,19 @@ import Subprocess
 import Testing
 @testable import PeekabooCLI
 
+@preconcurrency
 enum CLIRuntimeEnvironment {
     static var shouldRunSmokeTests: Bool {
         ProcessInfo.processInfo.environment["RUN_LOCAL_TESTS"] != nil &&
             TestChildProcess.canLocatePeekabooBinary()
+    }
+
+    nonisolated static var runAmbientStateTests: Bool {
+        self.allowsAmbientStateTests(environment: ProcessInfo.processInfo.environment)
+    }
+
+    nonisolated static func allowsAmbientStateTests(environment: [String: String]) -> Bool {
+        environment["PEEKABOO_INCLUDE_AMBIENT_STATE_TESTS"] == "true"
     }
 }
 
@@ -18,6 +27,28 @@ struct CLIRuntimeSmokeTests {
         }
         Issue.record("Build peekaboo (or set PEEKABOO_CLI_BINARY) before running CLI runtime smoke tests.")
         return false
+    }
+
+    @Test
+    func `ambient state tests require explicit opt in`() {
+        #expect(!CLIRuntimeEnvironment.allowsAmbientStateTests(environment: [:]))
+        #expect(!CLIRuntimeEnvironment.allowsAmbientStateTests(environment: [
+            "PEEKABOO_INCLUDE_AMBIENT_STATE_TESTS": "false",
+        ]))
+        #expect(!CLIRuntimeEnvironment.allowsAmbientStateTests(environment: [
+            "PEEKABOO_INCLUDE_AMBIENT_STATE_TESTS": "1",
+        ]))
+        #expect(!CLIRuntimeEnvironment.allowsAmbientStateTests(environment: [
+            "PEEKABOO_INCLUDE_AMBIENT_STATE_TESTS": "TRUE",
+        ]))
+        #expect(!CLIRuntimeEnvironment.allowsAmbientStateTests(environment: [
+            "PEEKABOO_INCLUDE_CLIPBOARD_TESTS": "true",
+            "RUN_AUTOMATION_ACTIONS": "true",
+            "RUN_LOCAL_TESTS": "true",
+        ]))
+        #expect(CLIRuntimeEnvironment.allowsAmbientStateTests(environment: [
+            "PEEKABOO_INCLUDE_AMBIENT_STATE_TESTS": "true",
+        ]))
     }
 
     @Test
@@ -334,7 +365,7 @@ struct CLIRuntimeSmokeTests {
         }
     }
 
-    @Test
+    @Test(.enabled(if: CLIRuntimeEnvironment.runAmbientStateTests))
     func `peekaboo clipboard get JSON includes exact text`() async throws {
         guard Self.ensureLocalRuntimeAvailable() else { return }
         let text = "Peekaboo exact clipboard text \(UUID().uuidString)"
