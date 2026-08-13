@@ -6,9 +6,11 @@ extension PeekabooAgentService {
         "Completion rejected: call `see` successfully before claiming the result of the last UI mutation."
 
     static let completionEvidenceTerminalRejectionPrefix = "Completion rejected: "
+    static let invalidTurnBoundaryReason =
+        "Stopped because tool-result turn-boundary metadata was conflicting or malformed."
 
     static func blocksTerminalBoundary(_ result: AgentToolResult) -> Bool {
-        result.isError || resultEncodesToolFailure(result.result)
+        AgentToolResultSemantics.isFailure(result)
     }
 
     static func classifiedToolResult(
@@ -19,7 +21,7 @@ extension PeekabooAgentService {
         AgentToolResult(
             toolCallId: callID,
             result: value,
-            isError: resultEncodesToolFailure(source))
+            isError: AgentToolResultSemantics.valueEncodesFailure(source))
     }
 
     static func restoredTurnBoundary(from messages: [ModelMessage]) -> AgentTurnBoundary {
@@ -45,10 +47,7 @@ extension PeekabooAgentService {
                 resultsByID.removeValue(forKey: toolCall.id)
             }
             _ = boundary.record(toolName: toolCall.name, arguments: toolCall.arguments)
-            if let toolResult,
-               !toolResult.isError,
-               !Self.resultEncodesToolFailure(toolResult.result)
-            {
+            if let toolResult, !AgentToolResultSemantics.isFailure(toolResult) {
                 boundary.recordSuccessfulCompletion(
                     toolName: toolCall.name,
                     arguments: toolCall.arguments,
@@ -67,14 +66,14 @@ extension PeekabooAgentService {
     }
 
     private static func resultRequiresFreshPerception(_ result: AgentToolResult) -> Bool {
-        guard let json = try? result.result.toJSON(),
-              let payload = json as? [String: Any],
-              let turnBoundary = payload["turn_boundary"] as? [String: Any]
-        else {
-            return false
+        switch AgentToolResultSemantics.normalizedClaims(from: result.result).turnBoundary {
+        case .absent:
+            false
+        case .invalid:
+            true
+        case let .valid(boundary):
+            boundary.disposition == .continueNextStep
         }
-        return turnBoundary["continue_next_step"] as? Bool == true ||
-            turnBoundary["disposition"] as? String == "continue_next_step"
     }
 
     func appendFreshPerceptionTerminalRejection(
@@ -177,5 +176,46 @@ extension PeekabooAgentService {
                 "success": AnyAgentToolValue(bool: false),
             ]),
             isError: true)
+    }
+
+    func turnBoundarySignal(from toolResults: [AgentToolResult]) -> AgentTurnBoundarySignal? {
+        var continuation: AgentTurnBoundarySignal?
+        for toolResult in toolResults {
+            switch self.turnBoundarySignal(from: toolResult) {
+            case let .stopAgent(reason):
+                return .stopAgent(reason: reason)
+            case let .continueNextStep(reason):
+                if continuation == nil {
+                    continuation = .continueNextStep(reason: reason)
+                }
+            case nil:
+                continue
+            }
+        }
+        return continuation
+    }
+
+    func turnBoundarySignal(from toolResult: AgentToolResult) -> AgentTurnBoundarySignal? {
+        switch AgentToolResultSemantics.normalizedClaims(from: toolResult.result).turnBoundary {
+        case .absent:
+            nil
+        case .invalid:
+            .stopAgent(reason: Self.invalidTurnBoundaryReason)
+        case let .valid(boundary):
+            switch boundary.disposition {
+            case .continueNextStep: .continueNextStep(reason: boundary.reason)
+            case .stopAgent: .stopAgent(reason: boundary.reason)
+            }
+        }
+    }
+
+    func turnBoundaryStopReason(from toolResults: [AgentToolResult]) -> String? {
+        guard case let .stopAgent(reason)? = self.turnBoundarySignal(from: toolResults) else { return nil }
+        return reason
+    }
+
+    func turnBoundaryStopReason(from toolResult: AgentToolResult) -> String? {
+        guard case let .stopAgent(reason)? = self.turnBoundarySignal(from: toolResult) else { return nil }
+        return reason
     }
 }

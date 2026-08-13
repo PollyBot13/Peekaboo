@@ -1,4 +1,5 @@
 import Foundation
+import PeekabooFoundation
 import Tachikoma
 
 /// The observable outcome of one provider-emitted tool call.
@@ -25,6 +26,7 @@ public struct AgentExecutionTraceEntry: Sendable, Codable, Equatable {
     public let isError: Bool?
     public let disposition: AgentToolExecutionDisposition
     public let mutationDispatch: AgentMutationDispatchState?
+    public let actionOutcome: DesktopActionOutcome.Projection?
 
     public init(
         id: String,
@@ -33,7 +35,8 @@ public struct AgentExecutionTraceEntry: Sendable, Codable, Equatable {
         result: AnyAgentToolValue?,
         isError: Bool?,
         disposition: AgentToolExecutionDisposition,
-        mutationDispatch: AgentMutationDispatchState? = nil)
+        mutationDispatch: AgentMutationDispatchState? = nil,
+        actionOutcome: DesktopActionOutcome.Projection? = nil)
     {
         self.id = id
         self.name = name
@@ -42,6 +45,7 @@ public struct AgentExecutionTraceEntry: Sendable, Codable, Equatable {
         self.isError = isError
         self.disposition = disposition
         self.mutationDispatch = mutationDispatch
+        self.actionOutcome = actionOutcome
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -52,6 +56,7 @@ public struct AgentExecutionTraceEntry: Sendable, Codable, Equatable {
         case isError
         case disposition
         case mutationDispatch
+        case actionOutcome
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -71,6 +76,7 @@ public struct AgentExecutionTraceEntry: Sendable, Codable, Equatable {
         }
         try container.encode(self.disposition, forKey: .disposition)
         try container.encodeIfPresent(self.mutationDispatch, forKey: .mutationDispatch)
+        try container.encodeIfPresent(self.actionOutcome, forKey: .actionOutcome)
     }
 }
 
@@ -145,10 +151,13 @@ extension AgentExecutionResult {
 private enum AgentExecutionTraceBuilder {
     static func entry(for call: AgentToolCall, result: AgentToolResult?) -> AgentExecutionTraceEntry {
         let isMutatingCall = self.isMutatingToolCall(call)
+        let semanticClaims = result.map {
+            AgentToolResultSemantics.normalizedClaims(from: $0.result)
+        } ?? .empty
         let disposition: AgentToolExecutionDisposition = if let result {
-            if result.result.objectValue?["skipped"]?.boolValue == true {
+            if self.isConsistentPreDispatchSkip(result, claims: semanticClaims) {
                 .skippedBeforeDispatch
-            } else if result.isError || self.resultEncodesFailure(result.result) {
+            } else if AgentToolResultSemantics.isFailure(result) {
                 .executedFailed
             } else {
                 .executedSucceeded
@@ -157,9 +166,9 @@ private enum AgentExecutionTraceBuilder {
             .missingResult
         }
         let mutationDispatch = self.mutationDispatchState(
-            for: result,
             disposition: disposition,
-            isMutatingCall: isMutatingCall)
+            isMutatingCall: isMutatingCall,
+            claims: semanticClaims)
 
         return AgentExecutionTraceEntry(
             id: AgentExecutionTraceSanitizer.identifier(call.id),
@@ -167,27 +176,76 @@ private enum AgentExecutionTraceBuilder {
             arguments: AgentExecutionTraceSanitizer.arguments(call.arguments, toolName: call.name),
             result: result.map {
                 AgentExecutionTraceSanitizer.resultSummary(
-                    $0.result,
-                    mutationDispatch: mutationDispatch)
+                    $0,
+                    mutationDispatch: mutationDispatch,
+                    claims: semanticClaims,
+                    skippedBeforeDispatch: disposition == .skippedBeforeDispatch)
             },
-            isError: result?.isError,
+            isError: result.map(AgentToolResultSemantics.isFailure),
             disposition: disposition,
-            mutationDispatch: mutationDispatch)
+            mutationDispatch: mutationDispatch,
+            actionOutcome: semanticClaims.hasInvalidActionSafetyClaim
+                ? nil
+                : semanticClaims.actionOutcome.projection)
+    }
+
+    private static func isConsistentPreDispatchSkip(
+        _: AgentToolResult,
+        claims: AgentToolResultSemantics.NormalizedClaims) -> Bool
+    {
+        guard claims.boolean("skipped") == .valid(true) else { return false }
+        guard claims.boolean("mutation_dispatched") != .invalid else { return false }
+
+        return switch claims.actionOutcome {
+        case .absent:
+            switch claims.boolean("mutation_dispatched") {
+            case .absent, .valid(false): true
+            case .valid(true), .invalid: false
+            }
+        case let .valid(projection): projection.dispatchState == .none
+        case .invalid: false
+        }
     }
 
     private static func mutationDispatchState(
-        for result: AgentToolResult?,
         disposition: AgentToolExecutionDisposition,
-        isMutatingCall: Bool) -> AgentMutationDispatchState?
+        isMutatingCall: Bool,
+        claims: AgentToolResultSemantics.NormalizedClaims)
+        -> AgentMutationDispatchState?
     {
-        guard isMutatingCall else { return nil }
         if disposition == .skippedBeforeDispatch {
+            return isMutatingCall ? .notDispatched : nil
+        }
+        if case .invalid = claims.boolean("mutation_dispatched") {
+            if case .absent = claims.actionOutcome {
+                return isMutatingCall ? .possiblyDispatched : nil
+            }
+            return .possiblyDispatched
+        }
+        if case let .valid(actionOutcome) = claims.actionOutcome {
+            return switch actionOutcome.dispatchState {
+            case .none: .notDispatched
+            case .dispatched: .dispatched
+            case .mayHaveDispatched: .possiblyDispatched
+            }
+        }
+        if case .invalid = claims.actionOutcome {
+            return .possiblyDispatched
+        }
+        guard isMutatingCall else { return nil }
+        if case .invalid = claims.boolean("skipped") {
+            return .possiblyDispatched
+        }
+        switch claims.boolean("mutation_dispatched") {
+        case .absent:
+            return .possiblyDispatched
+        case .valid(false):
             return .notDispatched
+        case .valid(true):
+            return claims.boolean("skipped") == .valid(true) ? .possiblyDispatched : .dispatched
+        case .invalid:
+            return .possiblyDispatched
         }
-        if let dispatched = result?.result.objectValue?["mutation_dispatched"]?.boolValue {
-            return dispatched ? .dispatched : .notDispatched
-        }
-        return .possiblyDispatched
     }
 
     private static func isMutatingToolCall(_ call: AgentToolCall) -> Bool {
@@ -226,21 +284,6 @@ private enum AgentExecutionTraceBuilder {
             .lowercased()
         return !readOnly.contains(normalizedAction)
     }
-
-    private static func resultEncodesFailure(_ result: AnyAgentToolValue) -> Bool {
-        if let string = result.stringValue {
-            return string.hasPrefix("Error:")
-        }
-        guard let payload = result.objectValue else { return false }
-        if payload["success"]?.boolValue == false {
-            return true
-        }
-        guard let error = payload["error"], !error.isNull else { return false }
-        if let message = error.stringValue {
-            return !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        return true
-    }
 }
 
 private enum AgentExecutionTraceSanitizer {
@@ -249,6 +292,13 @@ private enum AgentExecutionTraceSanitizer {
     private static let maximumNodes = 128
     private static let maximumStringScalars = 256
     private static let maximumTotalStringScalars = 2048
+    private static let unvalidatedOutcomeBooleanFields: Set<String> = [
+        "mutation_dispatched",
+        "requires_fresh_observation",
+        "retry_safe",
+        "skipped",
+        "success",
+    ]
 
     private struct Budget {
         var remainingNodes = AgentExecutionTraceSanitizer.maximumNodes
@@ -269,19 +319,57 @@ private enum AgentExecutionTraceSanitizer {
     }
 
     static func resultSummary(
-        _ result: AnyAgentToolValue,
-        mutationDispatch: AgentMutationDispatchState?) -> AnyAgentToolValue
+        _ result: AgentToolResult,
+        mutationDispatch: AgentMutationDispatchState?,
+        claims: AgentToolResultSemantics.NormalizedClaims,
+        skippedBeforeDispatch: Bool) -> AnyAgentToolValue
     {
-        let summary = self.baseResultSummary(result)
-        guard let mutationDispatch, var object = summary.objectValue else { return summary }
-        object["mutation_dispatch"] = AnyAgentToolValue(string: mutationDispatch.rawValue)
-        if mutationDispatch == .possiblyDispatched, object["retry_safe"]?.boolValue == nil {
-            object["retry_safe"] = AnyAgentToolValue(bool: false)
+        let actionOutcome = claims.actionOutcome.projection
+        let suppressRawOutcomeClaims = switch claims.actionOutcome {
+        case .absent: false
+        case .valid, .invalid: true
+        }
+        let summary = self.baseResultSummary(
+            result.result,
+            claims: claims,
+            suppressRawOutcomeClaims: suppressRawOutcomeClaims,
+            suppressLegacyPresence: actionOutcome?.outcome.isConfirmed == true &&
+                result.failure == nil && !result.isError)
+        guard var object = summary.objectValue else { return summary }
+        let retrySafetyDisputed = mutationDispatch == .possiblyDispatched ||
+            claims.boolean("mutation_dispatched") == .invalid ||
+            claims.boolean("skipped") == .invalid
+        if retrySafetyDisputed {
+            object.removeValue(forKey: "retry_safe")
+        }
+        if let actionOutcome {
+            if claims.boolean("mutation_dispatched") != .invalid {
+                object["mutation_dispatched"] = AnyAgentToolValue(bool: actionOutcome.mutationDispatched)
+            }
+            if claims.boolean("requires_fresh_observation") != .invalid {
+                object["requires_fresh_observation"] = AnyAgentToolValue(
+                    bool: actionOutcome.requiresFreshObservation)
+            }
+            if claims.boolean("retry_safe") != .invalid, !retrySafetyDisputed {
+                object["retry_safe"] = AnyAgentToolValue(bool: actionOutcome.retrySafe)
+            }
+        }
+        if let mutationDispatch {
+            object["mutation_dispatch"] = AnyAgentToolValue(string: mutationDispatch.rawValue)
+        }
+        if skippedBeforeDispatch {
+            object["skipped"] = AnyAgentToolValue(bool: true)
+            object["mutation_dispatched"] = AnyAgentToolValue(bool: false)
         }
         return AnyAgentToolValue(object: object)
     }
 
-    private static func baseResultSummary(_ result: AnyAgentToolValue) -> AnyAgentToolValue {
+    private static func baseResultSummary(
+        _ result: AnyAgentToolValue,
+        claims: AgentToolResultSemantics.NormalizedClaims,
+        suppressRawOutcomeClaims: Bool,
+        suppressLegacyPresence: Bool) -> AnyAgentToolValue
+    {
         if result.isNull {
             return AnyAgentToolValue(object: ["value_type": AnyAgentToolValue(string: "null")])
         }
@@ -335,39 +423,24 @@ private enum AgentExecutionTraceSanitizer {
         var summary: [String: AnyAgentToolValue] = [
             "value_type": AnyAgentToolValue(string: "object"),
         ]
-        for key in publicBooleanFields {
-            if let value = object[key]?.boolValue {
+        let visibleBooleanFields = self.visiblePublicBooleanFields(
+            publicBooleanFields,
+            suppressRawOutcomeClaims: suppressRawOutcomeClaims)
+        for key in visibleBooleanFields {
+            if case let .valid(value) = claims.boolean(key) {
                 summary[key] = AnyAgentToolValue(bool: value)
             }
         }
-        if summary["mutation_dispatched"] == nil, object["skipped"]?.boolValue == true {
-            summary["mutation_dispatched"] = AnyAgentToolValue(bool: false)
-        }
-        if let error = object["error"], !error.isNull {
-            let hasError = error.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ||
-                error.stringValue == nil
-            if hasError {
-                summary["error_present"] = AnyAgentToolValue(bool: true)
-            }
-        }
-        if let reason = object["reason"], !reason.isNull {
-            let hasReason = reason.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ||
-                reason.stringValue == nil
-            if hasReason {
-                summary["reason_present"] = AnyAgentToolValue(bool: true)
-            }
-        }
-        if let boundary = object["turn_boundary"]?.objectValue {
+        self.addLegacyPresenceSummary(
+            claims: claims,
+            suppressLegacyPresence: suppressLegacyPresence,
+            to: &summary)
+        if case let .valid(boundary) = claims.turnBoundary {
             var boundarySummary: [String: AnyAgentToolValue] = [:]
-            for key in ["continue_next_step", "stop_after_current_step"] {
-                if let value = boundary[key]?.boolValue {
-                    boundarySummary[key] = AnyAgentToolValue(bool: value)
-                }
-            }
-            if let disposition = boundary["disposition"]?.stringValue,
-               ["continue_next_step", "stop_agent"].contains(disposition)
-            {
-                boundarySummary["disposition"] = AnyAgentToolValue(string: disposition)
+            boundarySummary["disposition"] = AnyAgentToolValue(string: boundary.disposition.rawValue)
+            boundarySummary["stop_after_current_step"] = AnyAgentToolValue(bool: true)
+            if boundary.disposition == .continueNextStep {
+                boundarySummary["continue_next_step"] = AnyAgentToolValue(bool: true)
             }
             if !boundarySummary.isEmpty {
                 summary["turn_boundary"] = AnyAgentToolValue(object: boundarySummary)
@@ -375,10 +448,32 @@ private enum AgentExecutionTraceSanitizer {
         }
 
         let copiedKeys = Set(publicBooleanFields + ["error", "reason", "turn_boundary"])
-        if !Set(object.keys).isSubset(of: copiedKeys) {
+        if object.count > copiedKeys.count || object.keys.contains(where: { !copiedKeys.contains($0) }) {
             summary["payload_omitted"] = AnyAgentToolValue(bool: true)
         }
         return AnyAgentToolValue(object: summary)
+    }
+
+    private static func addLegacyPresenceSummary(
+        claims: AgentToolResultSemantics.NormalizedClaims,
+        suppressLegacyPresence: Bool,
+        to summary: inout [String: AnyAgentToolValue])
+    {
+        guard !suppressLegacyPresence else { return }
+        if claims.errorPresence == .valid(true) {
+            summary["error_present"] = AnyAgentToolValue(bool: true)
+        }
+        if claims.reasonPresence == .valid(true) {
+            summary["reason_present"] = AnyAgentToolValue(bool: true)
+        }
+    }
+
+    private static func visiblePublicBooleanFields(
+        _ fields: [String],
+        suppressRawOutcomeClaims: Bool) -> [String]
+    {
+        guard suppressRawOutcomeClaims else { return fields }
+        return fields.filter { !self.unvalidatedOutcomeBooleanFields.contains($0) }
     }
 
     private static func sanitizedObject(
