@@ -319,6 +319,14 @@ enum RuntimeHostResolver {
             return await self.finalizeExactBuildScopedResolution(resolved, candidatePlan: candidatePlan)
         }
 
+        if let explicitSocket,
+           !options.permitsExplicitSocketDiagnosticFallback,
+           self.requiredHostFailure(explicitSocket: explicitSocket, options: options) == nil {
+            throw BridgeExplicitSocketUnavailableError(
+                socketPath: NSString(string: explicitSocket).standardizingPath
+            )
+        }
+
         if !prefersExactBuildScopedHost,
            DaemonLaunchPolicy.shouldAutoStartDaemon(options: options, environment: context.environment) {
             let rejectedDefaultSocketOccupant =
@@ -837,6 +845,7 @@ enum RuntimeHostResolver {
             supportsImplicitLatestSnapshotInvalidation: BridgeCapabilityPolicy.supportsImplicitSnapshotInvalidation(
                 for: handshake
             ),
+            supportsSnapshotMutationLeases: BridgeCapabilityPolicy.supportsSnapshotMutationLeases(for: handshake),
             supportsApplicationLaunchOptions: BridgeCapabilityPolicy.supportsApplicationLaunchOptions(for: handshake),
             supportsSafeBackgroundApplicationLaunchNoOp:
             BridgeCapabilityPolicy.supportsSafeBackgroundApplicationLaunchNoOp(for: handshake),
