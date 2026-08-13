@@ -13,9 +13,10 @@ Run the source-controlled harness from the repository root:
 scripts/test-background-computer-use.sh
 ```
 
-It builds the Playground fixture, signs it with the OpenClaw Foundation Developer ID, launches it without activation,
-and samples the app that is already frontmost as the per-row sentinel. It never activates Calculator or restores a
-stale foreground app after the run. It then exercises fresh, exact PID/window snapshots through
+It builds the Playground fixture, signs it with the OpenClaw Foundation Developer ID, and samples the already-frontmost
+app/window as the sentinel. It explicitly foreground-launches the controlled fixture before monitoring, then restores
+and verifies that exact sentinel window. The monitored phase never activates Calculator or restores a stale foreground
+app after the run. It then exercises fresh, exact PID/window snapshots through
 `see` (including AX-only and screenshot-only modes), `capture live`, click by ID and query, `type`, raw-press refusal, `paste`,
 `set-value`, `action`, and Accessibility-only targeted scroll. Stale snapshots and unsupported named AX actions must
 fail nonzero instead of falling back to foreground synthesis. Targeted scroll must report confirmed Accessibility
@@ -32,6 +33,12 @@ post-launch PID to mint ownership or issues a separate unpinned quit that could 
 the target process and intentionally do not claim sibling-window isolation. Fixture windows open through background
 semantic menu actions rather than uncertified raw shortcuts.
 The harness invokes the current CLI directly; it does not use AppleScript or a command runner.
+Certification requires a stamped CLI whose `--version --json` output contains one canonical 40-hex `sourceCommit`.
+Remote certification pins every command to one exact Bridge socket and requires its additive host-identity receipt to
+expose the same source commit. Raw SwiftPM and manual unstamped Xcode builds report `unknown` and are intentionally
+refused for certification. The validated certification report records both stamps and rejects missing or mismatched
+provenance when artifacts are replayed. Every monitored case brackets its command with exact socket, PID, and
+process-generation attestations; a restarted or rebound Bridge host invalidates that case.
 
 Every background case starts only after the 10 ms monitor completes its first sample and publishes a sequence
 heartbeat. After the command and its restoration checks finish, the case waits for that sequence to advance again; an
