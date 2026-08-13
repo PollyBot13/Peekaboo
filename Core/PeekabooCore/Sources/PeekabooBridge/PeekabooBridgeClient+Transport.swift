@@ -7,7 +7,17 @@ extension PeekabooBridgeClient {
         _ request: PeekabooBridgeRequest,
         timeoutSec: TimeInterval? = nil) async throws -> PeekabooBridgeResponse
     {
-        let payload = try self.encoder.encode(request)
+        let explicitlyProjected = if case .projectedAction = request {
+            true
+        } else {
+            false
+        }
+        let expectsProjectedResponse = explicitlyProjected ||
+            (self.actionProjectionEnabled && request.mayMutateDesktop)
+        let wireRequest = expectsProjectedResponse && !explicitlyProjected
+            ? PeekabooBridgeRequest.projectedAction(.init(request: request))
+            : request
+        let payload = try self.encoder.encode(wireRequest)
         let op = request.operation
         let start = Date()
         self.logger.debug("Sending bridge request \(op.rawValue, privacy: .public)")
@@ -34,9 +44,9 @@ extension PeekabooBridgeClient {
             guard request.mayMutateDesktop else {
                 throw failure.underlying
             }
-            throw Self.indeterminateResponseFailure(
-                failure.underlying,
-                operation: op)
+            throw Self.responseLostFailure(
+                operation: op,
+                causeDescription: "\(failure.underlying)")
         }
         guard !responseData.isEmpty else {
             let details = """
@@ -49,33 +59,86 @@ extension PeekabooBridgeClient {
             PEEKABOO_ALLOW_UNSIGNED_SOCKET_CLIENTS=1 for local development.
             """
 
-            throw PeekabooBridgeErrorEnvelope(
-                code: .internalError,
-                message: request.mayMutateDesktop
-                    ? "Bridge host returned no response after \(op.rawValue); outcome is indeterminate; do not retry"
-                    : "Bridge host returned no response",
-                details: details,
-                operationMayHaveCompleted: request.mayMutateDesktop)
+            guard request.mayMutateDesktop else {
+                throw PeekabooBridgeErrorEnvelope(
+                    code: .internalError,
+                    message: "Bridge host returned no response",
+                    details: details)
+            }
+            throw Self.responseLostFailure(
+                operation: op,
+                causeDescription: details)
         }
 
-        let response: PeekabooBridgeResponse
+        let wireResponse: PeekabooBridgeResponse
         do {
-            response = try self.decoder.decode(PeekabooBridgeResponse.self, from: responseData)
+            wireResponse = try self.decoder.decode(PeekabooBridgeResponse.self, from: responseData)
         } catch {
-            let message = request.mayMutateDesktop
-                ? "Bridge host returned an invalid response after \(op.rawValue); " +
-                "outcome is indeterminate; do not retry"
-                : "Bridge host returned an invalid response"
-            throw PeekabooBridgeErrorEnvelope(
-                code: .decodingFailed,
-                message: message,
-                details: "\(error)",
-                operationMayHaveCompleted: request.mayMutateDesktop)
+            guard request.mayMutateDesktop else {
+                throw PeekabooBridgeErrorEnvelope(
+                    code: .decodingFailed,
+                    message: "Bridge host returned an invalid response",
+                    details: "\(error)")
+            }
+            throw Self.responseLostFailure(
+                operation: op,
+                causeDescription: "Bridge response decoding failed: \(error)")
+        }
+        let response = try Self.unwrapResponse(
+            wireResponse,
+            expectsProjectedResponse: expectsProjectedResponse,
+            request: request)
+        if case let .error(envelope) = response,
+           request.mayMutateDesktop
+        {
+            if let failure = envelope.desktopActionFailure {
+                throw failure
+            }
+            if envelope.operationMayHaveCompleted {
+                throw Self.legacyCompletionUnknownFailure(envelope: envelope)
+            }
         }
         let duration = Date().timeIntervalSince(start)
         self.logger.debug(
             "bridge \(op.rawValue, privacy: .public) completed in \(duration, format: .fixed(precision: 3))s")
         return response
+    }
+
+    private nonisolated static func unwrapResponse(
+        _ response: PeekabooBridgeResponse,
+        expectsProjectedResponse: Bool,
+        request: PeekabooBridgeRequest) throws -> PeekabooBridgeResponse
+    {
+        if expectsProjectedResponse {
+            guard case let .projectedAction(payload) = response else {
+                throw self.responseLostFailure(
+                    operation: request.operation,
+                    causeDescription: "A projection-capable Bridge host returned an unwrapped action response")
+            }
+            if case .projectedAction = payload.response {
+                throw Self.responseLostFailure(
+                    operation: request.operation,
+                    causeDescription: "A projection-capable Bridge host returned nested action carriage")
+            }
+            if case let .error(envelope) = payload.response,
+               payload.outcome != envelope.actionOutcome
+            {
+                throw Self.responseLostFailure(
+                    operation: request.operation,
+                    causeDescription: "Bridge action response and error envelope carried contradictory outcomes")
+            }
+            return payload.response
+        }
+
+        guard case .projectedAction = response else { return response }
+        if request.mayMutateDesktop {
+            throw self.responseLostFailure(
+                operation: request.operation,
+                causeDescription: "Bridge host returned unrequested action projection carriage")
+        }
+        throw PeekabooBridgeErrorEnvelope(
+            code: .decodingFailed,
+            message: "Bridge host returned an unexpected projected response")
     }
 
     func sendExpectOK(
@@ -168,22 +231,29 @@ extension PeekabooBridgeClient {
         }
     }
 
-    private nonisolated static func indeterminateResponseFailure(
-        _ error: any Error,
-        operation: PeekabooBridgeOperation) -> PeekabooBridgeErrorEnvelope
+    private nonisolated static func responseLostFailure(
+        operation: PeekabooBridgeOperation,
+        causeDescription: String) -> DesktopActionFailure
     {
-        let code: PeekabooBridgeErrorCode = if let error = error as? POSIXError, error.code == .ETIMEDOUT {
-            .timeout
-        } else {
-            .internalError
-        }
         let message = "Bridge response was lost after \(operation.rawValue) was dispatched; " +
             "outcome is indeterminate; do not retry"
-        return PeekabooBridgeErrorEnvelope(
-            code: code,
+        return DesktopActionFailure.indeterminate(
+            route: .bridge,
+            evidence: .responseLost,
             message: message,
-            details: "\(error)",
-            operationMayHaveCompleted: true)
+            hint: "Observe the target before retrying this operation.",
+            causeDescription: causeDescription)
+    }
+
+    private nonisolated static func legacyCompletionUnknownFailure(
+        envelope: PeekabooBridgeErrorEnvelope) -> DesktopActionFailure
+    {
+        DesktopActionFailure.indeterminate(
+            route: .bridge,
+            evidence: .completionUnknown,
+            message: envelope.message,
+            hint: "Observe the target before retrying this operation.",
+            causeDescription: envelope.details)
     }
 }
 
