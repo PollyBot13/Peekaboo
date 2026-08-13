@@ -91,6 +91,20 @@ enum MCPToolResponseMetadataProjector {
         return fields
     }
 
+    static func metadata(
+        merging base: [String: Value] = [:],
+        outcome: DesktopActionOutcome?) throws -> Value?
+    {
+        var fields = base
+        if let outcome {
+            for key in Self.actionOutcomeKeys {
+                fields.removeValue(forKey: key)
+            }
+            try fields.merge(self.fields(for: outcome.projection)) { _, canonical in canonical }
+        }
+        return fields.isEmpty ? nil : .object(fields)
+    }
+
     static func errorResponse(
         for failure: DesktopActionFailure,
         invalidatedSnapshotID: String?,

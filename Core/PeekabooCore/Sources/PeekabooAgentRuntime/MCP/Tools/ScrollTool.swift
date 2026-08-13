@@ -2,6 +2,7 @@ import Foundation
 import MCP
 import os.log
 import PeekabooAutomation
+import PeekabooAutomationKit
 import PeekabooFoundation
 import TachikomaMCP
 
@@ -61,7 +62,9 @@ public struct ScrollTool: MCPTool {
             let request = try self.parseRequest(arguments: arguments)
             return try await self.performScroll(request: request)
         } catch let error as ScrollToolValidationError {
-            return ToolResponse.error(error.message)
+            return MCPToolResponseMetadataProjector.preDispatchRefusalResponse(
+                message: error.message,
+                reason: error.refusalReason)
         } catch {
             self.logger.error("Scroll execution failed: \(error)")
             return ToolResponse.error("Failed to perform scroll: \(error.localizedDescription)")
@@ -139,8 +142,10 @@ public struct ScrollTool: MCPTool {
         let startTime = Date()
 
         let target = try await self.resolveTargetDescription(request: request)
-        if request.foreground {
+        let setupFocusCompleted: Bool = if request.foreground {
             try await self.focusTargetIfNeeded(target)
+        } else {
+            false
         }
         let serviceRequest = ScrollRequest(
             direction: request.direction,
@@ -150,9 +155,46 @@ public struct ScrollTool: MCPTool {
             delay: request.delay,
             snapshotId: target.snapshotId,
             foreground: request.foreground)
-        try await automation.scroll(serviceRequest)
+        let actionResult: UIAutomationActionResult<Void>
+        do {
+            if let outcomeAutomation = automation as? any UIAutomationActionOutcomeProviding {
+                actionResult = try await outcomeAutomation.scrollWithOutcome(serviceRequest)
+            } else {
+                actionResult = try await UIAutomationActionResult(
+                    payload: automation.scroll(serviceRequest),
+                    outcome: nil)
+            }
+            try MCPDesktopActionFailureHandler.requireConfirmed(
+                actionResult.outcome,
+                operation: "Scroll")
+        } catch let failure as DesktopActionFailure {
+            return try await MCPDesktopActionFailureHandler.response(
+                for: Self.aggregateFailure(failure, setupFocusCompleted: setupFocusCompleted),
+                uiSnapshots: self.context.uiSnapshots,
+                snapshotID: target.snapshotId)
+        } catch {
+            guard setupFocusCompleted else { throw error }
+            let failure = DesktopActionFailure.indeterminate(
+                evidence: .completionUnknown,
+                unitCount: DesktopActionOutcome.DispatchUnitCount(1),
+                message: "Scroll failed after its setup focus completed.",
+                hint: "Observe the target before deciding whether to retry scrolling.",
+                causeDescription: error.localizedDescription)
+            return try await MCPDesktopActionFailureHandler.response(
+                for: failure,
+                uiSnapshots: self.context.uiSnapshots,
+                snapshotID: target.snapshotId)
+        }
 
-        let invalidatedSnapshotId = await self.context.uiSnapshots.invalidateActiveSnapshot(id: target.snapshotId)
+        // A successful window focus has no native receipt. Keep the leaf receipt only when it is the
+        // whole operation; otherwise mirror Press/Type and expose conservative composite semantics.
+        let responseOutcome = setupFocusCompleted ? nil : actionResult.outcome
+        let mutationDispatched = setupFocusCompleted ||
+            (actionResult.outcome?.dispatchState.mutationDispatched ?? true)
+        let invalidatedSnapshotId = await MCPDesktopActionSnapshotInvalidator.invalidate(
+            uiSnapshots: self.context.uiSnapshots,
+            snapshotID: target.snapshotId,
+            mutationDispatched: mutationDispatched)
         let executionTime = Date().timeIntervalSince(startTime)
         let scrollDescription = request.smooth ? "smooth scroll" : "scroll"
         let duration = String(format: "%.2f", executionTime) + "s"
@@ -166,11 +208,18 @@ public struct ScrollTool: MCPTool {
             scrollAmount: Double(request.amount),
             notes: target.description)
         var baseMeta: [String: Value] = [:]
-        if let invalidatedSnapshotId {
-            baseMeta["invalidated_snapshot"] = .string(invalidatedSnapshotId)
+        if setupFocusCompleted {
+            baseMeta["effect"] = .string("unverifiable")
+            baseMeta["mutation_dispatched"] = .bool(true)
+            baseMeta["retry_safe"] = .bool(false)
             baseMeta["requires_fresh_observation"] = .bool(true)
         }
-        let meta = baseMeta.isEmpty ? nil : Value.object(baseMeta)
+        if let invalidatedSnapshotId {
+            baseMeta["invalidated_snapshot"] = .string(invalidatedSnapshotId)
+        }
+        let meta = try MCPToolResponseMetadataProjector.metadata(
+            merging: baseMeta,
+            outcome: responseOutcome)
         return ToolResponse.text(message, meta: ToolEventSummary.merge(summary: summary, into: meta))
     }
 
@@ -187,12 +236,15 @@ public struct ScrollTool: MCPTool {
         }
 
         guard let snapshot = await self.getSnapshot(id: request.snapshotId) else {
-            throw ScrollToolValidationError("No active snapshot. Run 'see' or 'inspect_ui' first to capture UI state.")
+            throw ScrollToolValidationError(
+                "No active snapshot. Run 'see' or 'inspect_ui' first to capture UI state.",
+                refusalReason: .targetUnavailable)
         }
 
         guard let element = await snapshot.getElement(byId: elementId) else {
             throw ScrollToolValidationError(
-                "Element '\(elementId)' not found in current snapshot. Run 'see' or 'inspect_ui' to update UI state.")
+                "Element '\(elementId)' not found in current snapshot. Run 'see' or 'inspect_ui' to update UI state.",
+                refusalReason: .targetUnavailable)
         }
         guard !element.isOCRSemanticEvidence else {
             throw ScrollToolValidationError(OCRSemanticEvidencePolicy.interactionRefusalMessage)
@@ -211,14 +263,41 @@ public struct ScrollTool: MCPTool {
     }
 
     @MainActor
-    private func focusTargetIfNeeded(_ target: ScrollTargetDescription) async throws {
+    private func focusTargetIfNeeded(_ target: ScrollTargetDescription) async throws -> Bool {
         if let windowID = target.windowID {
             try await self.context.windows.focusWindow(target: .windowId(windowID))
+            return true
         } else if let appName = target.appName, let windowTitle = target.windowTitle {
             try await self.context.windows.focusWindow(target: .applicationAndTitle(app: appName, title: windowTitle))
+            return true
         } else if let appName = target.appName {
             try await self.context.windows.focusWindow(target: .application(appName))
+            return true
         }
+        return false
+    }
+
+    private static func aggregateFailure(
+        _ failure: DesktopActionFailure,
+        setupFocusCompleted: Bool) -> DesktopActionFailure
+    {
+        guard setupFocusCompleted else { return failure }
+        let leafUnits: Int? = if let count = failure.outcome.dispatchState.unitCount?.rawValue {
+            count
+        } else if failure.outcome.dispatchState.mutationDispatched {
+            nil
+        } else {
+            0
+        }
+        let unitCount = leafUnits.flatMap { DesktopActionOutcome.DispatchUnitCount(1 + $0) }
+        return .indeterminate(
+            route: failure.outcome.route,
+            delivery: nil,
+            evidence: .completionUnknown,
+            unitCount: unitCount,
+            message: "Scroll failed after its setup focus completed.",
+            hint: "Observe the target before deciding whether to retry scrolling.",
+            causeDescription: failure.localizedDescription)
     }
 }
 
@@ -243,7 +322,13 @@ private struct ScrollTargetDescription {
 
 private struct ScrollToolValidationError: Error {
     let message: String
-    init(_ message: String) {
+    let refusalReason: DesktopActionOutcome.RefusalReason
+
+    init(
+        _ message: String,
+        refusalReason: DesktopActionOutcome.RefusalReason = .invalidRequest)
+    {
         self.message = message
+        self.refusalReason = refusalReason
     }
 }

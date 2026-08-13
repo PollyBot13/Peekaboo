@@ -95,7 +95,7 @@ extension MCPToolExecutionTests {
         let implicitLatest = await UISnapshotManager.shared.getSnapshot(id: nil)
         #expect(preserved != nil)
         #expect(implicitLatest == nil)
-        #expect(MCPResponseMeta.requiresFreshObservation(response))
+        #expect(!MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
     }
 
@@ -142,7 +142,7 @@ extension MCPToolExecutionTests {
         let implicitLatest = await UISnapshotManager.shared.getSnapshot(id: nil)
         #expect(preserved != nil)
         #expect(implicitLatest == nil)
-        #expect(MCPResponseMeta.requiresFreshObservation(response))
+        #expect(!MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
     }
 
@@ -198,8 +198,11 @@ extension MCPToolExecutionTests {
             Issue.record("Expected indeterminate click metadata")
             return
         }
+        #expect(meta["state"] == .string("indeterminate"))
         #expect(meta["mutation_dispatched"] == .bool(true))
         #expect(meta["retry_safe"] == .bool(false))
+        #expect(meta["delivery_mechanism"] == nil)
+        #expect(meta["delivery_mode"] == nil)
         #expect(meta["invalidated_snapshot"] == .string(snapshotId))
         #expect(await UISnapshotManager.shared.getSnapshot(id: snapshotId) != nil)
         #expect(await UISnapshotManager.shared.getSnapshot(id: nil) == nil)
@@ -516,7 +519,7 @@ extension MCPToolExecutionTests {
     }
 
     @Test
-    func `Click tool reports routed background double click as unverifiable`() async throws {
+    func `Click tool does not invent a routed double click outcome for a legacy service`() async throws {
         let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
         let context = await MCPToolTestHelpers.makeContext(automation: automation)
         let snapshot = await UISnapshotManager.shared.createSnapshot()
@@ -560,17 +563,17 @@ extension MCPToolExecutionTests {
             Issue.record("Expected routed click metadata")
             return
         }
-        #expect(meta["verified"] == .bool(false))
-        #expect(meta["effect"] == .string("unverifiable"))
+        #expect(meta["verified"] == nil)
+        #expect(meta["effect"] == nil)
         guard case let .text(text, annotations: _, _meta: _) = response.content.first else {
             Issue.record("Expected routed click text response")
             return
         }
-        #expect(text.contains("effect is unverifiable"))
+        #expect(!text.contains("effect is unverifiable"))
     }
 
     @Test
-    func `Click tool invalidates latest snapshot after coordinate click`() async throws {
+    func `snapshot independent coordinate click invalidates implicit latest`() async throws {
         await UISnapshotManager.shared.removeAllSnapshots()
         let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
         let context = await MCPToolTestHelpers.makeContext(automation: automation)
@@ -618,7 +621,7 @@ extension MCPToolExecutionTests {
         #expect(explicitHistory != nil)
         #expect(latestHistory != nil)
         #expect(implicitLatest == nil)
-        #expect(MCPResponseMeta.requiresFreshObservation(response))
+        #expect(!MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
     }
 
@@ -961,7 +964,7 @@ extension MCPToolExecutionTests {
     }
 
     @Test
-    func `Type tool invalidates latest snapshot after focused typing`() async throws {
+    func `snapshot independent foreground type invalidates implicit latest`() async throws {
         await UISnapshotManager.shared.removeAllSnapshots()
         let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
         let context = await MCPToolTestHelpers.makeContext(automation: automation)
@@ -981,7 +984,7 @@ extension MCPToolExecutionTests {
         let implicitLatest = await UISnapshotManager.shared.getSnapshot(id: nil)
         #expect(preserved != nil)
         #expect(implicitLatest == nil)
-        #expect(MCPResponseMeta.requiresFreshObservation(response))
+        #expect(!MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
     }
 
@@ -1011,12 +1014,12 @@ extension MCPToolExecutionTests {
         #expect(explicitHistory != nil)
         #expect(latestHistory != nil)
         #expect(implicitLatest == nil)
-        #expect(MCPResponseMeta.requiresFreshObservation(response))
+        #expect(!MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
     }
 
     @Test
-    func `Scroll tool invalidates latest snapshot after pointer-position scroll`() async throws {
+    func `snapshot independent pointer scroll invalidates implicit latest`() async throws {
         await UISnapshotManager.shared.removeAllSnapshots()
         let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
         let context = await MCPToolTestHelpers.makeContext(automation: automation)
@@ -1036,7 +1039,7 @@ extension MCPToolExecutionTests {
         let implicitLatest = await UISnapshotManager.shared.getSnapshot(id: nil)
         #expect(preserved != nil)
         #expect(implicitLatest == nil)
-        #expect(MCPResponseMeta.requiresFreshObservation(response))
+        #expect(!MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
     }
 
@@ -1066,7 +1069,7 @@ extension MCPToolExecutionTests {
         #expect(explicitHistory != nil)
         #expect(latestHistory != nil)
         #expect(implicitLatest == nil)
-        #expect(MCPResponseMeta.requiresFreshObservation(response))
+        #expect(!MCPResponseMeta.requiresFreshObservation(response))
         #expect(!MCPResponseMeta.hasRequiresFreshSee(response))
     }
 

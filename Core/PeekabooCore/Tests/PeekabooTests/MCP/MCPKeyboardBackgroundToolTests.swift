@@ -382,7 +382,7 @@ struct MCPKeyboardBackgroundToolTests {
             Issue.record("Expected metadata")
             return
         }
-        #expect(meta["delivery_mode"] == .string("background"))
+        #expect(meta["delivery_mode"] == nil)
         #expect(meta["target_pid"] == .int(111))
     }
 
@@ -443,9 +443,47 @@ struct MCPKeyboardBackgroundToolTests {
         #expect(meta["mutation_dispatched"] == .bool(true))
         #expect(meta["retry_safe"] == .bool(false))
         #expect(meta["characters_typed"] == .null)
+        #expect(meta["delivery_mechanism"] == nil)
+        #expect(meta["delivery_mode"] == nil)
         #expect(meta["invalidated_snapshot"] == .string(snapshotId))
         #expect(await Self.uiSnapshots.getSnapshot(id: snapshotId) != nil)
         #expect(await Self.uiSnapshots.getSnapshot(id: nil) == nil)
+    }
+
+    @Test
+    func `indeterminate typing after focus omits unrepresentable leaf delivery`() async throws {
+        await Self.uiSnapshots.removeAllSnapshots()
+        let automation = await MainActor.run {
+            let automation = MockAutomationService(accessibilityGranted: true)
+            automation.pinnedTypeError = { _ in
+                InputDeliveryIndeterminateError(
+                    operation: .type,
+                    emittedUnitCount: 2,
+                    causeDescription: "typing completion drift")
+            }
+            return automation
+        }
+        let context = await MCPToolTestHelpers.makeContext(
+            automation: automation,
+            snapshotOwner: Self.uiSnapshots.owner)
+        let snapshotId = await self.makeTypingSnapshot(
+            processIdentifier: 115,
+            processStartIdentity: 15)
+
+        let response = try await TypeTool(context: context).execute(arguments: ToolArguments(raw: [
+            "on": "T1",
+            "text": "hello",
+            "snapshot": snapshotId,
+        ]))
+
+        #expect(response.isError)
+        let meta = try #require(response.meta?.objectValue)
+        #expect(meta["state"] == .string("indeterminate"))
+        #expect(meta["dispatched_unit_count"] == .int(3))
+        #expect(meta["characters_typed"] == .int(2))
+        #expect(meta["delivery_mechanism"] == nil)
+        #expect(meta["delivery_mode"] == nil)
+        #expect(meta["invalidated_snapshot"] == .string(snapshotId))
     }
 
     @Test
@@ -484,6 +522,8 @@ struct MCPKeyboardBackgroundToolTests {
         #expect(meta["mutation_dispatched"] == .bool(true))
         #expect(meta["retry_safe"] == .bool(false))
         #expect(meta["characters_typed"] == .null)
+        #expect(meta["delivery_mechanism"] == nil)
+        #expect(meta["dispatched_unit_count"] == .int(1))
         #expect(meta["invalidated_snapshot"] == .string(snapshotId))
     }
 

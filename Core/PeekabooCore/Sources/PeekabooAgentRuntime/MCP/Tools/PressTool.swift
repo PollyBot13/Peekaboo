@@ -2,6 +2,7 @@ import Foundation
 import MCP
 import os.log
 import PeekabooAutomation
+import PeekabooAutomationKit
 import PeekabooFoundation
 import TachikomaMCP
 
@@ -82,20 +83,15 @@ public struct PressTool: MCPTool {
 
     @MainActor
     public func execute(arguments: ToolArguments) async throws -> ToolResponse {
+        var targetFocusCompleted = false
+        var progress = PressSequenceProgress()
+        var failureCompatibility = PressFailureCompatibility.none
         do {
             let chords = try Self.parseChords(arguments: arguments)
-            let count = try arguments.validatedInt("count") ?? 1
-            let delay = try arguments.validatedInt("delay") ?? 100
-            let hold = try arguments.validatedInt("hold") ?? 50
-            guard (1...100).contains(count) else {
-                return ToolResponse.error("count must be between 1 and 100")
-            }
-            guard (0...10000).contains(delay) else {
-                return ToolResponse.error("delay must be between 0 and 10000ms")
-            }
-            guard (0...10000).contains(hold) else {
-                return ToolResponse.error("hold must be between 0 and 10000ms")
-            }
+            let parameters = try Self.executionParameters(arguments: arguments)
+            let count = parameters.count
+            let delay = parameters.delay
+            let hold = parameters.hold
 
             let foreground = arguments.getBool("foreground") == true
             let target = try MCPInteractionTarget(
@@ -105,75 +101,140 @@ public struct PressTool: MCPTool {
                 windowIndex: arguments.validatedInt("window_index"),
                 windowId: arguments.validatedInt("window_id"))
             guard foreground else {
-                return Self.foregroundConsentRefusal()
+                return try Self.foregroundConsentRefusal()
             }
             let resolvedWindowTitle = try await target.resolveWindowTitleIfNeeded(windows: self.context.windows)
-            _ = try await target.focusIfRequested(windows: self.context.windows, onlyWhenTargeted: true)
+            targetFocusCompleted = try await target.focusIfRequested(
+                windows: self.context.windows,
+                onlyWhenTargeted: true) != nil
 
             let startTime = Date()
-            var completed = 0
+            var singleOutcome: DesktopActionOutcome?
             do {
                 for repetition in 0..<count {
                     for (index, chord) in chords.enumerated() {
-                        try await self.context.automation.hotkey(keys: chord.serviceKeys, holdDuration: hold)
-                        completed += 1
+                        if let outcomeAutomation = self.context.automation as? any UIAutomationActionOutcomeProviding {
+                            let result = try await outcomeAutomation.hotkeyWithOutcome(
+                                keys: chord.serviceKeys,
+                                holdDuration: hold)
+                            if let outcome = result.outcome,
+                               let failure = DesktopActionFailure(
+                                   outcome: outcome,
+                                   message: "Raw chord \(chord.displayValue) did not return a confirmed outcome.",
+                                   hint: "Follow the canonical escalation metadata before deciding whether to retry.")
+                            {
+                                throw failure
+                            }
+                            singleOutcome = progress.completedCalls == 0 ? result.outcome : nil
+                            progress.record(outcome: result.outcome)
+                        } else {
+                            try await self.context.automation.hotkey(keys: chord.serviceKeys, holdDuration: hold)
+                            singleOutcome = nil
+                            progress.record(outcome: nil)
+                        }
                         let isLast = repetition == count - 1 && index == chords.count - 1
                         if delay > 0, !isLast {
                             try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
                         }
                     }
                 }
+            } catch let failure as DesktopActionFailure {
+                failureCompatibility = PressFailureCompatibility(
+                    progress: progress,
+                    leafFailure: failure)
+                throw Self.aggregateSequenceFailure(
+                    failure,
+                    progress: progress,
+                    setupFocusCompleted: targetFocusCompleted)
             } catch let error as InputDeliveryIndeterminateError {
-                let cumulativeCount = error.emittedUnitCount.map { completed + $0 }
-                throw InputDeliveryIndeterminateError(
-                    operation: .hotkey,
-                    emittedUnitCount: cumulativeCount,
-                    causeDescription: error.causeDescription)
+                let failure = error.desktopActionFailure(
+                    delivery: .init(mechanism: .globalEvents, mode: .foreground))
+                failureCompatibility = PressFailureCompatibility(
+                    progress: progress,
+                    leafFailure: failure)
+                throw Self.aggregateSequenceFailure(
+                    failure,
+                    progress: progress,
+                    setupFocusCompleted: targetFocusCompleted)
             } catch {
-                guard completed > 0 else { throw error }
-                throw InputDeliveryIndeterminateError(
-                    operation: .hotkey,
-                    emittedUnitCount: completed,
-                    causeDescription: error.localizedDescription)
+                guard progress.dispatchedUnitCount > 0 || targetFocusCompleted else { throw error }
+                let failure = DesktopActionFailure.refused(
+                    reason: .operationUnsupported,
+                    message: error.localizedDescription)
+                failureCompatibility = PressFailureCompatibility(
+                    progress: progress,
+                    leafFailure: failure)
+                throw Self.aggregateSequenceFailure(
+                    failure,
+                    progress: progress,
+                    setupFocusCompleted: targetFocusCompleted)
             }
 
             let display = chords.map(\.displayValue)
             let elapsed = Date().timeIntervalSince(startTime)
-            let message = "\(AgentDisplayTokens.Status.success) Dispatched \(display.joined(separator: " → ")) " +
-                "(\(completed) raw chord\(completed == 1 ? "" : "s")); effect is unverifiable. " +
-                "Observe before continuing. Completed in \(String(format: "%.2f", elapsed))s"
-            let meta: Value = .object([
+            // A sequence has no canonical aggregate contract. Publishing its last leaf receipt would erase
+            // earlier states, so preserve the shipped safety fields until Foundation owns batch composition.
+            let outcome = if progress.completedCalls == 1 && !targetFocusCompleted {
+                singleOutcome
+            } else {
+                progress.aggregateSuccess(setupFocusCompleted: targetFocusCompleted)
+            }
+            let message = Self.responseMessage(
+                display: display,
+                completed: progress.completedCalls,
+                elapsed: elapsed,
+                outcome: outcome,
+                confirmedNoChangeWithoutAggregate: outcome == nil &&
+                    progress.allConfirmedNoChange,
+                targetFocusCompleted: targetFocusCompleted)
+            var baseMeta: [String: Value] = [
                 "keys": .array(display.map(Value.string)),
                 "count": .int(count),
                 "delay": .int(delay),
                 "hold": .int(hold),
-                "total_presses": .int(completed),
-                "delivery_mode": .string("foreground"),
+                "total_presses": .int(progress.completedCalls),
                 "target_pid": .null,
-                "effect": .string("unverifiable"),
-                "mutation_dispatched": .bool(true),
-                "retry_safe": .bool(false),
-                "requires_fresh_observation": .bool(true),
                 "execution_time": .double(elapsed),
-            ])
+            ]
+            if !targetFocusCompleted, progress.dispatchedUnitCount > 0 {
+                baseMeta["delivery_mode"] = .string("foreground")
+            }
+            if outcome == nil, progress.dispatchedUnitCount > 0 || targetFocusCompleted {
+                baseMeta["effect"] = .string("unverifiable")
+                baseMeta["mutation_dispatched"] = .bool(true)
+                baseMeta["retry_safe"] = .bool(false)
+                baseMeta["requires_fresh_observation"] = .bool(true)
+            }
+            if let invalidatedSnapshotID = await self.invalidateSnapshotAfterSuccess(
+                outcome: outcome,
+                progress: progress,
+                targetFocusCompleted: targetFocusCompleted)
+            {
+                baseMeta["invalidated_snapshot"] = .string(invalidatedSnapshotID)
+            }
             let summary = ToolEventSummary(
                 targetApp: target.appIdentifier,
                 windowTitle: resolvedWindowTitle,
                 actionDescription: "Press",
                 waitDurationMs: Double(hold),
                 notes: display.joined(separator: " → "))
+            let meta = try MCPToolResponseMetadataProjector.metadata(merging: baseMeta, outcome: outcome)
             return ToolResponse.text(message, meta: ToolEventSummary.merge(summary: summary, into: meta))
         } catch let error as MCPInteractionTargetError {
-            return ToolResponse.error(error.localizedDescription)
+            return MCPToolResponseMetadataProjector.preDispatchRefusalResponse(
+                message: error.localizedDescription,
+                reason: error.refusalReason)
+        } catch let error as KeyboardChordError {
+            return try Self.invalidRequest(error.localizedDescription)
+        } catch let error as PressToolValidationError {
+            return try Self.invalidRequest(error.message)
+        } catch let error as MCPToolArgumentValueError {
+            return try Self.invalidRequest(error.localizedDescription)
+        } catch let failure as DesktopActionFailure {
+            return try await self.failureResponse(failure, compatibility: failureCompatibility)
         } catch let error as InputDeliveryIndeterminateError {
-            return ToolResponse.error(
-                error.localizedDescription,
-                meta: .object([
-                    "mutation_dispatched": .bool(true),
-                    "retry_safe": .bool(false),
-                    "requires_fresh_observation": .bool(true),
-                    "emitted_units": error.emittedUnitCount.map(Value.int) ?? .null,
-                ]))
+            let failure = error.desktopActionFailure(delivery: nil)
+            return try await self.failureResponse(failure, compatibility: failureCompatibility)
         } catch {
             self.logger.error("Press execution failed: \(error.localizedDescription)")
             return ToolResponse.error(error.localizedDescription)
@@ -200,18 +261,288 @@ public struct PressTool: MCPTool {
         return try [KeyboardChord(parsing: (modifiers + [key]).joined(separator: "+"))]
     }
 
-    private static func foregroundConsentRefusal() -> ToolResponse {
-        let outcome = RawPressPolicy.foregroundConsentRefusal
-        return ToolResponse.error(
-            RawPressPolicy.foregroundConsentRequiredMessage,
-            meta: .object([
-                "code": .string(RawPressPolicy.errorCode.rawValue),
-                "effect": .string(outcome.effect.rawValue),
-                "mutation_dispatched": .bool(outcome.dispatchState.mutationDispatched),
-                "retry_safe": .bool(outcome.retrySafety == .safe),
-                "escalation": .string(outcome.escalation.rawValue),
-                "refusal_reason": .string(outcome.refusalReason?.rawValue ?? "foreground_consent_required"),
-                "hint": .string(RawPressPolicy.foregroundConsentRequiredHint),
-            ]))
+    @MainActor
+    private func invalidateSnapshotAfterSuccess(
+        outcome: DesktopActionOutcome?,
+        progress: PressSequenceProgress,
+        targetFocusCompleted: Bool) async -> String?
+    {
+        let mutationDispatched = outcome?.dispatchState.mutationDispatched ??
+            (progress.dispatchedUnitCount > 0 || targetFocusCompleted)
+        return await MCPDesktopActionSnapshotInvalidator.invalidate(
+            uiSnapshots: self.context.uiSnapshots,
+            snapshotID: nil,
+            mutationDispatched: mutationDispatched)
     }
+
+    @MainActor
+    private func failureResponse(
+        _ failure: DesktopActionFailure,
+        compatibility: PressFailureCompatibility) async throws -> ToolResponse
+    {
+        try await MCPDesktopActionFailureHandler.response(
+            for: failure,
+            uiSnapshots: self.context.uiSnapshots,
+            snapshotID: nil,
+            additionalFields: compatibility.fields)
+    }
+
+    private static func invalidRequest(_ message: String) throws -> ToolResponse {
+        MCPToolResponseMetadataProjector.preDispatchRefusalResponse(
+            message: message,
+            reason: .invalidRequest)
+    }
+
+    private static func executionParameters(arguments: ToolArguments) throws -> PressExecutionParameters {
+        let parameters = try PressExecutionParameters(
+            count: arguments.validatedInt("count") ?? 1,
+            delay: arguments.validatedInt("delay") ?? 100,
+            hold: arguments.validatedInt("hold") ?? 50)
+        guard (1...100).contains(parameters.count) else {
+            throw PressToolValidationError(message: "count must be between 1 and 100")
+        }
+        guard (0...10000).contains(parameters.delay) else {
+            throw PressToolValidationError(message: "delay must be between 0 and 10000ms")
+        }
+        guard (0...10000).contains(parameters.hold) else {
+            throw PressToolValidationError(message: "hold must be between 0 and 10000ms")
+        }
+        return parameters
+    }
+
+    private static func responseMessage(
+        display: [String],
+        completed: Int,
+        elapsed: TimeInterval,
+        outcome: DesktopActionOutcome?,
+        confirmedNoChangeWithoutAggregate: Bool,
+        targetFocusCompleted: Bool) -> String
+    {
+        let sequence = display.joined(separator: " → ")
+        let duration = String(format: "%.2f", elapsed)
+        guard let outcome else {
+            if confirmedNoChangeWithoutAggregate {
+                if targetFocusCompleted {
+                    return "\(AgentDisplayTokens.Status.warning) Completed \(sequence); " +
+                        "all chords confirmed no change. The setup-focus effect is unverifiable; " +
+                        "observe before continuing. Completed in \(duration)s"
+                }
+                return "\(AgentDisplayTokens.Status.success) Completed \(sequence); " +
+                    "all chords confirmed no change in \(duration)s"
+            }
+            return "\(AgentDisplayTokens.Status.success) Dispatched \(sequence) " +
+                "(\(completed) raw chord\(completed == 1 ? "" : "s")); effect is unverifiable. " +
+                "Observe before continuing. Completed in \(duration)s"
+        }
+        return switch outcome.state {
+        case .confirmedChange:
+            "\(AgentDisplayTokens.Status.success) Completed \(sequence); effect confirmed in \(duration)s"
+        case .confirmedNoChange:
+            "\(AgentDisplayTokens.Status.success) Completed \(sequence); confirmed no change in \(duration)s"
+        case .partial:
+            "\(AgentDisplayTokens.Status.warning) Completed \(sequence) with a partial effect in \(duration)s"
+        case .dispatchedUnverified:
+            "\(AgentDisplayTokens.Status.warning) Dispatched \(sequence); effect is unverifiable. " +
+                "Observe before continuing. Completed in \(duration)s"
+        case .suspectedNoop:
+            "\(AgentDisplayTokens.Status.warning) Dispatched \(sequence), but no change was observed. " +
+                "Refresh the target before retrying. Completed in \(duration)s"
+        case .refused:
+            "\(AgentDisplayTokens.Status.failure) \(sequence) was refused before dispatch in \(duration)s"
+        case .indeterminate:
+            "\(AgentDisplayTokens.Status.warning) \(sequence) has an indeterminate outcome. " +
+                "Observe before continuing. Completed in \(duration)s"
+        }
+    }
+
+    static func aggregateSequenceFailure(
+        _ failure: DesktopActionFailure,
+        progress: PressSequenceProgress,
+        setupFocusCompleted: Bool) -> DesktopActionFailure
+    {
+        let completedUnits = progress.dispatchedUnitCount + (setupFocusCompleted ? 1 : 0)
+        guard completedUnits > 0 else { return failure }
+        let failedUnits: Int? = if let count = failure.outcome.dispatchState.unitCount?.rawValue {
+            count
+        } else if failure.outcome.dispatchState.mutationDispatched {
+            nil
+        } else {
+            0
+        }
+        let unitCount = failedUnits.flatMap { DesktopActionOutcome.DispatchUnitCount(completedUnits + $0) }
+        var deliveryIsKnown = !setupFocusCompleted && progress.deliveryIsHomogeneous
+        var delivery = progress.homogeneousDelivery
+        let failureDispatched = failure.outcome.dispatchState.mutationDispatched
+        var routeIsHomogeneous = !setupFocusCompleted && progress.routeIsHomogeneous
+        var aggregateRoute = failure.outcome.route
+        if failureDispatched {
+            if let priorRoute = progress.homogeneousRoute, priorRoute != failure.outcome.route {
+                routeIsHomogeneous = false
+            }
+            if let failureDelivery = failure.outcome.delivery {
+                if progress.dispatchedUnitCount == 0 {
+                    delivery = failureDelivery
+                } else if delivery != failureDelivery {
+                    deliveryIsKnown = false
+                }
+            } else {
+                deliveryIsKnown = false
+            }
+        } else if progress.dispatchedUnitCount > 0,
+                  routeIsHomogeneous,
+                  let priorRoute = progress.homogeneousRoute
+        {
+            aggregateRoute = priorRoute
+        }
+        if !deliveryIsKnown || !routeIsHomogeneous {
+            delivery = nil
+        }
+        if failure.outcome.state == .partial, let delivery, routeIsHomogeneous {
+            return .partial(
+                route: aggregateRoute,
+                delivery: delivery,
+                unitCount: unitCount,
+                message: failure.message,
+                hint: failure.hint,
+                causeDescription: failure.causeDescription)
+        }
+        return .indeterminate(
+            route: aggregateRoute,
+            delivery: delivery,
+            evidence: .completionUnknown,
+            unitCount: unitCount,
+            message: "Press sequence stopped after \(completedUnits) dispatched setup/action unit(s).",
+            hint: "Observe the target before deciding whether to continue the sequence.",
+            causeDescription: failure.localizedDescription)
+    }
+
+    private static func foregroundConsentRefusal() throws -> ToolResponse {
+        MCPToolResponseMetadataProjector.preDispatchRefusalResponse(
+            message: RawPressPolicy.foregroundConsentRequiredMessage,
+            reason: .foregroundConsentRequired,
+            additionalFields: [
+                "code": .string(RawPressPolicy.errorCode.rawValue),
+                "hint": .string(RawPressPolicy.foregroundConsentRequiredHint),
+            ])
+    }
+}
+
+struct PressSequenceProgress {
+    private(set) var completedCalls = 0
+    private(set) var dispatchedUnitCount = 0
+    private(set) var homogeneousRoute: DesktopActionOutcome.Route?
+    private(set) var homogeneousDelivery: DesktopActionOutcome.Delivery?
+    private(set) var routeIsHomogeneous = true
+    private(set) var deliveryIsHomogeneous = true
+    private(set) var allOutcomesProvided = true
+    private(set) var allConfirmedNoChange = true
+    private(set) var outcomeRoute: DesktopActionOutcome.Route?
+    private(set) var outcomeRouteIsHomogeneous = true
+
+    mutating func record(outcome: DesktopActionOutcome?) {
+        self.completedCalls += 1
+        guard let outcome else {
+            self.allOutcomesProvided = false
+            self.allConfirmedNoChange = false
+            return self.recordLegacyDispatch()
+        }
+        if outcome.state != .confirmedNoChange {
+            self.allConfirmedNoChange = false
+        }
+        if let outcomeRoute, outcomeRoute != outcome.route {
+            self.outcomeRouteIsHomogeneous = false
+        } else if self.outcomeRoute == nil {
+            self.outcomeRoute = outcome.route
+        }
+        guard outcome.dispatchState.mutationDispatched else { return }
+
+        let unitCount = outcome.dispatchState.unitCount?.rawValue ?? 1
+        self.dispatchedUnitCount += unitCount
+        let route = outcome.route
+        guard let delivery = outcome.delivery else {
+            self.deliveryIsHomogeneous = false
+            return
+        }
+        if let homogeneousRoute, homogeneousRoute != route {
+            self.routeIsHomogeneous = false
+        } else if self.homogeneousRoute == nil {
+            self.homogeneousRoute = route
+        }
+        if let homogeneousDelivery, homogeneousDelivery != delivery {
+            self.deliveryIsHomogeneous = false
+        } else if self.homogeneousDelivery == nil {
+            self.homogeneousDelivery = delivery
+        }
+    }
+
+    func aggregateSuccess(setupFocusCompleted: Bool) -> DesktopActionOutcome? {
+        guard !setupFocusCompleted,
+              self.completedCalls > 0,
+              self.allOutcomesProvided
+        else { return nil }
+        guard self.dispatchedUnitCount > 0 else {
+            guard self.outcomeRouteIsHomogeneous, let outcomeRoute else { return nil }
+            return .confirmedNoChange(route: outcomeRoute)
+        }
+        guard self.routeIsHomogeneous,
+              let homogeneousRoute,
+              self.deliveryIsHomogeneous,
+              let delivery = self.homogeneousDelivery
+        else { return nil }
+        return .confirmedChange(
+            route: homogeneousRoute,
+            delivery: delivery,
+            unitCount: DesktopActionOutcome.DispatchUnitCount(self.dispatchedUnitCount))
+    }
+
+    private mutating func recordLegacyDispatch() {
+        self.dispatchedUnitCount += 1
+        let route = DesktopActionOutcome.Route.local
+        let delivery = DesktopActionOutcome.Delivery(mechanism: .globalEvents, mode: .foreground)
+        if let homogeneousRoute, homogeneousRoute != route {
+            self.routeIsHomogeneous = false
+        } else if self.homogeneousRoute == nil {
+            self.homogeneousRoute = route
+        }
+        if let homogeneousDelivery, homogeneousDelivery != delivery {
+            self.deliveryIsHomogeneous = false
+        } else if self.homogeneousDelivery == nil {
+            self.homogeneousDelivery = delivery
+        }
+    }
+}
+
+struct PressFailureCompatibility {
+    static let none = PressFailureCompatibility(reportsEmittedUnits: false, emittedUnits: nil)
+
+    let reportsEmittedUnits: Bool
+    let emittedUnits: Int?
+
+    init(progress: PressSequenceProgress, leafFailure: DesktopActionFailure) {
+        let leafDispatched = leafFailure.outcome.dispatchState.mutationDispatched
+        self.reportsEmittedUnits = progress.dispatchedUnitCount > 0 || leafDispatched
+        let knownUnits = progress.dispatchedUnitCount +
+            (leafFailure.outcome.dispatchState.unitCount?.rawValue ?? 0)
+        self.emittedUnits = knownUnits > 0 ? knownUnits : nil
+    }
+
+    private init(reportsEmittedUnits: Bool, emittedUnits: Int?) {
+        self.reportsEmittedUnits = reportsEmittedUnits
+        self.emittedUnits = emittedUnits
+    }
+
+    var fields: [String: Value] {
+        guard self.reportsEmittedUnits else { return [:] }
+        return ["emitted_units": self.emittedUnits.map(Value.int) ?? .null]
+    }
+}
+
+private struct PressExecutionParameters {
+    let count: Int
+    let delay: Int
+    let hold: Int
+}
+
+private struct PressToolValidationError: Error {
+    let message: String
 }
