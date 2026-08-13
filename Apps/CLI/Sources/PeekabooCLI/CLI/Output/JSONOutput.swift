@@ -1,12 +1,7 @@
 import Foundation
+import PeekabooFoundation
 
-nonisolated enum ActionEffect: String, Codable, Sendable {
-    case confirmed
-    case partial
-    case unverifiable
-    case suspectedNoop = "suspected_noop"
-    case refused
-}
+typealias ActionEffect = DesktopActionOutcome.Effect
 
 protocol ActionOutputFormattable {
     var defaultEffect: ActionEffect? { get }
@@ -29,6 +24,7 @@ nonisolated protocol ResultEnvelopeError: Error, Sendable {
     var envelopeHint: String? { get }
     var envelopeRetrySafe: Bool? { get }
     var envelopeMutationDispatched: Bool? { get }
+    var envelopeActionFailure: DesktopActionFailure? { get }
 }
 
 extension ResultEnvelopeError {
@@ -43,32 +39,61 @@ extension ResultEnvelopeError {
     nonisolated var envelopeMutationDispatched: Bool? {
         nil
     }
+
+    nonisolated var envelopeActionFailure: DesktopActionFailure? {
+        nil
+    }
 }
 
-struct ActionRefusalError: LocalizedError, ResultEnvelopeError {
-    let message: String
-    let hint: String?
+struct ActionErrorEnvelopeMetadata {
+    let failure: DesktopActionFailure?
+    let effect: ActionEffect?
+    let retrySafe: Bool?
+    let mutationDispatched: Bool?
+}
 
-    nonisolated var errorDescription: String? {
-        self.message
+func actionErrorEnvelopeMetadata(
+    for error: any Error,
+    isActionCommand: Bool
+) -> ActionErrorEnvelopeMetadata {
+    guard isActionCommand else {
+        return ActionErrorEnvelopeMetadata(
+            failure: nil,
+            effect: nil,
+            retrySafe: nil,
+            mutationDispatched: nil
+        )
     }
 
-    nonisolated var envelopeEffect: ActionEffect? {
-        .refused
-    }
-
-    nonisolated var envelopeHint: String? {
-        self.hint
-    }
+    let envelopeError = error as? any ResultEnvelopeError
+    let failure = (error as? DesktopActionFailure) ?? envelopeError?.envelopeActionFailure
+    return ActionErrorEnvelopeMetadata(
+        failure: failure,
+        effect: failure?.outcome.effect ?? envelopeError?.envelopeEffect,
+        retrySafe: failure.map { $0.outcome.retrySafety == .safe } ?? envelopeError?.envelopeRetrySafe,
+        mutationDispatched: failure?.outcome.dispatchState.mutationDispatched ??
+            envelopeError?.envelopeMutationDispatched
+    )
 }
 
 struct PreDispatchActionError: LocalizedError, ResultEnvelopeError {
-    let message: String
+    let failure: DesktopActionFailure
     let code: ErrorCode
     let hint: String?
 
+    init(
+        message: String,
+        code: ErrorCode,
+        hint: String?,
+        reason: DesktopActionOutcome.RefusalReason
+    ) {
+        self.failure = .refused(reason: reason, message: message)
+        self.code = code
+        self.hint = hint
+    }
+
     nonisolated var errorDescription: String? {
-        self.message
+        self.failure.message
     }
 
     nonisolated var envelopeCode: ErrorCode? {
@@ -76,7 +101,7 @@ struct PreDispatchActionError: LocalizedError, ResultEnvelopeError {
     }
 
     nonisolated var envelopeEffect: ActionEffect? {
-        .refused
+        self.failure.outcome.effect
     }
 
     nonisolated var envelopeHint: String? {
@@ -84,16 +109,21 @@ struct PreDispatchActionError: LocalizedError, ResultEnvelopeError {
     }
 
     nonisolated var envelopeRetrySafe: Bool? {
-        true
+        self.failure.outcome.retrySafety == .safe
     }
 
     nonisolated var envelopeMutationDispatched: Bool? {
-        false
+        self.failure.outcome.dispatchState.mutationDispatched
+    }
+
+    nonisolated var envelopeActionFailure: DesktopActionFailure? {
+        self.failure
     }
 }
 
 enum ResultEnvelopeContext {
     @TaskLocal static var isActionCommand = false
+    @TaskLocal static var isPreDispatchFailure = false
 }
 
 let jsonEncodingFailureEnvelope =
@@ -103,6 +133,7 @@ let jsonEncodingFailureEnvelope =
 struct ResultEnvelope<Payload> {
     let success: Bool
     var effect: ActionEffect?
+    var outcome: DesktopActionOutcome.Projection?
     let data: Payload
     var messages: [String]?
     var debug_logs: [String] = []
@@ -240,39 +271,89 @@ func outputError(
     effect: ActionEffect? = nil,
     retrySafe: Bool? = nil,
     mutationDispatched: Bool? = nil,
+    actionFailure: DesktopActionFailure? = nil,
     logger: Logger
 ) {
-    let response = ResultEnvelope<Empty?>(
+    let response = makeErrorEnvelope(
+        message: message,
+        code: code,
+        hint: hint,
+        details: details,
+        effect: effect,
+        retrySafe: retrySafe,
+        mutationDispatched: mutationDispatched,
+        actionFailure: actionFailure,
+        debugLogs: logger.getDebugLogs()
+    )
+    outputJSONCodable(response, logger: logger)
+}
+
+func makeErrorEnvelope(
+    message: String,
+    code: ErrorCode,
+    hint: String? = nil,
+    details: String? = nil,
+    effect: ActionEffect? = nil,
+    retrySafe: Bool? = nil,
+    mutationDispatched: Bool? = nil,
+    actionFailure: DesktopActionFailure? = nil,
+    debugLogs: [String] = []
+) -> ResultEnvelope<Empty?> {
+    let suppliedOutcome = actionFailure?.outcome.projection
+    let resolvedEffect = suppliedOutcome?.effect ?? effect ??
+        (ResultEnvelopeContext.isActionCommand ? defaultActionErrorEffect(code) : nil)
+    let resolvedOutcome = suppliedOutcome ?? defaultActionRefusalProjection(effect: resolvedEffect, code: code)
+    return ResultEnvelope(
         success: false,
-        effect: effect ?? (ResultEnvelopeContext.isActionCommand ? defaultActionErrorEffect(code) : nil),
+        effect: resolvedOutcome?.effect ?? resolvedEffect,
+        outcome: resolvedOutcome,
         data: nil,
-        debug_logs: logger.getDebugLogs(),
+        debug_logs: debugLogs,
         error: ErrorInfo(
             message: message,
             code: code,
             hint: hint,
             details: details,
-            retrySafe: retrySafe,
-            mutationDispatched: mutationDispatched
+            retrySafe: resolvedOutcome?.retrySafe ?? retrySafe,
+            mutationDispatched: resolvedOutcome?.mutationDispatched ?? mutationDispatched
         )
     )
-    outputJSONCodable(response, logger: logger)
+}
+
+func defaultActionRefusalProjection(
+    effect: ActionEffect?,
+    code: ErrorCode
+) -> DesktopActionOutcome.Projection? {
+    guard ResultEnvelopeContext.isActionCommand,
+          ResultEnvelopeContext.isPreDispatchFailure,
+          effect == .refused,
+          let reason = defaultActionRefusalReason(code)
+    else {
+        return nil
+    }
+    return DesktopActionOutcome.refused(reason: reason).projection
+}
+
+func defaultActionRefusalReason(_ code: ErrorCode) -> DesktopActionOutcome.RefusalReason? {
+    switch code {
+    case .INVALID_ARGUMENT, .VALIDATION_ERROR, .INVALID_INPUT, .AMBIGUOUS_APP_IDENTIFIER,
+         .NO_POINT_SPECIFIED, .INVALID_COORDINATES:
+        .invalidRequest
+    case .PERMISSION_DENIED, .PERMISSION_ERROR_SCREEN_RECORDING, .PERMISSION_ERROR_ACCESSIBILITY,
+         .PERMISSION_ERROR_EVENT_SYNTHESIZING, .PERMISSION_ERROR_APPLESCRIPT:
+        .permissionDenied
+    case .APP_NOT_FOUND, .WINDOW_NOT_FOUND, .ELEMENT_NOT_FOUND,
+         .APPLICATION_NOT_FOUND, .SESSION_NOT_FOUND, .SNAPSHOT_NOT_FOUND, .SNAPSHOT_STALE,
+         .NO_ACTIVE_DIALOG, .MENU_BAR_NOT_FOUND, .MENU_ITEM_NOT_FOUND, .DOCK_NOT_FOUND,
+         .DOCK_LIST_NOT_FOUND, .DOCK_ITEM_NOT_FOUND, .POSITION_NOT_FOUND:
+        .targetUnavailable
+    default:
+        nil
+    }
 }
 
 func defaultActionErrorEffect(_ code: ErrorCode) -> ActionEffect {
-    switch code {
-    case .INVALID_ARGUMENT, .VALIDATION_ERROR, .INVALID_INPUT,
-         .PERMISSION_DENIED, .PERMISSION_ERROR_SCREEN_RECORDING, .PERMISSION_ERROR_ACCESSIBILITY,
-         .PERMISSION_ERROR_EVENT_SYNTHESIZING, .PERMISSION_ERROR_APPLESCRIPT,
-         .APP_NOT_FOUND, .AMBIGUOUS_APP_IDENTIFIER, .WINDOW_NOT_FOUND, .ELEMENT_NOT_FOUND,
-         .APPLICATION_NOT_FOUND, .SESSION_NOT_FOUND, .SNAPSHOT_NOT_FOUND, .SNAPSHOT_STALE,
-         .NO_POINT_SPECIFIED, .INVALID_COORDINATES, .NO_ACTIVE_DIALOG,
-         .MENU_BAR_NOT_FOUND, .MENU_ITEM_NOT_FOUND, .DOCK_NOT_FOUND, .DOCK_LIST_NOT_FOUND,
-         .DOCK_ITEM_NOT_FOUND, .POSITION_NOT_FOUND:
-        .refused
-    default:
-        .unverifiable
-    }
+    defaultActionRefusalReason(code) == nil ? .unverifiable : .refused
 }
 
 struct Empty: Codable {}

@@ -77,13 +77,39 @@ struct ResultEnvelopeTests {
     }
 
     @Test func `safety refusal carries refused effect and explicit hint`() {
-        let error = ActionRefusalError(
+        let error = PreDispatchActionError(
             message: "Background coordinate clicks require a fresh snapshot.",
-            hint: "Use --foreground for explicit global input."
+            code: .VALIDATION_ERROR,
+            hint: "Use --foreground for explicit global input.",
+            reason: .invalidRequest
         )
 
         #expect(error.envelopeEffect == .refused)
         #expect(error.envelopeHint == "Use --foreground for explicit global input.")
+        #expect(error.envelopeRetrySafe == true)
+        #expect(error.envelopeMutationDispatched == false)
+        #expect(error.envelopeActionFailure?.outcome.refusalReason == .invalidRequest)
+    }
+
+    @Test func `action metadata is projected only for action owners`() {
+        let error = PreDispatchActionError(
+            message: "Runtime is incompatible.",
+            code: .CAPTURE_FAILED,
+            hint: "Update the selected host.",
+            reason: .runtimeIncompatible
+        )
+
+        let action = actionErrorEnvelopeMetadata(for: error, isActionCommand: true)
+        #expect(action.failure?.outcome.refusalReason == .runtimeIncompatible)
+        #expect(action.effect == .refused)
+        #expect(action.retrySafe == true)
+        #expect(action.mutationDispatched == false)
+
+        let readOnly = actionErrorEnvelopeMetadata(for: error, isActionCommand: false)
+        #expect(readOnly.failure == nil)
+        #expect(readOnly.effect == nil)
+        #expect(readOnly.retrySafe == nil)
+        #expect(readOnly.mutationDispatched == nil)
     }
 
     @Test func `encoding fallback remains valid JSON`() throws {
@@ -104,6 +130,65 @@ struct ResultEnvelopeTests {
     @Test func `pre-dispatch validation is refused`() {
         #expect(defaultActionErrorEffect(.VALIDATION_ERROR) == .refused)
         #expect(defaultActionErrorEffect(.INTERACTION_FAILED) == .unverifiable)
+        #expect(defaultActionRefusalReason(.AMBIGUOUS_APP_IDENTIFIER) == .invalidRequest)
+    }
+
+    @Test func `action validation derives one canonical zero-dispatch refusal`() {
+        let envelope = ResultEnvelopeContext.$isActionCommand.withValue(true) {
+            ResultEnvelopeContext.$isPreDispatchFailure.withValue(true) {
+                makeErrorEnvelope(message: "Invalid coordinates", code: .VALIDATION_ERROR)
+            }
+        }
+
+        #expect(envelope.effect == .refused)
+        #expect(envelope.outcome?.state == .refused)
+        #expect(envelope.outcome?.refusalReason == .invalidRequest)
+        #expect(envelope.outcome?.retrySafe == true)
+        #expect(envelope.outcome?.mutationDispatched == false)
+        #expect(envelope.outcome?.requiresFreshObservation == false)
+        #expect(envelope.error?.retry_safe == true)
+        #expect(envelope.error?.mutation_dispatched == false)
+    }
+
+    @Test func `stale action target derives a canonical target refusal`() {
+        let envelope = ResultEnvelopeContext.$isActionCommand.withValue(true) {
+            ResultEnvelopeContext.$isPreDispatchFailure.withValue(true) {
+                makeErrorEnvelope(message: "Snapshot is stale", code: .SNAPSHOT_STALE)
+            }
+        }
+
+        #expect(envelope.outcome?.refusalReason == .targetUnavailable)
+        #expect(envelope.outcome?.escalation == .refreshTarget)
+        #expect(envelope.outcome?.requiresFreshObservation == false)
+    }
+
+    @Test func `read-only validation does not acquire an action outcome`() {
+        let envelope = ResultEnvelopeContext.$isActionCommand.withValue(false) {
+            ResultEnvelopeContext.$isPreDispatchFailure.withValue(true) {
+                makeErrorEnvelope(message: "Invalid read request", code: .VALIDATION_ERROR)
+            }
+        }
+
+        #expect(envelope.effect == nil)
+        #expect(envelope.outcome == nil)
+        #expect(envelope.error?.retry_safe == nil)
+        #expect(envelope.error?.mutation_dispatched == nil)
+    }
+
+    @Test func `runtime error code cannot overwrite a dispatched receipt`() {
+        let envelope = ResultEnvelopeContext.$isActionCommand.withValue(true) {
+            makeErrorEnvelope(
+                message: "Validation failed after dispatch",
+                code: .VALIDATION_ERROR,
+                retrySafe: false,
+                mutationDispatched: true
+            )
+        }
+
+        #expect(envelope.effect == .refused)
+        #expect(envelope.outcome == nil)
+        #expect(envelope.error?.retry_safe == false)
+        #expect(envelope.error?.mutation_dispatched == true)
     }
 
     @Test @MainActor func `clipboard reads omit action effect`() {
