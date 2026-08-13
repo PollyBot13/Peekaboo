@@ -13,6 +13,18 @@ struct CommanderBinderProgramResolutionTests {
             commanderErrorMessage(.duplicateSubcommand(command: "window manage", name: "move")) ==
                 "Duplicate subcommand 'move' for command 'window manage'"
         )
+        #expect(
+            commanderErrorMessage(.invalidDefaultSubcommand(command: "window", name: "inspect")) ==
+                "Default subcommand 'inspect' is not registered for command 'window'"
+        )
+        #expect(
+            commanderErrorMessage(.invalidCommandSignature(
+                command: "see",
+                error: .conflictingName(spelling: "--json", optionLabel: "json", flagLabel: "jsonOutput")
+            )) ==
+                "Invalid signature for command 'see': " +
+                "Conflicting spelling --json for option 'json' and flag 'jsonOutput'"
+        )
     }
 
     @Test
@@ -243,7 +255,8 @@ struct CommanderBinderProgramResolutionTests {
         let values = invocation.parsedValues
         #expect(invocation.path == ["capture", "action"])
         #expect(values.options["durationLimit"] == ["3"])
-        #expect(values.options["command"] == ["echo", "hello", "--flag"])
+        #expect(values.positional == ["echo", "hello", "--flag"])
+        #expect(values.options["command"] == nil)
     }
 
     @Test

@@ -29,19 +29,25 @@ struct CommanderRegistryDefinitionTests {
         for descriptor in descriptors {
             let commandPath = path + [descriptor.metadata.name]
             do {
-                _ = try CommandParser(signature: descriptor.metadata.signature).parse(arguments: [])
-            } catch let error as CommanderError {
+                try descriptor.metadata.signature.validate()
+            } catch {
                 switch error {
                 case .invalidArgumentOrder,
+                     .requiredArgumentAfterOptional,
+                     .duplicateArgumentLabel,
+                     .duplicateOptionLabel,
+                     .duplicateFlagLabel,
                      .duplicateOptionName,
                      .duplicateFlagName,
                      .conflictingName:
                     failures.append("\(commandPath.joined(separator: " ")): \(error.description)")
-                default:
-                    break
+                case .unknownOption,
+                     .missingValue,
+                     .missingArgument,
+                     .unexpectedArgument,
+                     .invalidValue:
+                    failures.append("\(commandPath.joined(separator: " ")): \(error.description)")
                 }
-            } catch {
-                failures.append("\(commandPath.joined(separator: " ")): \(error.localizedDescription)")
             }
             Self.validateSignatures(descriptor.subcommands, path: commandPath, failures: &failures)
         }
