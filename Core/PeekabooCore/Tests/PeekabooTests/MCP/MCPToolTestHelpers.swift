@@ -1,4 +1,7 @@
 import PeekabooAutomationKit
+import PeekabooFoundation
+import TachikomaMCP
+import Testing
 @testable import PeekabooAgentRuntime
 @testable import PeekabooAutomation
 @testable import PeekabooCore
@@ -15,7 +18,7 @@ enum MCPToolTestHelpers {
         permissionsStatusProvider: (any PermissionsStatusProviding)? = nil,
         snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)? = nil,
         snapshotExecutionGate: MCPToolSnapshotExecutionGate = MCPToolSnapshotExecutionGate(),
-        snapshotOwner: MCPToolSnapshotOwner = .compatibility,
+        snapshotOwner: MCPToolSnapshotOwner = MCPToolSnapshotOwner(),
         executionPolicy: MCPToolExecutionPolicy = .unrestricted,
         exactWindowMetadataProvider: any ExactWindowMetadataProviding = SystemExactWindowMetadataProvider()) async
         -> MCPToolContext
@@ -51,6 +54,67 @@ enum MCPToolTestHelpers {
                 snapshotOwner: snapshotOwner,
                 executionPolicy: executionPolicy)
         }
+    }
+
+    /// Builds a context against the process-compatibility snapshot namespace.
+    ///
+    /// Tests should use this only when the compatibility contract is the behavior under test. Ordinary tests receive
+    /// a fresh owner from ``makeContext`` so implicit snapshots cannot leak between cases.
+    static func makeLegacyContext(
+        automation: (any UIAutomationServiceProtocol)? = nil,
+        screenCapture: (any ScreenCaptureServiceProtocol)? = nil,
+        applications: (any ApplicationServiceProtocol)? = nil,
+        windows: (any WindowManagementServiceProtocol)? = nil,
+        screens: (any ScreenServiceProtocol)? = nil,
+        clipboard: (any ClipboardServiceProtocol)? = nil,
+        snapshots: (any SnapshotManagerProtocol)? = nil,
+        permissionsStatusProvider: (any PermissionsStatusProviding)? = nil,
+        snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)? = nil,
+        snapshotExecutionGate: MCPToolSnapshotExecutionGate = MCPToolSnapshotExecutionGate(),
+        executionPolicy: MCPToolExecutionPolicy = .unrestricted,
+        exactWindowMetadataProvider: any ExactWindowMetadataProviding = SystemExactWindowMetadataProvider()) async
+        -> MCPToolContext
+    {
+        await self.makeContext(
+            automation: automation,
+            screenCapture: screenCapture,
+            applications: applications,
+            windows: windows,
+            screens: screens,
+            clipboard: clipboard,
+            snapshots: snapshots,
+            permissionsStatusProvider: permissionsStatusProvider,
+            snapshotMutationCoordinator: snapshotMutationCoordinator,
+            snapshotExecutionGate: snapshotExecutionGate,
+            snapshotOwner: .legacyProcess,
+            executionPolicy: executionPolicy,
+            exactWindowMetadataProvider: exactWindowMetadataProvider)
+    }
+
+    static func expectCanonicalOutcomeMetadata(
+        _ outcome: DesktopActionOutcome,
+        in response: ToolResponse,
+        sourceLocation: SourceLocation = #_sourceLocation) throws
+    {
+        let expected = try MCPToolResponseMetadataProjector.fields(for: outcome.projection)
+        let actual = try #require(response.meta?.objectValue, sourceLocation: sourceLocation)
+        for (key, value) in expected {
+            #expect(
+                actual[key] == value,
+                "Canonical field \(key) was not preserved",
+                sourceLocation: sourceLocation)
+        }
+    }
+
+    static func expectCanonicalRefusalMetadata(
+        reason: DesktopActionOutcome.RefusalReason,
+        in response: ToolResponse,
+        sourceLocation: SourceLocation = #_sourceLocation) throws
+    {
+        try self.expectCanonicalOutcomeMetadata(
+            .refused(reason: reason),
+            in: response,
+            sourceLocation: sourceLocation)
     }
 
     static func withContext<T>(
