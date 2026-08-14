@@ -11,30 +11,44 @@ public struct RemoteDialogCapabilities: Sendable {
     public let prepareAction: Bool
     public let exactClick: Bool
     public let exactDismiss: Bool
+    public let exactInput: Bool
+    public let exactForceDismiss: Bool
+    public let legacyInputFocusPolicy: Bool
 
     public init(
         backgroundButtonClick: Bool = false,
         targetedList: Bool = false,
         prepareAction: Bool = false,
         exactClick: Bool = false,
-        exactDismiss: Bool = false)
+        exactDismiss: Bool = false,
+        exactInput: Bool = false,
+        exactForceDismiss: Bool = false,
+        legacyInputFocusPolicy: Bool = false)
     {
         self.backgroundButtonClick = backgroundButtonClick
         self.targetedList = targetedList
         self.prepareAction = prepareAction
         self.exactClick = exactClick
         self.exactDismiss = exactDismiss
+        self.exactInput = exactInput
+        self.exactForceDismiss = exactForceDismiss
+        self.legacyInputFocusPolicy = legacyInputFocusPolicy
     }
 }
 
 @MainActor
 public final class RemoteDialogService: DialogServiceProtocol {
+    public let foregroundOutcomeRoute = DesktopActionOutcome.Route.bridge
+
     private let client: PeekabooBridgeClient
     private let supportsBackgroundButtonClick: Bool
     private let supportsTargetedList: Bool
     private let supportsPrepareAction: Bool
     private let supportsExactClick: Bool
     private let supportsExactDismiss: Bool
+    private let supportsExactInput: Bool
+    private let supportsExactForceDismiss: Bool
+    private let supportsLegacyInputFocusPolicy: Bool
 
     public convenience init(client: PeekabooBridgeClient, supportsBackgroundButtonClick: Bool) {
         self.init(
@@ -52,6 +66,9 @@ public final class RemoteDialogService: DialogServiceProtocol {
         self.supportsPrepareAction = capabilities.prepareAction
         self.supportsExactClick = capabilities.exactClick
         self.supportsExactDismiss = capabilities.exactDismiss
+        self.supportsExactInput = capabilities.exactInput
+        self.supportsExactForceDismiss = capabilities.exactForceDismiss
+        self.supportsLegacyInputFocusPolicy = capabilities.legacyInputFocusPolicy
     }
 
     public func findActiveDialog(windowTitle: String?, appName: String?) async throws -> DialogInfo {
@@ -98,6 +115,38 @@ public final class RemoteDialogService: DialogServiceProtocol {
             appName: appName)
     }
 
+    public func enterText(_ request: DialogInputExecutionRequest) async throws -> DialogActionResult {
+        guard self.supportsExactInput else {
+            throw Self.capabilityRefusal(
+                "Remote host does not advertise atomic exact dialog input; no input was sent.",
+                minimumProtocol: "1.27")
+        }
+        do {
+            return try await self.client.exactDialogEnterText(request)
+        } catch let failure as DesktopActionFailure {
+            throw failure
+        } catch let envelope as PeekabooBridgeErrorEnvelope {
+            throw Self.inputActionFailure(for: envelope)
+        }
+    }
+
+    public func enterText(_ request: DialogLegacyInputExecutionRequest) async throws -> DialogActionResult {
+        guard self.supportsLegacyInputFocusPolicy else {
+            if request.focus == DialogForegroundFocusPolicy() {
+                return try await self.client.dialogEnterText(
+                    text: request.text,
+                    fieldIdentifier: request.fieldIdentifier,
+                    clearExisting: request.clearExisting,
+                    windowTitle: request.windowTitle,
+                    appName: request.appName)
+            }
+            throw Self.capabilityRefusal(
+                "Remote host cannot preserve the targetless dialog focus policy; no input was sent.",
+                minimumProtocol: "1.28")
+        }
+        return try await self.client.dialogEnterText(request)
+    }
+
     public func handleFileDialog(
         path: String?,
         filename: String?,
@@ -116,6 +165,21 @@ public final class RemoteDialogService: DialogServiceProtocol {
 
     public func dismissDialog(force: Bool, windowTitle: String?, appName: String?) async throws -> DialogActionResult {
         try await self.client.dialogDismiss(force: force, windowTitle: windowTitle, appName: appName)
+    }
+
+    public func forceDismissDialog(_ request: DialogForcedDismissExecutionRequest) async throws -> DialogActionResult {
+        guard self.supportsExactForceDismiss else {
+            throw Self.capabilityRefusal(
+                "Remote host does not advertise atomic exact forced dialog dismissal; no Escape was sent.",
+                minimumProtocol: "1.28")
+        }
+        do {
+            return try await self.client.exactDialogForceDismiss(request)
+        } catch let failure as DesktopActionFailure {
+            throw failure
+        } catch let envelope as PeekabooBridgeErrorEnvelope {
+            throw Self.inputActionFailure(for: envelope)
+        }
     }
 
     public func listDialogElements(windowTitle: String?, appName: String?) async throws -> DialogElements {
@@ -171,12 +235,15 @@ public final class RemoteDialogService: DialogServiceProtocol {
         }
     }
 
-    private static func capabilityRefusal(_ message: String) -> DesktopActionFailure {
+    private static func capabilityRefusal(
+        _ message: String,
+        minimumProtocol: String = "1.25") -> DesktopActionFailure
+    {
         .preDispatchRefusal(
             route: .bridge,
             reason: .runtimeIncompatible,
             message: message,
-            hint: "Select a protocol 1.25 host advertising the requested dialog operation.")
+            hint: "Select a protocol \(minimumProtocol) host advertising the requested dialog operation.")
     }
 
     static func preDispatchFailure(for envelope: PeekabooBridgeErrorEnvelope) -> DesktopActionFailure {
@@ -209,6 +276,20 @@ public final class RemoteDialogService: DialogServiceProtocol {
             unitCount: .one,
             message: envelope.message,
             hint: "Observe the dialog before retrying; the exact action may already have completed.",
+            causeDescription: envelope.details)
+    }
+
+    static func inputActionFailure(for envelope: PeekabooBridgeErrorEnvelope) -> DesktopActionFailure {
+        guard envelope.operationMayHaveCompleted else {
+            return self.preDispatchFailure(for: envelope)
+        }
+        return .indeterminate(
+            route: .bridge,
+            delivery: .init(mechanism: .globalEvents, mode: .foreground),
+            evidence: .completionUnknown,
+            unitCount: nil,
+            message: envelope.message,
+            hint: "Observe the dialog before retrying; the exact input may already have been delivered.",
             causeDescription: envelope.details)
     }
 }

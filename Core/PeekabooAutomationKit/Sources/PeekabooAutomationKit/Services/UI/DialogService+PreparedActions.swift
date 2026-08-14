@@ -188,6 +188,16 @@ extension DialogService {
         let readable: Bool
     }
 
+    struct DialogTargetRevalidationObservation {
+        let applicationIdentity: ApplicationProcessIdentity?
+        let windowIdentity: WindowMutationIdentity?
+        let windowBounds: CGRect?
+        let retainedWindowMatches: Bool
+        let hierarchyReadable: Bool
+        let structuralDialogCount: Int
+        let retainedDialogMatches: Bool
+    }
+
     static let backgroundDialogDelivery = DesktopActionOutcome.Delivery(
         mechanism: .accessibilityAction,
         mode: .background)
@@ -314,27 +324,38 @@ extension DialogService {
     }
 
     func targetApplication(for selector: DialogTargetSelector) async throws -> ServiceApplicationInfo {
-        let application: ServiceApplicationInfo
-        if let processIdentifier = selector.processIdentifier {
-            application = try await self.applicationService.findApplication(
-                identifier: "PID:\(processIdentifier)")
-            guard application.processIdentifier == processIdentifier else {
-                throw self.targetUnavailable("The selected PID no longer identifies the same application.")
+        do {
+            let application: ServiceApplicationInfo
+            if let processIdentifier = selector.processIdentifier {
+                application = try await self.applicationService.findApplication(
+                    identifier: "PID:\(processIdentifier)")
+                guard application.processIdentifier == processIdentifier else {
+                    throw self.targetUnavailable("The selected PID no longer identifies the same application.")
+                }
+            } else if let identifier = selector.applicationIdentifier {
+                application = try await self.applicationService.findApplication(identifier: identifier)
+            } else if let windowID = selector.windowID,
+                      let handle = self.windowIdentityService.findWindow(
+                          byID: CGWindowID(windowID),
+                          messagingTimeout: self.targetedDialogSearchTimeout),
+                      let ownerPID = handle.element.pid()
+            {
+                application = try await self.applicationService.findApplication(
+                    identifier: "PID:\(ownerPID)")
+            } else {
+                throw self.targetUnavailable("The selected dialog window could not be resolved to one owner.")
             }
-        } else if let identifier = selector.applicationIdentifier {
-            application = try await self.applicationService.findApplication(identifier: identifier)
-        } else if let windowID = selector.windowID,
-                  let handle = self.windowIdentityService.findWindow(
-                      byID: CGWindowID(windowID),
-                      messagingTimeout: self.targetedDialogSearchTimeout),
-                  let ownerPID = handle.element.pid()
-        {
-            application = try await self.applicationService.findApplication(
-                identifier: "PID:\(ownerPID)")
-        } else {
-            throw self.targetUnavailable("The selected dialog window could not be resolved to one owner.")
+            return application
+        } catch let failure as DesktopActionFailure {
+            throw failure
+        } catch let error as PeekabooError {
+            switch error {
+            case .appNotFound, .ambiguousAppIdentifier, .windowNotFound:
+                throw self.targetUnavailable("Dialog target owner is unavailable: \(error.localizedDescription)")
+            default:
+                throw error
+            }
         }
-        return application
     }
 
     func filteredDialogWindows(
@@ -410,37 +431,13 @@ extension DialogService {
     }
 
     func revalidatePreparedAction(_ entry: DialogPreparedActionStore.Entry) async throws {
-        let expected = entry.receipt.target
-        let application = try await self.applicationService.findApplication(
-            identifier: "PID:\(expected.identity.ownerProcessIdentifier)")
-        guard application.processIdentity == expected.identity.processIdentity else {
-            throw self.targetUnavailable("Dialog owner changed process generation before AXPress.")
-        }
+        try await self.revalidateDialogTarget(
+            target: entry.receipt.target,
+            retainedWindow: entry.window,
+            retainedDialog: entry.dialog,
+            operation: "AXPress")
 
-        let response = try await self.applicationService.listWindows(
-            for: "PID:\(expected.identity.ownerProcessIdentifier)",
-            timeout: self.targetedDialogSearchTimeout)
-        guard let window = response.data.windows.first(where: { $0.windowID == expected.identity.windowID }),
-              let identity = window.mutationIdentity,
-              identity.hasSameStableReceipt(as: expected.identity),
-              window.bounds == expected.bounds,
-              let currentWindow = self.windowIdentityService.findWindow(
-                  byID: CGWindowID(expected.identity.windowID),
-                  messagingTimeout: self.targetedDialogSearchTimeout),
-              Self.sameElement(currentWindow.element, entry.window)
-        else {
-            throw self.targetUnavailable("Dialog window receipt changed before AXPress.")
-        }
-
-        let freshDialogs = self.freshDialogElements(in: currentWindow.element)
-        guard freshDialogs.readable,
-              freshDialogs.structural.count == 1,
-              let dialog = freshDialogs.structural.first,
-              Self.sameElement(dialog, entry.dialog)
-        else {
-            throw self.targetUnavailable("Prepared dialog or sheet changed before AXPress.")
-        }
-        let buttons = self.semanticButtons(in: dialog, request: entry.request)
+        let buttons = self.semanticButtons(in: entry.dialog, request: entry.request)
         guard buttons.count == 1,
               let button = buttons.first,
               Self.sameElement(button, entry.button),
@@ -449,6 +446,66 @@ extension DialogService {
             throw self.targetUnavailable("Prepared dialog button changed or became ambiguous before AXPress.")
         }
         try Task.checkCancellation()
+    }
+
+    @discardableResult
+    func revalidateDialogTarget(
+        target expected: UIAutomationTarget.ExactWindow,
+        retainedWindow: Element,
+        retainedDialog: Element,
+        operation: String) async throws -> TargetedDialogCandidate
+    {
+        let application = try await self.applicationService.findApplication(
+            identifier: "PID:\(expected.identity.ownerProcessIdentifier)")
+        guard application.processIdentity == expected.identity.processIdentity else {
+            throw self.targetUnavailable("Dialog owner changed process generation before \(operation).")
+        }
+
+        let response = try await self.applicationService.listWindows(
+            for: "PID:\(expected.identity.ownerProcessIdentifier)",
+            timeout: self.targetedDialogSearchTimeout)
+        let window = response.data.windows.first(where: { $0.windowID == expected.identity.windowID })
+        guard let currentWindow = self.windowIdentityService.findWindow(
+            byID: CGWindowID(expected.identity.windowID),
+            messagingTimeout: self.targetedDialogSearchTimeout)
+        else {
+            throw self.targetUnavailable("Dialog window receipt changed before \(operation).")
+        }
+
+        let freshDialogs = self.freshDialogElements(in: currentWindow.element)
+        guard Self.isValidDialogTargetRevalidation(
+            expected: expected,
+            observation: DialogTargetRevalidationObservation(
+                applicationIdentity: application.processIdentity,
+                windowIdentity: window?.mutationIdentity,
+                windowBounds: window?.bounds,
+                retainedWindowMatches: Self.sameElement(currentWindow.element, retainedWindow),
+                hierarchyReadable: freshDialogs.readable,
+                structuralDialogCount: freshDialogs.structural.count,
+                retainedDialogMatches: freshDialogs.structural.first.map {
+                    Self.sameElement($0, retainedDialog)
+                } ?? false))
+        else {
+            throw self.targetUnavailable("Prepared dialog or sheet changed before \(operation).")
+        }
+        try Task.checkCancellation()
+        return TargetedDialogCandidate(
+            target: expected,
+            window: currentWindow.element,
+            dialog: freshDialogs.structural[0])
+    }
+
+    static func isValidDialogTargetRevalidation(
+        expected: UIAutomationTarget.ExactWindow,
+        observation: DialogTargetRevalidationObservation) -> Bool
+    {
+        observation.applicationIdentity == expected.identity.processIdentity &&
+            observation.windowIdentity?.hasSameStableReceipt(as: expected.identity) == true &&
+            observation.windowBounds == expected.bounds &&
+            observation.retainedWindowMatches &&
+            observation.hierarchyReadable &&
+            observation.structuralDialogCount == 1 &&
+            observation.retainedDialogMatches
     }
 
     func verifyPreparedDialogPresence(_ entry: DialogPreparedActionStore.Entry) async -> DialogPresence {
@@ -487,7 +544,13 @@ extension DialogService {
     }
 
     func preparedDialogPresence(_ entry: DialogPreparedActionStore.Entry) -> DialogPresence {
-        let expected = entry.receipt.target
+        self.dialogPresence(target: entry.receipt.target, retainedDialog: entry.dialog)
+    }
+
+    func dialogPresence(
+        target expected: UIAutomationTarget.ExactWindow,
+        retainedDialog: Element) -> DialogPresence
+    {
         switch Self.windowServerPresence(expected.identity) {
         case .absent:
             return .absent
@@ -500,19 +563,37 @@ extension DialogService {
             byID: CGWindowID(expected.identity.windowID),
             messagingTimeout: self.targetedDialogSearchTimeout)
         else { return .unreadable }
-        return Self.rawElementPresence(entry.dialog, in: currentWindow.element)
+        return Self.rawElementPresence(retainedDialog, in: currentWindow.element)
     }
 
     func preparedActionDetails(_ entry: DialogPreparedActionStore.Entry) -> [String: String] {
-        var details = [
+        var details = Self.dialogTargetDetails(entry.receipt.target)
+        details.merge([
             "button": entry.resolvedButtonTitle,
-            "window_id": String(entry.receipt.target.identity.windowID),
             "method": "button",
-        ]
+        ]) { _, new in new }
         if let identifier = entry.resolvedButtonIdentifier, !identifier.isEmpty {
             details["button_identifier"] = identifier
         }
         return details
+    }
+
+    static func dialogTargetDetails(_ target: UIAutomationTarget.ExactWindow) -> [String: String] {
+        [
+            "pid": String(target.identity.ownerProcessIdentifier),
+            "process_start_identity": String(target.identity.ownerProcessStartIdentity),
+            "process_start_identity_decimal": String(target.identity.ownerProcessStartIdentity),
+            "window_id": String(target.identity.windowID),
+        ]
+    }
+
+    static func desktopActionTargetReceipt(
+        _ target: UIAutomationTarget.ExactWindow) -> DesktopActionTargetReceipt
+    {
+        DesktopActionTargetReceipt(
+            processIdentifier: target.identity.ownerProcessIdentifier,
+            processStartIdentity: target.identity.ownerProcessStartIdentity,
+            windowID: target.identity.windowID)
     }
 
     func dialogElements(for dialog: Element) -> DialogElements {

@@ -54,22 +54,59 @@ struct DialogCommand: ParsableCommand {
     @MainActor
     static func resolveDialogAppHint(
         target: InteractionTargetOptions,
-        services: any PeekabooServiceProviding
+        services: any PeekabooServiceProviding,
+        refusalRoute: DesktopActionOutcome.Route = .local
     ) async throws -> String? {
-        if let app = target.app, !app.isEmpty, !app.hasPrefix("PID:") {
+        let explicitProcessIdentifier = try target.resolveExplicitPIDObservationTarget()
+        if explicitProcessIdentifier == nil, let app = target.app, !app.isEmpty {
             return app
         }
 
-        guard let pid = target.pid else {
+        guard let pid = explicitProcessIdentifier else {
             return nil
+        }
+        if services.dialogs.supportsExactProcessIdentifierAppHint {
+            return "PID:\(pid)"
         }
 
         let apps = try await services.applications.listApplications()
         guard let match = apps.data.applications.first(where: { $0.processIdentifier == pid }) else {
-            return nil
+            throw DesktopActionFailure.preDispatchRefusal(
+                route: refusalRoute,
+                reason: .targetUnavailable,
+                message: "Dialog target PID \(pid) is no longer present in the selected provider inventory.",
+                hint: "List applications again and retry with a fresh PID or app identifier."
+            )
         }
+        let bundleIdentifier = match.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let bundleIdentifier, !bundleIdentifier.isEmpty {
+            return bundleIdentifier
+        }
+        let name = match.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            throw DesktopActionFailure.preDispatchRefusal(
+                route: refusalRoute,
+                reason: .targetUnavailable,
+                message: "Dialog target PID \(pid) has no usable application identity in the selected provider.",
+                hint: "List applications again and retry with a fresh PID or nonempty app identifier."
+            )
+        }
+        return name
+    }
 
-        return match.bundleIdentifier ?? match.name
+    @MainActor
+    static func resolveDialogAppHintIfRequested(
+        _ requested: Bool,
+        target: InteractionTargetOptions,
+        services: any PeekabooServiceProviding,
+        refusalRoute: DesktopActionOutcome.Route
+    ) async throws -> String? {
+        guard requested else { return nil }
+        return try await self.resolveDialogAppHint(
+            target: target,
+            services: services,
+            refusalRoute: refusalRoute
+        )
     }
 
     static func execute(
@@ -77,6 +114,7 @@ struct DialogCommand: ParsableCommand {
         target: InteractionTargetOptions,
         focus: ExecutionFocus,
         resolveWindowTitle: Bool = true,
+        resolveAppHint: Bool = true,
         beginsInteractionMutation: Bool = true,
         handlesValidationError: Bool = true,
         handlesPeekabooError: Bool = false,
@@ -132,7 +170,12 @@ struct DialogCommand: ParsableCommand {
             } else {
                 nil
             }
-            let appHint = try await self.resolveDialogAppHint(target: target, services: runtime.services)
+            let appHint = try await self.resolveDialogAppHintIfRequested(
+                resolveAppHint,
+                target: target,
+                services: runtime.services,
+                refusalRoute: runtime.selectedRemoteSocketPath == nil ? .local : .bridge
+            )
 
             if beginsInteractionMutation {
                 runtime.beginInteractionMutation()

@@ -141,6 +141,128 @@ struct MCPDialogPreparedActionTests {
         #expect(dialogs.inputCount == 1)
         #expect(dialogs.fileCount == 1)
     }
+
+    @Test
+    func `exact-window input leaves sheet focus to dialog service without selector downgrade`() async throws {
+        let windows = EmptyRecordingWindowService()
+        let dialogs = PreparedDialogService()
+        let context = await MCPToolTestHelpers.makeContext(
+            windows: windows,
+            dialogs: dialogs)
+
+        let response = try await context.execute(
+            tool: DialogTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "input",
+                "text": "value",
+                "pid": 89,
+                "window_id": 700,
+                "foreground": true,
+            ]))
+
+        #expect(!response.isError)
+        #expect(dialogs.inputCount == 1)
+        let request = try #require(dialogs.lastExactInputRequest)
+        #expect(request.target.applicationIdentifier == nil)
+        #expect(request.target.processIdentifier == 89)
+        #expect(request.target.windowID == 700)
+        #expect(request.text == "value")
+        #expect(request.focus == DialogForegroundFocusPolicy())
+        #expect(await windows.focusRequests.isEmpty)
+    }
+
+    @Test
+    func `exact forced dismiss leaves focus and selector ownership to dialog service`() async throws {
+        let windows = EmptyRecordingWindowService()
+        let dialogs = PreparedDialogService()
+        dialogs.foregroundOutcome = .dispatchedUnverified(
+            delivery: .init(mechanism: .globalEvents, mode: .foreground),
+            evidence: .deliveryAccepted,
+            unitCount: .one)
+        let context = await MCPToolTestHelpers.makeContext(
+            windows: windows,
+            dialogs: dialogs)
+
+        let response = try await context.execute(
+            tool: DialogTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "dismiss",
+                "force": true,
+                "pid": 89,
+                "window_id": 700,
+                "foreground": true,
+            ]))
+
+        #expect(!response.isError)
+        let request = try #require(dialogs.lastExactForcedDismissRequest)
+        #expect(request.target.processIdentifier == 89)
+        #expect(request.target.windowID == 700)
+        #expect(request.focus == DialogForegroundFocusPolicy())
+        #expect(await windows.focusRequests.isEmpty)
+    }
+
+    @Test
+    func `foreground input and forced dismiss expose unverified outcome warnings`() async throws {
+        let dialogs = PreparedDialogService()
+        dialogs.foregroundOutcome = .dispatchedUnverified(
+            delivery: .init(mechanism: .globalEvents, mode: .foreground),
+            evidence: .deliveryAccepted,
+            unitCount: .one)
+        let context = await MCPToolTestHelpers.makeContext(dialogs: dialogs)
+
+        let input = try await context.execute(
+            tool: DialogTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "input",
+                "text": "value",
+                "foreground": true,
+            ]))
+        let dismiss = try await context.execute(
+            tool: DialogTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "dismiss",
+                "force": true,
+                "foreground": true,
+            ]))
+
+        for response in [input, dismiss] {
+            #expect(!response.isError)
+            let meta = try #require(response.meta?.objectValue)
+            #expect(meta["state"] == .string("dispatched_unverified"))
+            #expect(meta["retry_safe"] == .bool(false))
+            guard case let .text(text, _, _)? = response.content.first else {
+                Issue.record("Expected dialog response text")
+                continue
+            }
+            #expect(text.contains(AgentDisplayTokens.Status.warning))
+            #expect(text.contains("effect is unverifiable"))
+        }
+
+        dialogs.omitForegroundOutcome = true
+        let legacyInput = try await context.execute(
+            tool: DialogTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "input",
+                "text": "legacy",
+                "foreground": true,
+            ]))
+        let legacyDismiss = try await context.execute(
+            tool: DialogTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "dismiss",
+                "force": true,
+                "foreground": true,
+            ]))
+        for response in [legacyInput, legacyDismiss] {
+            let meta = try #require(response.meta?.objectValue)
+            #expect(meta["state"] == .string("dispatched_unverified"))
+            guard case let .text(text, _, _)? = response.content.first else {
+                Issue.record("Expected legacy dialog response text")
+                continue
+            }
+            #expect(text.contains(AgentDisplayTokens.Status.warning))
+        }
+    }
 }
 
 @MainActor
@@ -154,6 +276,11 @@ private final class PreparedDialogService: DialogServiceProtocol {
     var fileCount = 0
     var lastPreparation: DialogActionPreparationRequest?
     var preparationFailure: DesktopActionFailure?
+    var foregroundOutcome: DesktopActionOutcome?
+    var omitForegroundOutcome = false
+    var lastInputAppHint: String?
+    var lastExactInputRequest: DialogInputExecutionRequest?
+    var lastExactForcedDismissRequest: DialogForcedDismissExecutionRequest?
 
     func prepareDialogAction(_ request: DialogActionPreparationRequest) throws -> PreparedDialogActionReceipt {
         self.prepareCount += 1
@@ -197,14 +324,25 @@ private final class PreparedDialogService: DialogServiceProtocol {
         fieldIdentifier _: String?,
         clearExisting _: Bool,
         windowTitle _: String?,
-        appName _: String?) async throws -> DialogActionResult
+        appName: String?) async throws -> DialogActionResult
     {
         self.inputCount += 1
+        self.lastInputAppHint = appName
         return DialogActionResult(
             success: true,
             action: .enterText,
             details: ["field": "Text Field", "text_length": "5"],
-            outcome: self.outcome)
+            outcome: self.omitForegroundOutcome ? nil : (self.foregroundOutcome ?? self.outcome))
+    }
+
+    func enterText(_ request: DialogInputExecutionRequest) async throws -> DialogActionResult {
+        self.inputCount += 1
+        self.lastExactInputRequest = request
+        return DialogActionResult(
+            success: true,
+            action: .enterText,
+            details: ["field": "Text Field", "text_length": "5"],
+            outcome: self.omitForegroundOutcome ? nil : (self.foregroundOutcome ?? self.outcome))
     }
 
     func handleFileDialog(
@@ -222,8 +360,27 @@ private final class PreparedDialogService: DialogServiceProtocol {
             outcome: self.outcome)
     }
 
-    func dismissDialog(force _: Bool, windowTitle _: String?, appName _: String?) async throws -> DialogActionResult {
-        throw DialogError.noActiveDialog
+    func dismissDialog(force: Bool, windowTitle _: String?, appName _: String?) async throws -> DialogActionResult {
+        guard force else { throw DialogError.noActiveDialog }
+        return DialogActionResult(
+            success: true,
+            action: .dismiss,
+            details: ["method": "escape"],
+            outcome: self.omitForegroundOutcome ? nil : (self.foregroundOutcome ?? self.outcome))
+    }
+
+    func forceDismissDialog(_ request: DialogForcedDismissExecutionRequest) async throws -> DialogActionResult {
+        self.lastExactForcedDismissRequest = request
+        let targetReceipt = DesktopActionTargetReceipt(
+            processIdentifier: request.target.processIdentifier ?? 89,
+            processStartIdentity: 890,
+            windowID: request.target.windowID ?? 700)
+        return DialogActionResult(
+            success: true,
+            action: .dismiss,
+            details: ["method": "escape"],
+            outcome: self.omitForegroundOutcome ? nil : (self.foregroundOutcome ?? self.outcome),
+            targetReceipt: targetReceipt)
     }
 
     func listDialogElements(windowTitle _: String?, appName _: String?) async throws -> DialogElements {

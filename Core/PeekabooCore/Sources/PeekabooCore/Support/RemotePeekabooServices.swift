@@ -174,7 +174,10 @@ public final class RemotePeekabooServices: PeekabooServiceProviding {
             targetedList: dialogCapabilities.targetedList,
             prepareAction: dialogCapabilities.prepareAction,
             exactClick: dialogCapabilities.exactClick,
-            exactDismiss: dialogCapabilities.exactDismiss)
+            exactDismiss: dialogCapabilities.exactDismiss,
+            exactInput: dialogCapabilities.exactInput,
+            exactForceDismiss: dialogCapabilities.exactForceDismiss,
+            legacyInputFocusPolicy: dialogCapabilities.legacyInputFocusPolicy)
         self.dialogs = RemoteDialogService(client: client, capabilities: resolvedDialogCapabilities)
         self.snapshots = snapshotManager
         self.files = FileService()

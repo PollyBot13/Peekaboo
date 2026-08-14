@@ -257,7 +257,9 @@ extension PeekabooBridgeOperation {
              .dialogHandleFile,
              .dialogDismiss,
              .exactDialogClickButton,
-             .exactDialogDismiss:
+             .exactDialogDismiss,
+             .exactDialogEnterText,
+             .exactDialogForceDismiss:
             true
         case .permissionsStatus,
              .daemonStatus,

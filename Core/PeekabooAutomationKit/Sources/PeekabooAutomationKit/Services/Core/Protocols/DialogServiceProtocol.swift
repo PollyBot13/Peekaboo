@@ -5,6 +5,15 @@ import PeekabooFoundation
 /// Protocol defining dialog and alert management operations
 @MainActor
 public protocol DialogServiceProtocol: Sendable {
+    /// Whether the legacy `appName` parameter accepts an exact `PID:<n>` sentinel.
+    ///
+    /// Remote and third-party providers default to false so callers preserve the established
+    /// bundle/name contract until the provider explicitly opts into exact PID hints.
+    var supportsExactProcessIdentifierAppHint: Bool { get }
+
+    /// Canonical route for conservative outcomes synthesized from legacy foreground responses.
+    var foregroundOutcomeRoute: DesktopActionOutcome.Route { get }
+
     /// Find and return information about the active dialog
     /// - Parameter windowTitle: Optional specific window title to target
     /// - Returns: Information about the active dialog
@@ -43,6 +52,15 @@ public protocol DialogServiceProtocol: Sendable {
         clearExisting: Bool,
         windowTitle: String?,
         appName: String?) async throws -> DialogActionResult
+
+    /// Enter text through the legacy foreground target while preserving the caller's focus policy.
+    func enterText(_ request: DialogLegacyInputExecutionRequest) async throws -> DialogActionResult
+
+    /// Resolve and execute text entry against one exact dialog target on this runtime host.
+    func enterText(_ request: DialogInputExecutionRequest) async throws -> DialogActionResult
+
+    /// Resolve, focus, verify, and force-dismiss one retained dialog on this runtime host.
+    func forceDismissDialog(_ request: DialogForcedDismissExecutionRequest) async throws -> DialogActionResult
 
     /// Handle file save/open dialogs
     /// - Parameters:
@@ -87,6 +105,14 @@ public protocol DialogServiceProtocol: Sendable {
 }
 
 extension DialogServiceProtocol {
+    public var supportsExactProcessIdentifierAppHint: Bool {
+        false
+    }
+
+    public var foregroundOutcomeRoute: DesktopActionOutcome.Route {
+        .local
+    }
+
     public func clickButton(
         buttonText: String,
         windowTitle: String?,
@@ -120,6 +146,35 @@ extension DialogServiceProtocol {
             clearExisting: clearExisting,
             windowTitle: windowTitle,
             appName: nil)
+    }
+
+    public func enterText(_ request: DialogLegacyInputExecutionRequest) async throws -> DialogActionResult {
+        guard request.focus == DialogForegroundFocusPolicy() else {
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .runtimeIncompatible,
+                message: "This dialog service cannot preserve a custom foreground focus policy.",
+                hint: "Update the selected runtime host before retrying.")
+        }
+        return try await self.enterText(
+            text: request.text,
+            fieldIdentifier: request.fieldIdentifier,
+            clearExisting: request.clearExisting,
+            windowTitle: request.windowTitle,
+            appName: request.appName)
+    }
+
+    public func enterText(_ request: DialogInputExecutionRequest) async throws -> DialogActionResult {
+        throw DesktopActionFailure.preDispatchRefusal(
+            reason: .runtimeIncompatible,
+            message: "This dialog service does not support exact host-executed dialog input.",
+            hint: "Update the selected runtime host before retrying.")
+    }
+
+    public func forceDismissDialog(_ request: DialogForcedDismissExecutionRequest) async throws -> DialogActionResult {
+        throw DesktopActionFailure.preDispatchRefusal(
+            reason: .runtimeIncompatible,
+            message: "This dialog service does not support exact host-executed forced dismissal.",
+            hint: "Update the selected runtime host before retrying.")
     }
 
     public func handleFileDialog(
@@ -214,20 +269,35 @@ public struct DialogActionResult: Sendable, Codable {
     /// Canonical action evidence. Legacy foreground paths may omit it; receipt-pinned actions may not.
     public let outcome: DesktopActionOutcome?
 
+    /// Exact generation-bound window receipt resolved by the execution host, when available.
+    public let targetReceipt: DesktopActionTargetReceipt?
+
     public init(
         success: Bool,
         action: DialogActionType,
         details: [String: String] = [:],
-        outcome: DesktopActionOutcome? = nil)
+        outcome: DesktopActionOutcome? = nil,
+        targetReceipt: DesktopActionTargetReceipt? = nil)
     {
         self.success = success
         self.action = action
         self.details = details
         self.outcome = outcome
+        self.targetReceipt = targetReceipt
     }
 }
 
 extension DialogActionResult {
+    /// Legacy foreground dialog providers may omit canonical outcomes. A successful return proves
+    /// only that shared global input was accepted, never which controller caused the visible effect.
+    public func foregroundOutcomeOrUnverified(route: DesktopActionOutcome.Route) -> DesktopActionOutcome {
+        self.outcome?.routed(to: route) ?? .dispatchedUnverified(
+            route: route,
+            delivery: .init(mechanism: .globalEvents, mode: .foreground),
+            evidence: .deliveryAccepted,
+            unitCount: nil)
+    }
+
     /// Validates the exact contract required from receipt-pinned background dialog actions.
     public func requiredPreparedOutcome(kind: DialogPreparedActionKind) throws -> DesktopActionOutcome {
         let expectedAction: DialogActionType = kind == .clickButton ? .clickButton : .dismiss
