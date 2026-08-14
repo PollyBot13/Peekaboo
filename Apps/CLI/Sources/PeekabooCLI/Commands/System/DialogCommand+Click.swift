@@ -1,6 +1,7 @@
 import Commander
 import Foundation
 import PeekabooCore
+import PeekabooFoundation
 
 extension DialogCommand {
     // MARK: - Click Dialog Button
@@ -10,7 +11,7 @@ extension DialogCommand {
         @Option(help: "Button text to click (e.g., 'OK', 'Cancel', 'Save')")
         var button: String
 
-        @Flag(help: "Focus the target and allow foreground click fallback")
+        @Flag(help: "Focus the target before the exact AXPress action")
         var foreground = false
 
         @OptionGroup var target: InteractionTargetOptions
@@ -20,22 +21,46 @@ extension DialogCommand {
         @MainActor
         mutating func run(using runtime: CommandRuntime) async throws {
             self.runtime = runtime
+            var preparationRequest: DialogActionPreparationRequest?
+            var preparedReceipt: PreparedDialogActionReceipt?
+            let buttonText = self.button
+            let foreground = self.foreground
             try await DialogCommand.execute(
                 runtime: runtime,
                 target: self.target,
                 focus: .whenRequested(self.foreground, self.focusOptions),
+                resolveWindowTitle: false,
                 validate: {
                     guard self.foreground || !self.focusOptions.hasForegroundFocusOverrides else {
                         throw ValidationError("Dialog focus options require --foreground")
                     }
                 },
-                operation: { context in
-                    let result = try await context.services.dialogs.clickButton(
-                        buttonText: self.button,
-                        windowTitle: context.windowTitle,
-                        appName: context.appHint,
-                        allowGlobalFallback: self.foreground
+                prepareBeforeFocus: { context in
+                    let request = try DialogActionPreparationRequest(
+                        target: context.target,
+                        kind: .clickButton,
+                        buttonText: buttonText
                     )
+                    preparationRequest = request
+                    guard !foreground else { return }
+                    preparedReceipt = try await context.services.dialogs.prepareDialogAction(request)
+                },
+                operation: { context in
+                    let receipt: PreparedDialogActionReceipt
+                    if let preparedReceipt {
+                        receipt = preparedReceipt
+                    } else {
+                        guard let request = preparationRequest else {
+                            throw DesktopActionFailure.preDispatchRefusal(
+                                reason: .invalidRequest,
+                                message: "Dialog click lost its validated preparation request.",
+                                hint: "Validate and prepare the dialog action again before retrying."
+                            )
+                        }
+                        receipt = try await context.services.dialogs.prepareDialogAction(request)
+                    }
+                    let result = try await context.services.dialogs.performPreparedDialogAction(receipt)
+                    _ = try result.requiredPreparedOutcome(kind: .clickButton)
 
                     if self.jsonOutput {
                         let outputData = DialogClickResult(
@@ -44,7 +69,11 @@ extension DialogCommand {
                             buttonIdentifier: result.details["button_identifier"],
                             window: result.details["window"] ?? "Dialog"
                         )
-                        outputSuccessCodable(data: outputData, effect: .confirmed, logger: self.outputLogger)
+                        outputSuccessCodable(
+                            data: outputData,
+                            outcome: result.outcome,
+                            logger: self.outputLogger
+                        )
                     } else {
                         print("✓ Clicked '\(result.details["button"] ?? self.button)' button")
                     }

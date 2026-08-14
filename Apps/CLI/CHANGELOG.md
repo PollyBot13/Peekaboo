@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.1.1] - Unreleased
 
+### Added
+- Add protocol 1.25 exact dialog click/dismiss receipts with unique target planning, raw AX identity revalidation, verified disappearance outcomes, and read-only targeted listing.
+
+### Fixed
+- Report exact standard windows with live attached sheets as dialog-active observations, using shared native role evidence without changing the parent window receipt.
+
 ## [4.1.0] - 2026-08-13
 
 ### Highlights
