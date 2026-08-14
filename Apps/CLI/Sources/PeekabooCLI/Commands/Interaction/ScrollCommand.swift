@@ -112,9 +112,14 @@ RuntimeBackedCommand {
             let totalTicks = self.smooth ? self.amount * 10 : self.amount
 
             // Determine scroll location for output
+            let resultDetection: ElementDetectionResult? = if let snapshotId = observation.snapshotId {
+                try await self.services.snapshots.getDetectionResult(snapshotId: snapshotId)
+            } else {
+                nil
+            }
             let scrollResolution: InteractionTargetPointResolution = if let elementId = on {
                 if let snapshotId = observation.snapshotId,
-                   let detectionResult = try await self.services.snapshots.getDetectionResult(snapshotId: snapshotId),
+                   let detectionResult = resultDetection,
                    let element = detectionResult.elements.findById(elementId) {
                     try await InteractionTargetPointResolver.elementCenterResolution(
                         element: element,
@@ -140,6 +145,10 @@ RuntimeBackedCommand {
                 location: ["x": scrollLocation.x, "y": scrollLocation.y],
                 totalTicks: totalTicks,
                 targetPoint: scrollResolution.diagnostics,
+                targetReceipt: ScrollTargetReceipt(
+                    snapshotId: observation.snapshotId,
+                    detectionResult: resultDetection
+                ),
                 executionTime: Date().timeIntervalSince(startTime)
             )
             output(
@@ -161,7 +170,21 @@ RuntimeBackedCommand {
             }
 
         } catch {
-            self.handleError(error)
+            // ScrollService converts every post-dispatch failure into DesktopActionFailure. Raw
+            // stale/unsupported background errors therefore prove that no scroll unit was emitted.
+            let presentedError: any Error = if let peekabooError = error as? PeekabooError {
+                switch peekabooError {
+                case .snapshotStale:
+                    self.preDispatchActionError(for: peekabooError, reason: .targetUnavailable)
+                case .invalidInput where !self.focusOptions.foreground:
+                    self.preDispatchActionError(for: peekabooError, reason: .operationUnsupported)
+                default:
+                    error
+                }
+            } else {
+                error
+            }
+            self.handleError(presentedError)
             throw ExitCode.failure
         }
     }
@@ -210,6 +233,7 @@ struct ScrollResult: Codable {
     let location: [String: Double]
     let totalTicks: Int
     let targetPoint: InteractionTargetPointDiagnostics?
+    let targetReceipt: ScrollTargetReceipt?
     let executionTime: TimeInterval
 
     init(
@@ -218,6 +242,7 @@ struct ScrollResult: Codable {
         location: [String: Double],
         totalTicks: Int,
         targetPoint: InteractionTargetPointDiagnostics? = nil,
+        targetReceipt: ScrollTargetReceipt? = nil,
         executionTime: TimeInterval
     ) {
         self.direction = direction
@@ -225,7 +250,36 @@ struct ScrollResult: Codable {
         self.location = location
         self.totalTicks = totalTicks
         self.targetPoint = targetPoint
+        self.targetReceipt = targetReceipt
         self.executionTime = executionTime
+    }
+}
+
+struct ScrollTargetReceipt: Codable, Equatable {
+    let snapshotId: String
+    let processIdentifier: Int32
+    let processStartIdentityDecimal: String
+    let windowId: Int
+    let windowBounds: CGRect
+
+    init?(snapshotId: String?, detectionResult: ElementDetectionResult?) {
+        guard let snapshotId,
+              let context = detectionResult?.metadata.windowContext,
+              let processIdentifier = context.applicationProcessId,
+              let windowId = context.windowID,
+              let windowBounds = context.windowBounds,
+              let identity = context.windowMutationIdentity,
+              identity.ownerProcessIdentifier == processIdentifier,
+              identity.windowID == windowId,
+              identity.capturedBounds == nil || identity.capturedBounds == windowBounds
+        else {
+            return nil
+        }
+        self.snapshotId = snapshotId
+        self.processIdentifier = processIdentifier
+        self.processStartIdentityDecimal = String(identity.ownerProcessStartIdentity)
+        self.windowId = windowId
+        self.windowBounds = windowBounds
     }
 }
 
@@ -239,9 +293,9 @@ extension ScrollCommand: ParsableCommand {
                 commandName: "scroll",
                 abstract: "Scroll the mouse wheel in any direction",
                 discussion: """
-                    The 'scroll' command scrolls through Accessibility by default so the target
-                    application stays in the background. Add --foreground to focus the target and
-                    allow synthetic mouse-wheel events.
+                    The 'scroll' command keeps a fresh target in the background. It prefers
+                    Accessibility and can use exact-window wheel routing for opaque visible WebKit
+                    surfaces. Add --foreground to focus the target and use the physical pointer.
 
                     EXAMPLES:
                       peekaboo scroll --direction up --amount 10 --on element_42

@@ -215,6 +215,74 @@ struct ScrollCommandTests {
         #expect(await self.automationState(context) { $0.scrollCalls }.isEmpty)
     }
 
+    @Test
+    func `stale background scroll reports canonical retry-safe refusal`() async throws {
+        let snapshotId = "stale-scroll-snapshot"
+        let context = await self.makeContext { automation, _ in
+            automation.scrollError = PeekabooError.snapshotStale(
+                "target window owner, process generation, or bounds changed"
+            )
+        }
+        try await context.snapshots.storeDetectionResult(
+            snapshotId: snapshotId,
+            result: Self.detectionResult(snapshotId: snapshotId, element: Self.buttonElement(id: "B1"))
+        )
+
+        let result = try await self.runScroll(
+            arguments: [
+                "--direction", "down",
+                "--on", "B1",
+                "--snapshot", snapshotId,
+                "--json",
+            ],
+            context: context
+        )
+
+        #expect(result.exitStatus != 0)
+        let payloadData = try #require(self.output(from: result).data(using: .utf8))
+        let payload = try JSONDecoder().decode(JSONResponse.self, from: payloadData)
+        #expect(!payload.success)
+        #expect(payload.error?.code == ErrorCode.SNAPSHOT_STALE.rawValue)
+        #expect(payload.outcome?.state == .refused)
+        #expect(payload.outcome?.retrySafety == .safe)
+        #expect(payload.outcome?.dispatchState == DesktopActionOutcome.DispatchState.none)
+        #expect(payload.outcome?.refusalReason == .targetUnavailable)
+    }
+
+    @Test
+    func `unsupported background scroll reports canonical retry-safe refusal`() async throws {
+        let snapshotId = "unsupported-scroll-snapshot"
+        let context = await self.makeContext { automation, _ in
+            automation.scrollError = PeekabooError.invalidInput(
+                "Background scroll is unavailable for this target"
+            )
+        }
+        try await context.snapshots.storeDetectionResult(
+            snapshotId: snapshotId,
+            result: Self.detectionResult(snapshotId: snapshotId, element: Self.buttonElement(id: "B1"))
+        )
+
+        let result = try await self.runScroll(
+            arguments: [
+                "--direction", "down",
+                "--on", "B1",
+                "--snapshot", snapshotId,
+                "--json",
+            ],
+            context: context
+        )
+
+        #expect(result.exitStatus != 0)
+        let payloadData = try #require(self.output(from: result).data(using: .utf8))
+        let payload = try JSONDecoder().decode(JSONResponse.self, from: payloadData)
+        #expect(!payload.success)
+        #expect(payload.error?.code == ErrorCode.INVALID_INPUT.rawValue)
+        #expect(payload.outcome?.state == .refused)
+        #expect(payload.outcome?.retrySafety == .safe)
+        #expect(payload.outcome?.dispatchState == DesktopActionOutcome.DispatchState.none)
+        #expect(payload.outcome?.refusalReason == .operationUnsupported)
+    }
+
     // MARK: - Helpers
 
     private func runScroll(
@@ -284,6 +352,41 @@ struct ScrollCommandResultStructTests {
         #expect(result.location["x"] == 500.0)
         #expect(result.location["y"] == 300.0)
         #expect(result.totalTicks == 5)
+        #expect(result.targetReceipt == nil)
         #expect(result.executionTime == 0.15)
+    }
+
+    @Test
+    func `Scroll exact target receipt preserves generation as decimal text`() throws {
+        let bounds = CGRect(x: 10, y: 20, width: 600, height: 400)
+        let identity = WindowMutationIdentity(
+            windowID: 42,
+            ownerProcessIdentifier: 123,
+            ownerProcessStartIdentity: 9_007_199_254_740_993,
+            capturedBounds: bounds
+        )
+        let result = ElementDetectionResult(
+            snapshotId: "snapshot",
+            screenshotPath: "/tmp/shot.png",
+            elements: DetectedElements(),
+            metadata: DetectionMetadata(
+                detectionTime: 0,
+                elementCount: 0,
+                method: "test",
+                windowContext: WindowContext(
+                    applicationProcessId: 123,
+                    windowID: 42,
+                    windowBounds: bounds,
+                    windowMutationIdentity: identity
+                )
+            )
+        )
+
+        let receipt = try #require(ScrollTargetReceipt(snapshotId: "snapshot", detectionResult: result))
+
+        #expect(receipt.processIdentifier == 123)
+        #expect(receipt.processStartIdentityDecimal == "9007199254740993")
+        #expect(receipt.windowId == 42)
+        #expect(receipt.windowBounds == bounds)
     }
 }
