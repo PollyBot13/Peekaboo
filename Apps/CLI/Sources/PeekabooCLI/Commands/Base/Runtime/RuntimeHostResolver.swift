@@ -7,16 +7,6 @@ import PeekabooCore
 
 @MainActor
 enum RuntimeHostResolver {
-    struct Resolution {
-        let services: any PeekabooServiceProviding
-        let hostDescription: String
-        let selectedRemoteSocketPath: String?
-        let selectedRemoteHostProcessIdentifier: pid_t?
-        let snapshotInvalidationRemoteSocketPaths: [String]
-        let applicationRelaunchAllowed: Bool
-        let requiredHostFailure: String?
-    }
-
     struct ImplicitRemoteCandidate: Equatable {
         let socketPath: String
         let requireReusableDaemon: Bool
@@ -61,6 +51,7 @@ enum RuntimeHostResolver {
         dependencies: Dependencies
     ) async throws -> Resolution {
         var deferredScreenCaptureKitSafetyBlocker = false
+        var captureEngineSafetyOverride: CaptureEnginePreference?
         if self.requiresCallerLocalModernOwnerClaim(options: options, environment: environment) {
             do {
                 if let owner = try dependencies.inspectScreenCaptureKitOwner(),
@@ -70,7 +61,7 @@ enum RuntimeHostResolver {
             } catch let error as PreDispatchActionError {
                 throw error
             } catch {
-                throw self.ownerRefusal(error: error, callerLocal: true)
+                throw self.ownerRefusal(error: error, callerLocal: true, selectedSocket: options.bridgeSocketPath)
             }
         }
         let safetyPlan: RemoteCandidatePlan?
@@ -86,13 +77,16 @@ enum RuntimeHostResolver {
                 // discovered old host therefore blocks every later SCK leaf even if another old
                 // host appears, disappears, or reuses the same socket before the runtime restarts.
                 dependencies.recordScreenCaptureKitSafetyBlocker(oldHost)
-                let dynamicLocalDeferral = options.usesPerToolSnapshotInvalidation &&
-                    !options.requiresScreenCapturePermission &&
-                    plan.explicitSocket == nil
-                guard dynamicLocalDeferral else {
-                    throw self.ownerCapabilityRefusal(host: oldHost)
+                switch self.screenCaptureKitSafetyDisposition(
+                    for: oldHost, plan: plan, options: options, environment: environment
+                ) {
+                case .refuse: throw self.ownerCapabilityRefusal(host: oldHost, selectedSocket: plan.explicitSocket)
+                case .deferLocalRuntime: deferredScreenCaptureKitSafetyBlocker = true
+                case .routeAutomaticCapture:
+                    // The blocker tombstone belongs to this caller process. Clamp the transported
+                    // request so a different Bridge process cannot fall back from classic to SCK.
+                    captureEngineSafetyOverride = .legacy
                 }
-                deferredScreenCaptureKitSafetyBlocker = true
             }
         } else {
             safetyPlan = nil
@@ -101,7 +95,7 @@ enum RuntimeHostResolver {
             do {
                 _ = try dependencies.claimScreenCaptureKitOwner()
             } catch {
-                throw self.ownerRefusal(error: error, callerLocal: true)
+                throw self.ownerRefusal(error: error, callerLocal: true, selectedSocket: safetyPlan?.explicitSocket)
             }
         }
 
@@ -118,7 +112,8 @@ enum RuntimeHostResolver {
                 selectedRemoteHostProcessIdentifier: nil,
                 snapshotInvalidationRemoteSocketPaths: [],
                 applicationRelaunchAllowed: true,
-                requiredHostFailure: nil
+                requiredHostFailure: nil,
+                captureEngineSafetyOverride: captureEngineSafetyOverride
             )
         }
 
@@ -146,7 +141,8 @@ enum RuntimeHostResolver {
                 selectedRemoteHostProcessIdentifier: nil,
                 snapshotInvalidationRemoteSocketPaths: snapshotInvalidationRemoteSocketPaths,
                 applicationRelaunchAllowed: true,
-                requiredHostFailure: nil
+                requiredHostFailure: nil,
+                captureEngineSafetyOverride: captureEngineSafetyOverride
             )
         }
 
@@ -155,7 +151,8 @@ enum RuntimeHostResolver {
             do {
                 preferredScreenCaptureKitOwner = try dependencies.inspectScreenCaptureKitOwner()
             } catch {
-                throw self.ownerRefusal(error: error, callerLocal: false)
+                let selectedSocket = candidatePlan.explicitSocket
+                throw self.ownerRefusal(error: error, callerLocal: false, selectedSocket: selectedSocket)
             }
         } else {
             preferredScreenCaptureKitOwner = nil
@@ -175,7 +172,8 @@ enum RuntimeHostResolver {
                 selectedRemoteHostProcessIdentifier: nil,
                 snapshotInvalidationRemoteSocketPaths: localSnapshotInvalidationPaths,
                 applicationRelaunchAllowed: true,
-                requiredHostFailure: nil
+                requiredHostFailure: nil,
+                captureEngineSafetyOverride: captureEngineSafetyOverride
             )
         }
 
@@ -186,7 +184,7 @@ enum RuntimeHostResolver {
             hostname: Host.current().name
         )
 
-        return try await self.resolveRemoteRouting(context: RemoteResolutionContext(
+        var resolution = try await self.resolveRemoteRouting(context: RemoteResolutionContext(
             options: options,
             environment: environment,
             candidatePlan: candidatePlan,
@@ -197,6 +195,8 @@ enum RuntimeHostResolver {
             inspectScreenCaptureKitSafety: dependencies.inspectScreenCaptureKitSafety,
             recordScreenCaptureKitSafetyBlocker: dependencies.recordScreenCaptureKitSafetyBlocker
         ))
+        resolution.captureEngineSafetyOverride = captureEngineSafetyOverride
+        return resolution
     }
 
     private static func resolveRemoteRouting(
@@ -232,7 +232,7 @@ enum RuntimeHostResolver {
                candidatePlan.candidates
            ) {
             context.recordScreenCaptureKitSafetyBlocker(oldHost)
-            throw self.ownerCapabilityRefusal(host: oldHost)
+            throw self.ownerCapabilityRefusal(host: oldHost, selectedSocket: explicitSocket)
         }
 
         if let preferredScreenCaptureKitOwner = context.preferredScreenCaptureKitOwner {
