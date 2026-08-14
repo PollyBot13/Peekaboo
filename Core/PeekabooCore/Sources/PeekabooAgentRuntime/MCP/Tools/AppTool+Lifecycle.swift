@@ -22,19 +22,28 @@ extension AppToolActions {
         }
 
         let openURLs = try request.openTargets.map(Self.resolveOpenTarget)
-        let app = try await self.service.launchApplication(request: ApplicationLaunchRequest(
+        let launchRequest = ApplicationLaunchRequest(
             applicationIdentifier: request.bundleId == nil ? request.name : nil,
             applicationBundleIdentifier: request.bundleId,
             openURLs: openURLs,
             activates: request.foreground,
             waitUntilReady: request.waitUntilReady,
             waitForWindow: request.waitForWindow,
-            createsNewInstance: request.newInstance))
+            createsNewInstance: request.newInstance)
+        let actionResult = try await self.service.launchApplicationResult(request: launchRequest)
+        let app = actionResult.payload
 
         let timing = self.executionTimeString(since: request.startTime)
-        let message = "\(AgentDisplayTokens.Status.success) Launched \(app.name) "
-            + "(PID: \(app.processIdentifier)) in \(timing)"
-        return self.buildResponse(
+        let message = if launchRequest.isSafeBackgroundNoOp ||
+            actionResult.outcome?.state == .confirmedNoChange
+        {
+            "\(AgentDisplayTokens.Status.success) \(app.name) was already running "
+                + "(PID: \(app.processIdentifier)); no launch was needed (\(timing))"
+        } else {
+            "\(AgentDisplayTokens.Status.success) Launched \(app.name) "
+                + "(PID: \(app.processIdentifier)) in \(timing)"
+        }
+        return try self.buildResponse(
             message: message,
             app: app,
             startTime: request.startTime,
@@ -48,7 +57,8 @@ extension AppToolActions {
                 "window_ready": .bool((app.windowIDs?.count ?? app.windowCount) > 0),
                 "window_ids": app.windowIDs.map { .array($0.map { .double(Double($0)) }) } ?? .null,
                 "window_identity": .string(app.windowIDs == nil ? "unknown" : "exact"),
-            ])
+            ],
+            outcome: actionResult.outcome)
     }
 
     func handleOpen(request: AppToolRequest) async throws -> ToolResponse {
@@ -65,20 +75,29 @@ extension AppToolActions {
         }
 
         let openURLs = try request.openTargets.map(Self.resolveOpenTarget)
-        let app = try await self.service.launchApplication(request: ApplicationLaunchRequest(
+        let launchRequest = ApplicationLaunchRequest(
             applicationIdentifier: request.bundleId == nil ? request.name : nil,
             applicationBundleIdentifier: request.bundleId,
             openURLs: openURLs,
             activates: request.foreground,
             waitUntilReady: request.waitUntilReady,
             waitForWindow: request.waitForWindow,
-            createsNewInstance: request.newInstance))
+            createsNewInstance: request.newInstance)
+        let actionResult = try await self.service.launchApplicationResult(request: launchRequest)
+        let app = actionResult.payload
 
         let count = request.openTargets.count
-        let message = "\(AgentDisplayTokens.Status.success) Opened \(count) target\(count == 1 ? "" : "s") "
-            + "with \(app.name) (PID: \(app.processIdentifier)) in "
-            + self.executionTimeString(since: request.startTime)
-        return self.buildResponse(
+        let timing = self.executionTimeString(since: request.startTime)
+        let message = if let outcome = actionResult.outcome,
+                         !outcome.dispatchState.mutationDispatched
+        {
+            "\(AgentDisplayTokens.Status.success) No target delivery was dispatched to \(app.name) "
+                + "(PID: \(app.processIdentifier)); 0 targets were opened (\(timing))"
+        } else {
+            "\(AgentDisplayTokens.Status.success) Opened \(count) target\(count == 1 ? "" : "s") "
+                + "with \(app.name) (PID: \(app.processIdentifier)) in \(timing)"
+        }
+        return try self.buildResponse(
             message: message,
             app: app,
             startTime: request.startTime,
@@ -92,7 +111,8 @@ extension AppToolActions {
                 "window_ready": .bool((app.windowIDs?.count ?? app.windowCount) > 0),
                 "window_ids": app.windowIDs.map { .array($0.map { .double(Double($0)) }) } ?? .null,
                 "window_identity": .string(app.windowIDs == nil ? "unknown" : "exact"),
-            ])
+            ],
+            outcome: actionResult.outcome)
     }
 
     func handleQuit(request: AppToolRequest) async throws -> ToolResponse {
@@ -105,22 +125,33 @@ extension AppToolActions {
         }
 
         let appInfo = try await self.service.findApplication(identifier: name)
-        let success = try await self.service.quitApplication(request: Self.pinnedQuitRequest(
-            for: appInfo,
-            force: request.force))
+        let quitRequest = try Self.pinnedQuitRequest(for: appInfo, force: request.force)
+        let actionResult = try await self.service.quitApplicationResult(request: quitRequest)
+        let success = actionResult.payload
 
         guard success else {
+            if let outcome = actionResult.outcome,
+               let failure = DesktopActionFailure(
+                   outcome: outcome,
+                   message: "Failed to quit \(appInfo.name). The application may have refused to quit.",
+                   hint: Self.quitFailureHint(for: outcome, force: request.force))
+            {
+                return try MCPToolResponseMetadataProjector.errorResponse(
+                    for: failure,
+                    invalidatedSnapshotID: nil)
+            }
             return ToolResponse.error("Failed to quit \(appInfo.name). The application may have refused to quit.")
         }
 
         let timing = self.executionTimeString(since: request.startTime)
         let suffix = request.force ? " (force quit)" : ""
         let message = "\(AgentDisplayTokens.Status.success) Quit \(appInfo.name)\(suffix) in \(timing)"
-        return self.buildResponse(
+        return try self.buildResponse(
             message: message,
             app: appInfo,
             startTime: request.startTime,
-            extraMeta: ["force_quit": .bool(request.force)])
+            extraMeta: ["force_quit": .bool(request.force)],
+            outcome: actionResult.outcome)
     }
 
     func handleRelaunch(request: AppToolRequest) async throws -> ToolResponse {
@@ -142,7 +173,7 @@ extension AppToolActions {
         let descriptor = "PID:\(appInfo.processIdentifier)"
         let launchIdentifier = appInfo.bundlePath ?? (appInfo.bundleIdentifier == nil ? appInfo.name : nil)
         let launchBundleIdentifier = appInfo.bundlePath == nil ? appInfo.bundleIdentifier : nil
-        let refreshedInfo = try await self.service.relaunchApplication(request: ApplicationRelaunchRequest(
+        let relaunchRequest = ApplicationRelaunchRequest(
             targetIdentifier: descriptor,
             expectedTargetIdentity: originalProcessIdentity,
             launchRequest: ApplicationLaunchRequest(
@@ -152,12 +183,14 @@ extension AppToolActions {
                 waitUntilReady: request.waitUntilReady,
                 waitForWindow: request.waitForWindow),
             force: request.force,
-            waitSeconds: request.wait))
+            waitSeconds: request.wait)
+        let actionResult = try await self.service.relaunchApplicationResult(request: relaunchRequest)
+        let refreshedInfo = actionResult.payload
         let timing = self.executionTimeString(since: request.startTime)
         let message = "\(AgentDisplayTokens.Status.success) Relaunched \(refreshedInfo.name) "
             + "(PID: \(refreshedInfo.processIdentifier)) in \(timing)"
 
-        return self.buildResponse(
+        return try self.buildResponse(
             message: message,
             app: refreshedInfo,
             startTime: request.startTime,
@@ -168,7 +201,8 @@ extension AppToolActions {
                 "wait_for_window": .bool(request.waitForWindow),
                 "force": .bool(request.force),
                 "foreground": .bool(request.foreground),
-            ])
+            ],
+            outcome: actionResult.outcome)
     }
 
     func handleHide(request: AppToolRequest) async throws -> ToolResponse {
@@ -176,13 +210,14 @@ extension AppToolActions {
             return ToolResponse.error("Must specify 'name' for hide action")
         }
         let app = try await self.service.findApplication(identifier: name)
-        try await self.service.hideApplication(identifier: name)
+        let actionResult = try await self.service.hideApplicationResult(identifier: name)
         let message = "\(AgentDisplayTokens.Status.success) Hid \(app.name) "
             + "(PID: \(app.processIdentifier)) in \(self.executionTimeString(since: request.startTime))"
-        return self.buildResponse(
+        return try self.buildResponse(
             message: message,
             app: app,
-            startTime: request.startTime)
+            startTime: request.startTime,
+            outcome: actionResult.outcome)
     }
 
     func handleUnhide(request: AppToolRequest) async throws -> ToolResponse {
@@ -194,13 +229,15 @@ extension AppToolActions {
             return ToolResponse.error("Must specify 'name' for unhide action")
         }
         let app = try await self.service.findApplication(identifier: name)
-        try await self.service.activateApplication(request: ApplicationActivationRequest(application: app))
+        let activationRequest = try ApplicationActivationRequest(application: app)
+        let actionResult = try await self.service.activateApplicationResult(request: activationRequest)
         let message = "\(AgentDisplayTokens.Status.success) Unhid and activated \(app.name) "
             + "(PID: \(app.processIdentifier)) in \(self.executionTimeString(since: request.startTime))"
-        return self.buildResponse(
+        return try self.buildResponse(
             message: message,
             app: app,
-            startTime: request.startTime)
+            startTime: request.startTime,
+            outcome: actionResult.outcome)
     }
 
     private func handleQuitAll(request: AppToolRequest) async throws -> ToolResponse {
@@ -220,18 +257,35 @@ extension AppToolActions {
 
         var quitCount = 0
         var failed = [String]()
+        var outcomes = [DesktopActionOutcome?]()
+        var wasCancelled = false
         for app in targets {
+            if Task.isCancelled {
+                guard !outcomes.isEmpty else { throw CancellationError() }
+                wasCancelled = true
+                break
+            }
             do {
-                let success = try await self.service.quitApplication(request: Self.pinnedQuitRequest(
-                    for: app,
-                    force: request.force))
+                let quitRequest = try Self.pinnedQuitRequest(for: app, force: request.force)
+                let result = try await self.service.quitApplicationResult(request: quitRequest)
+                let success = result.payload
+                outcomes.append(result.outcome)
                 if success {
                     quitCount += 1
                 } else {
                     failed.append(app.name)
                 }
+            } catch let cancellation as CancellationError {
+                guard !outcomes.isEmpty else { throw cancellation }
+                wasCancelled = true
+                break
+            } catch let failure as DesktopActionFailure {
+                outcomes.append(failure.outcome)
+                self.logger.error("Failed to quit \(app.name, privacy: .public): \(failure, privacy: .public)")
+                failed.append(app.name)
             } catch {
                 self.logger.error("Failed to quit \(app.name, privacy: .public): \(error, privacy: .public)")
+                outcomes.append(nil)
                 failed.append(app.name)
             }
         }
@@ -247,6 +301,10 @@ extension AppToolActions {
             let warningLine = "\n\(AgentDisplayTokens.Status.warning) Failed to quit: \(failureList)"
             message += warningLine
         }
+        if wasCancelled {
+            message += "\n\(AgentDisplayTokens.Status.warning) Quit batch cancelled after " +
+                "\(outcomes.count) of \(targets.count) targets"
+        }
 
         let baseMeta: [String: Value] = [
             "quit_count": .double(Double(quitCount)),
@@ -254,11 +312,19 @@ extension AppToolActions {
             "except": .array(excluded.map(Value.string)),
             "execution_time": .double(executionTime),
             "force": .bool(request.force),
+            "cancelled": .bool(wasCancelled),
         ]
         let summary = self.makeSummary(for: nil, action: "Quit Applications", notes: "Quit \(quitCount) apps")
-        return ToolResponse(
+        let outcome = DesktopActionSequenceAccumulator.completedBatch(
+            outcomes: outcomes,
+            succeededCount: quitCount,
+            attemptedCount: outcomes.count)
+        return try ToolResponse(
             content: [.text(text: message, annotations: nil, _meta: nil)],
-            meta: ToolEventSummary.merge(summary: summary, into: .object(baseMeta)))
+            isError: wasCancelled,
+            meta: MCPToolResponseMetadataProjector.metadata(
+                merging: ToolEventSummary.merge(summary: summary, into: .object(baseMeta)).objectValue ?? [:],
+                outcome: outcome))
     }
 
     private static func pinnedQuitRequest(
@@ -273,6 +339,41 @@ extension AppToolActions {
             identifier: "PID:\(application.processIdentifier)",
             force: force,
             expectedIdentity: identity)
+    }
+
+    private static func quitFailureHint(
+        for outcome: DesktopActionOutcome,
+        force: Bool) -> String?
+    {
+        if outcome.refusalReason == .targetUnavailable {
+            return "Refresh the application target or inventory before retrying."
+        }
+        if outcome.retrySafety == .unsafe {
+            return "Observe the application state before deciding whether to retry."
+        }
+        if !force,
+           outcome.state == .suspectedNoop,
+           outcome.retrySafety == .safe,
+           outcome.escalation == .refreshTarget
+        {
+            return "Retry with force=true only if discarding unsaved changes is safe."
+        }
+        return switch outcome.escalation {
+        case .correctRequest:
+            "Correct the quit request before retrying."
+        case .grantPermission:
+            "Grant the required permission before retrying."
+        case .refreshTarget:
+            "Refresh the application target before retrying."
+        case .updateRuntime:
+            "Update the runtime before retrying."
+        case .recoverSideEffect:
+            "Recover any partial side effect before retrying."
+        case .observeBeforeRetry:
+            "Observe the application state before deciding whether to retry."
+        case .none:
+            nil
+        }
     }
 
     func waitForRunningState(

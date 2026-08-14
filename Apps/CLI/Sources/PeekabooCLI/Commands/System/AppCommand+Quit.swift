@@ -54,47 +54,54 @@ extension AppCommand {
                 }
 
                 var results: [AppQuitInfo] = []
+                var actionOutcomes: [DesktopActionOutcome?] = []
+                var caughtFailureHints: [String?] = []
+                var wasCancelled = false
+                var cancellationInterruptedAttempt = false
                 for target in quitApps {
+                    if Task.isCancelled {
+                        guard !results.isEmpty else { throw CancellationError() }
+                        wasCancelled = true
+                        break
+                    }
                     if target.pid == self.resolvedRuntime.selectedRemoteHostProcessIdentifier {
                         throw PeekabooError.invalidInput(
                             "Cannot quit the daemon host executing this command; use a different runtime host"
                         )
                     }
                     self.resolvedRuntime.beginInteractionMutation()
-                    let success = await (try? self.services.applications
-                        .quitApplication(request: ApplicationQuitRequest(
-                            identifier: target.identifier,
-                            force: self.force,
-                            expectedIdentity: target.expectedIdentity
-                        ))) ?? false
+                    let success: Bool
+                    var caughtFailureHint: String?
+                    do {
+                        let actionResult = try await ApplicationServiceBridge.quitApplication(
+                            applications: self.services.applications,
+                            request: ApplicationQuitRequest(
+                                identifier: target.identifier,
+                                force: self.force,
+                                expectedIdentity: target.expectedIdentity
+                            )
+                        )
+                        success = actionResult.payload
+                        actionOutcomes.append(actionResult.outcome)
+                    } catch is CancellationError {
+                        wasCancelled = true
+                        cancellationInterruptedAttempt = true
+                        break
+                    } catch let failure as DesktopActionFailure {
+                        success = false
+                        actionOutcomes.append(failure.outcome)
+                        caughtFailureHint = failure.hint
+                    } catch {
+                        // Preserve legacy per-app failure reporting for services without canonical receipts.
+                        success = false
+                        actionOutcomes.append(nil)
+                    }
                     results.append(AppQuitInfo(
                         app_name: target.name,
                         pid: target.pid,
                         success: success
                     ))
-
-                    // Log additional debug info when quit fails
-                    if !success && !self.jsonOutput {
-                        // Check if app might be in a modal state or have unsaved changes
-                        if !self.force {
-                            logger
-                                .debug(
-                                    """
-                                    Quit failed for \(target.name) (PID: \(target.pid)). \
-                                    The app may have unsaved changes or be showing a dialog. \
-                                    Try --force to force quit.
-                                    """
-                                )
-                        } else {
-                            logger
-                                .debug(
-                                    """
-                                    Force quit failed for \(target.name) (PID: \(target.pid)). \
-                                    The app may be unresponsive or protected.
-                                    """
-                                )
-                        }
-                    }
+                    caughtFailureHints.append(caughtFailureHint)
                 }
 
                 struct QuitResult: Codable {
@@ -108,20 +115,54 @@ extension AppCommand {
                     force: force,
                     results: results
                 )
-                let allSucceeded = results.allSatisfy(\.success)
+                let allSucceeded = !wasCancelled && results.allSatisfy(\.success)
+                let succeededCount = results.count(where: \.success)
+                let batchOutcome = Self.resolveBatchOutcome(
+                    actionOutcomes: actionOutcomes,
+                    succeededCount: succeededCount,
+                    attemptedCount: results.count,
+                    plannedCount: quitApps.count,
+                    wasCancelled: wasCancelled,
+                    cancellationInterruptedAttempt: cancellationInterruptedAttempt
+                )
+                let aggregateOutcome = batchOutcome.outcome
+                let singleFailureHint = results.count == 1 ? caughtFailureHints[0] : nil
+                let failureHint: String? = if wasCancelled {
+                    "The quit batch was cancelled; inspect completed targets before retrying."
+                } else if allSucceeded {
+                    nil
+                } else {
+                    Self.failureHint(
+                        force: self.force,
+                        aggregateOutcome: aggregateOutcome,
+                        singleFailureHint: singleFailureHint
+                    )
+                }
+
+                for result in results where !result.success {
+                    let action = self.force ? "Force quit" : "Quit"
+                    let recovery = failureHint.map { " \($0)" } ?? ""
+                    logger.debug("\(action) failed for \(result.app_name) (PID: \(result.pid)).\(recovery)")
+                }
 
                 if self.jsonOutput {
-                    let succeededCount = results.count(where: \.success)
                     let response = ResultEnvelope(
                         success: allSucceeded,
-                        effect: allSucceeded ? .confirmed : (succeededCount > 0 ? .partial : .suspectedNoop),
+                        effect: batchOutcome.interruptionEffect ?? aggregateOutcome?.effect ??
+                            (allSucceeded ? .confirmed :
+                                (wasCancelled || succeededCount > 0 ? .partial : .suspectedNoop)),
+                        outcome: aggregateOutcome?.projection,
                         data: data,
                         messages: nil,
                         debug_logs: self.outputLogger.getDebugLogs(),
                         error: allSucceeded ? nil : ErrorInfo(
-                            message: "Failed to quit \(results.count - succeededCount) application(s).",
+                            message: wasCancelled
+                                ? "Quit batch cancelled after \(results.count) of \(quitApps.count) target(s)."
+                                : "Failed to quit \(results.count - succeededCount) application(s).",
                             code: .INTERACTION_FAILED,
-                            hint: self.force ? nil : "Try --force to force quit."
+                            hint: failureHint,
+                            retrySafe: aggregateOutcome.map { $0.retrySafety == .safe },
+                            mutationDispatched: aggregateOutcome.map(\.dispatchState.mutationDispatched)
                         )
                     )
                     outputJSONCodable(response, logger: self.outputLogger)
@@ -131,13 +172,13 @@ extension AppCommand {
                             print("✓ Quit \(result.app_name)")
                         } else {
                             print("✗ Failed to quit \(result.app_name) (PID: \(result.pid))")
-                            if !self.force {
-                                print(
-                                    "  💡 Tip: The app may have unsaved changes or be showing a dialog. " +
-                                        "Try --force to force quit."
-                                )
-                            }
                         }
+                    }
+                    if wasCancelled {
+                        print("✗ Quit batch cancelled after \(results.count) of \(quitApps.count) targets")
+                    }
+                    if let failureHint {
+                        print("  💡 Tip: \(failureHint)")
                     }
                 }
                 for result in results {
@@ -156,6 +197,39 @@ extension AppCommand {
                 handleError(error)
                 throw ExitCode(1)
             }
+        }
+
+        private struct BatchOutcome {
+            let outcome: DesktopActionOutcome?
+            let interruptionEffect: DesktopActionOutcome.Effect?
+        }
+
+        private static func resolveBatchOutcome(
+            actionOutcomes: [DesktopActionOutcome?],
+            succeededCount: Int,
+            attemptedCount: Int,
+            plannedCount: Int,
+            wasCancelled: Bool,
+            cancellationInterruptedAttempt: Bool
+        ) -> BatchOutcome {
+            if wasCancelled,
+               let interruption = DesktopActionSequenceAccumulator.interruptedBatch(
+                   completedOutcomes: actionOutcomes,
+                   succeededCount: succeededCount,
+                   attemptedCount: attemptedCount,
+                   plannedCount: plannedCount,
+                   inFlightAttemptMayHaveDispatched: cancellationInterruptedAttempt
+               ) {
+                return BatchOutcome(outcome: interruption.outcome, interruptionEffect: interruption.effect)
+            }
+            return BatchOutcome(
+                outcome: DesktopActionSequenceAccumulator.completedBatch(
+                    outcomes: actionOutcomes,
+                    succeededCount: succeededCount,
+                    attemptedCount: attemptedCount
+                ),
+                interruptionEffect: nil
+            )
         }
 
         private func validateArguments() throws {
@@ -184,6 +258,46 @@ extension AppCommand {
             if self.app == nil, self.pid == nil {
                 throw ValidationError("Either --app, --pid, or --all must be specified")
             }
+        }
+
+        private static func failureHint(
+            force: Bool,
+            aggregateOutcome: DesktopActionOutcome?,
+            singleFailureHint: String?
+        ) -> String? {
+            if let singleFailureHint,
+               !singleFailureHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return singleFailureHint
+            }
+            guard let aggregateOutcome else {
+                return "Perform a fresh observation of the targeted application state before taking another action."
+            }
+            if aggregateOutcome.state == .refused {
+                if aggregateOutcome.refusalReason == .targetUnavailable {
+                    return "Refresh the application inventory and select the current target before retrying."
+                }
+                return switch aggregateOutcome.escalation {
+                case .correctRequest:
+                    "Correct the quit request before retrying."
+                case .grantPermission:
+                    "Grant the required permission before retrying."
+                case .refreshTarget:
+                    "Refresh the targeted application state before retrying."
+                case .updateRuntime:
+                    "Update or select a compatible runtime before retrying."
+                case .recoverSideEffect, .observeBeforeRetry:
+                    "Perform a fresh observation of the targeted application state before taking another action."
+                case .none:
+                    "Review the refusal and correct the quit request before retrying."
+                }
+            }
+            guard aggregateOutcome.retrySafety == .safe else {
+                return "Perform a fresh observation of the targeted application state before taking another action."
+            }
+            guard aggregateOutcome.state == .suspectedNoop, !force else {
+                return nil
+            }
+            return "Try --force to force quit."
         }
 
         private func resolveQuitTargets() async throws -> [AppQuitTarget] {
