@@ -310,7 +310,6 @@ enum CommanderCLIBinder {
         }
         return
             commandType == CaptureLiveCommand.self ||
-            commandType == CaptureVideoCommand.self ||
             commandType == CaptureActionCommand.self
     }
 
@@ -334,23 +333,32 @@ enum CommanderCLIBinder {
             return focus == nil || focus == "background"
         }
 
+        let mayRefreshObservation = !InteractionSnapshotReference.isConcrete(values.singleOption("snapshot"))
         if commandType == ScrollCommand.self {
-            return values.singleOption("on") != nil
+            return mayRefreshObservation && values.singleOption("on") != nil
         }
         if commandType == ClickCommand.self {
             let hasElementTarget = values.singleOption("on") != nil ||
                 values.positionalValue(at: 0)?.isEmpty == false
-            return values.flag("foreground") && hasElementTarget
+            return mayRefreshObservation && values.flag("foreground") && hasElementTarget
         }
         if commandType == DragCommand.self {
             let endpoints = [values.singleOption("from"), values.singleOption("to")]
-            return endpoints.contains { endpoint in
+            return mayRefreshObservation && endpoints.contains { endpoint in
                 endpoint != nil && !DragCommand.isCoordinateTarget(endpoint)
             }
         }
         if commandType == MoveCommand.self {
-            return values.singleOption("to") != nil ||
+            return mayRefreshObservation && (values.singleOption("to") != nil ||
                 values.singleOption("on") != nil
+            )
+        }
+        if commandType == SetValueCommand.self || commandType == ActionCommand.self {
+            let hasElementReference = values.singleOption("on")?
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            let hasExplicitTarget = ["app", "pid", "windowId", "windowTitle", "windowIndex"]
+                .contains { values.singleOption($0) != nil }
+            return mayRefreshObservation && hasElementReference && hasExplicitTarget
         }
         return false
     }
@@ -559,6 +567,9 @@ enum CommanderCLIBinder {
         _ commandType: (any ParsableCommand.Type)?,
         parsedValues: ParsedValues
     ) -> Bool {
+        if commandType == CaptureVideoCommand.self {
+            return true
+        }
         guard commandType == PermissionsCommand.RequestSubcommand.self else { return false }
         return CommanderBindableValues(parsedValues: parsedValues).positionalValue(at: 0) != "event-synthesizing"
     }

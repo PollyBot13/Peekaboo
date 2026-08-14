@@ -9,6 +9,27 @@ enum InteractionSnapshotSource: String {
     case none
 }
 
+enum InteractionSnapshotReference {
+    static func normalized(_ snapshotId: String?) -> String? {
+        let trimmed = snapshotId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
+    static func isConcrete(_ snapshotId: String?) -> Bool {
+        guard let normalized = self.normalized(snapshotId) else { return false }
+        return !self.isLatestAlias(normalized)
+    }
+
+    static func isLatestAlias(_ snapshotId: String) -> Bool {
+        switch snapshotId.lowercased() {
+        case "latest", "most-recent", "most_recent":
+            true
+        default:
+            false
+        }
+    }
+}
+
 /// Why implicit "latest snapshot" resolution came back empty.
 enum InteractionSnapshotUnavailability {
     /// No usable snapshot exists at all (never captured, expired, or cleaned).
@@ -89,8 +110,8 @@ struct InteractionObservationContext {
         fallbackToLatest: Bool,
         snapshots: any SnapshotManagerProtocol
     ) async -> InteractionObservationContext {
-        if let explicitSnapshotId = normalizedSnapshotId(rawSnapshot) {
-            guard self.isLatestAlias(explicitSnapshotId) else {
+        if let explicitSnapshotId = InteractionSnapshotReference.normalized(rawSnapshot) {
+            guard InteractionSnapshotReference.isLatestAlias(explicitSnapshotId) else {
                 return InteractionObservationContext(
                     explicitSnapshotId: explicitSnapshotId,
                     snapshotId: explicitSnapshotId,
@@ -142,20 +163,6 @@ struct InteractionObservationContext {
         }
         return .invalidatedByMutation
     }
-
-    private static func normalizedSnapshotId(_ snapshotId: String?) -> String? {
-        let trimmed = snapshotId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed?.isEmpty == false ? trimmed : nil
-    }
-
-    private static func isLatestAlias(_ snapshotId: String) -> Bool {
-        switch snapshotId.lowercased() {
-        case "latest", "most-recent", "most_recent":
-            true
-        default:
-            false
-        }
-    }
 }
 
 @MainActor
@@ -182,6 +189,17 @@ struct TargetedElementObservationRefreshOptions {
 
 @MainActor
 enum InteractionObservationRefresher {
+    static func validateSnapshotTargetCombination(
+        snapshot: String?,
+        target: InteractionTargetOptions
+    ) throws {
+        guard target.hasAnyTarget, InteractionSnapshotReference.isConcrete(snapshot) else { return }
+        throw PeekabooError.invalidInput(
+            "Do not combine an explicit --snapshot with --app, --pid, or window targeting options. " +
+                "The snapshot already identifies the element's application and window."
+        )
+    }
+
     static func refreshForTargetIfNeeded(
         _ observation: InteractionObservationContext,
         options: TargetedElementObservationRefreshOptions,
@@ -213,12 +231,10 @@ enum InteractionObservationRefresher {
         guard target.hasAnyTarget else {
             return observation
         }
-        guard observation.source != .explicit else {
-            throw PeekabooError.invalidInput(
-                "Do not combine an explicit --snapshot with --app, --pid, or window targeting options. " +
-                    "The snapshot already identifies the element's application and window."
-            )
-        }
+        try self.validateSnapshotTargetCombination(
+            snapshot: observation.explicitSnapshotId,
+            target: target
+        )
 
         return try await self.refreshObservation(
             observation,
