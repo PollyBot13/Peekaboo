@@ -24,6 +24,10 @@ produces the same `errSecInternalComponent`. Do not export a bare `SIGN_IDENTITY
 it is a fallback for the build scripts and will substitute for the Foundation identity wherever
 `MAC_RELEASE_CODESIGN_IDENTITY` is not explicitly set.
 
+Every Developer ID signing surface passes Apple's timestamp authority explicitly as
+`http://timestamp.apple.com/ts01`. The current toolchain can fail with “A timestamp was expected but was not found”
+when it is left to choose its own endpoint, even while the canonical TSA is reachable.
+
 Notarization resolves the three App Store Connect API fields from the canonical Molty release item, validates them
 with `notarytool history`, and submits with S3 acceleration disabled. The tracked manifest clears both supported
 keychain-profile variables so a stale value inherited from the caller cannot override the current release item.

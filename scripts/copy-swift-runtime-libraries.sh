@@ -16,6 +16,7 @@ if [ -z "${MAC_RELEASE_CODESIGN_IDENTITY:-}" ] && [ -n "${SIGN_IDENTITY:-}" ]; t
 fi
 CODESIGN_BIN="${MAC_RELEASE_CODESIGN_BIN:-codesign}"
 CODESIGN_TIMESTAMP="${CODESIGN_TIMESTAMP:-auto}"
+CODESIGN_TIMESTAMP_URL="${CODESIGN_TIMESTAMP_URL:-http://timestamp.apple.com/ts01}"
 CODESIGN_KEYCHAIN="${MAC_RELEASE_CODESIGN_KEYCHAIN:-${CODESIGN_KEYCHAIN:-}}"
 
 [ -x "$EXECUTABLE_PATH" ] || {
@@ -46,13 +47,13 @@ if [ -n "$SIGN_IDENTITY" ]; then
     TIMESTAMP_ARG="--timestamp=none"
     case "$CODESIGN_TIMESTAMP" in
         1|on|yes|true)
-            TIMESTAMP_ARG="--timestamp"
+            TIMESTAMP_ARG="--timestamp=$CODESIGN_TIMESTAMP_URL"
             ;;
         0|off|no|false)
             ;;
         auto)
             if [[ "$SIGN_IDENTITY" == *"Developer ID Application"* ]]; then
-                TIMESTAMP_ARG="--timestamp"
+                TIMESTAMP_ARG="--timestamp=$CODESIGN_TIMESTAMP_URL"
             fi
             ;;
         *)

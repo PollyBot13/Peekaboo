@@ -18,6 +18,7 @@ EXPECTED_SIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P
 EXPECTED_TEAM_ID="FWJYW4S8P8"
 EXPECTED_SIGN_REQUIREMENT="anchor apple generic and certificate leaf[subject.OU] = \"$EXPECTED_TEAM_ID\""
 SIGN_IDENTITY="${MAC_RELEASE_CODESIGN_IDENTITY:-${SIGN_IDENTITY:-$EXPECTED_SIGN_IDENTITY}}"
+CODESIGN_TIMESTAMP_URL="${CODESIGN_TIMESTAMP_URL:-http://timestamp.apple.com/ts01}"
 NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-${NOTARYTOOL_KEYCHAIN_PROFILE:-}}"
 RELEASE_DIR="${RELEASE_DIR:-$ROOT_DIR/build/release}"
 APP_ZIP="${APP_ZIP:-}"
@@ -307,7 +308,7 @@ create-dmg \
   "$SOURCE_DIR"
 
 log "Developer ID signing DMG"
-codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+codesign --force --timestamp="$CODESIGN_TIMESTAMP_URL" --sign "$SIGN_IDENTITY" "$DMG_PATH"
 codesign --verify --strict --verbose=2 "$DMG_PATH"
 verify_identity "$DMG_PATH"
 

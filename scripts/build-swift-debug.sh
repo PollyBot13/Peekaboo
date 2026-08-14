@@ -8,6 +8,7 @@ SWIFT_PROJECT_PATH="$PROJECT_ROOT/Apps/CLI"
 source "$PROJECT_ROOT/scripts/source-provenance.sh"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 CODESIGN_TIMESTAMP="${CODESIGN_TIMESTAMP:-auto}"
+CODESIGN_TIMESTAMP_URL="${CODESIGN_TIMESTAMP_URL:-http://timestamp.apple.com/ts01}"
 
 if command -v xcbeautify >/dev/null 2>&1; then
     USE_XCBEAUTIFY=1
@@ -55,14 +56,14 @@ resolve_timestamp_arg() {
     TIMESTAMP_ARG="--timestamp=none"
     case "$CODESIGN_TIMESTAMP" in
         1|on|yes|true)
-            TIMESTAMP_ARG="--timestamp"
+            TIMESTAMP_ARG="--timestamp=$CODESIGN_TIMESTAMP_URL"
             ;;
         0|off|no|false)
             TIMESTAMP_ARG="--timestamp=none"
             ;;
         auto)
             if [[ "$SIGN_IDENTITY" == *"Developer ID Application"* ]]; then
-                TIMESTAMP_ARG="--timestamp"
+                TIMESTAMP_ARG="--timestamp=$CODESIGN_TIMESTAMP_URL"
             fi
             ;;
         *)

@@ -57,6 +57,15 @@ rg -Fq 'libswiftCompatibility*.dylib' "$ROOT_DIR/homebrew/peekaboo.rb"
 rg -Fq -- '--options runtime' "$ROOT_DIR/scripts/copy-swift-runtime-libraries.sh"
 rg -Fq 'MAC_RELEASE_CODESIGN_TEAM_ID' "$ROOT_DIR/scripts/verify-swift-runtime-libraries.sh"
 
+for timestamp_surface in \
+  "$ROOT_DIR/scripts/build-swift-arm.sh" \
+  "$ROOT_DIR/scripts/build-swift-universal.sh" \
+  "$ROOT_DIR/scripts/copy-swift-runtime-libraries.sh" \
+  "$ROOT_DIR/scripts/release-macos-app.sh" \
+  "$ROOT_DIR/scripts/create-release-dmg.sh"; do
+  rg -Fq 'http://timestamp.apple.com/ts01' "$timestamp_surface"
+done
+
 for release_build in \
   "$ROOT_DIR/scripts/build-swift-arm.sh" \
   "$ROOT_DIR/scripts/build-swift-universal.sh"; do

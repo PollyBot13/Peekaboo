@@ -11,6 +11,7 @@ FINAL_BINARY_PATH="$PROJECT_ROOT/$FINAL_BINARY_NAME"
 SIGN_IDENTITY="${MAC_RELEASE_CODESIGN_IDENTITY:-${SIGN_IDENTITY:-}}"
 CODESIGN_BIN="${MAC_RELEASE_CODESIGN_BIN:-codesign}"
 CODESIGN_TIMESTAMP="${CODESIGN_TIMESTAMP:-auto}"
+CODESIGN_TIMESTAMP_URL="${CODESIGN_TIMESTAMP_URL:-http://timestamp.apple.com/ts01}"
 CODESIGN_KEYCHAIN="${MAC_RELEASE_CODESIGN_KEYCHAIN:-${CODESIGN_KEYCHAIN:-}}"
 
 if command -v xcbeautify >/dev/null 2>&1; then
@@ -59,14 +60,14 @@ resolve_timestamp_arg() {
     TIMESTAMP_ARG="--timestamp=none"
     case "$CODESIGN_TIMESTAMP" in
         1|on|yes|true)
-            TIMESTAMP_ARG="--timestamp"
+            TIMESTAMP_ARG="--timestamp=$CODESIGN_TIMESTAMP_URL"
             ;;
         0|off|no|false)
             TIMESTAMP_ARG="--timestamp=none"
             ;;
         auto)
             if [[ "$SIGN_IDENTITY" == *"Developer ID Application"* ]]; then
-                TIMESTAMP_ARG="--timestamp"
+                TIMESTAMP_ARG="--timestamp=$CODESIGN_TIMESTAMP_URL"
             fi
             ;;
         *)

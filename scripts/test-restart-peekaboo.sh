@@ -384,11 +384,11 @@ if [[ "${1:-}" == "--force" ]]; then
   expected_team="${PEEKABOO_APP_EXPECTED_TEAM_ID:-}"
   [[ -n "${expected_identity}" && -n "${expected_team}" ]] || exit 3
   if [[ "$*" == *' --deep '* ]]; then
-    [[ "$*" == "--force --deep --options runtime --timestamp --sign ${expected_identity} ${bundle}" ]] || exit 4
+    [[ "$*" == "--force --deep --options runtime --timestamp=http://timestamp.apple.com/ts01 --sign ${expected_identity} ${bundle}" ]] || exit 4
   else
     expected_entitlements="${PEEKABOO_APP_ENTITLEMENTS:-}"
     [[ -n "${expected_entitlements}" ]] || exit 5
-    [[ "$*" == "--force --options runtime --timestamp --entitlements ${expected_entitlements} --sign ${expected_identity} ${bundle}" ]] || exit 6
+    [[ "$*" == "--force --options runtime --timestamp=http://timestamp.apple.com/ts01 --entitlements ${expected_entitlements} --sign ${expected_identity} ${bundle}" ]] || exit 6
   fi
   printf '%s\n' 'TESTTEAM' >"${bundle}/.team-id"
   printf '%s\n' 'developer-id' >"${bundle}/.requirement"

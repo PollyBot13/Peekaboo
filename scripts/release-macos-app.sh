@@ -101,6 +101,7 @@ EXPECTED_SIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P
 EXPECTED_TEAM_ID="FWJYW4S8P8"
 EXPECTED_SIGN_REQUIREMENT="anchor apple generic and certificate leaf[subject.OU] = \"$EXPECTED_TEAM_ID\""
 SIGN_IDENTITY="${MAC_RELEASE_CODESIGN_IDENTITY:-${SIGN_IDENTITY:-$EXPECTED_SIGN_IDENTITY}}"
+CODESIGN_TIMESTAMP_URL="${CODESIGN_TIMESTAMP_URL:-http://timestamp.apple.com/ts01}"
 NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-${NOTARYTOOL_KEYCHAIN_PROFILE:-}}"
 APPCAST="${APPCAST:-${MAC_RELEASE_APPCAST:-appcast.xml}}"
 APPCAST_PATH="${APPCAST_PATH:-$ROOT/$APPCAST}"
@@ -465,8 +466,8 @@ fi
 verify_app_payload "$APP_BUNDLE"
 
 log "Developer ID signing"
-codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
-codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS_PATH" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+codesign --force --deep --options runtime --timestamp="$CODESIGN_TIMESTAMP_URL" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+codesign --force --options runtime --timestamp="$CODESIGN_TIMESTAMP_URL" --entitlements "$ENTITLEMENTS_PATH" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 verify_app_entitlements "$APP_BUNDLE"
 verify_developer_id_signature "$APP_BUNDLE"
