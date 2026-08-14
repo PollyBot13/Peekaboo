@@ -308,7 +308,7 @@ create-dmg \
   "$SOURCE_DIR"
 
 log "Developer ID signing DMG"
-codesign --force --timestamp="$CODESIGN_TIMESTAMP_URL" --sign "$SIGN_IDENTITY" "$DMG_PATH"
+"$ROOT_DIR/scripts/codesign-with-retry.sh" --force --timestamp="$CODESIGN_TIMESTAMP_URL" --sign "$SIGN_IDENTITY" "$DMG_PATH"
 codesign --verify --strict --verbose=2 "$DMG_PATH"
 verify_identity "$DMG_PATH"
 

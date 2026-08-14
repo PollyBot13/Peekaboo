@@ -164,7 +164,7 @@ echo "🔏 Code signing the binary..."
 resolve_signing_identity
 resolve_timestamp_arg
 resolve_keychain_args
-"$CODESIGN_BIN" --force --sign "$SIGN_IDENTITY" \
+MAC_RELEASE_CODESIGN_BIN="$CODESIGN_BIN" "$PROJECT_ROOT/scripts/codesign-with-retry.sh" --force --sign "$SIGN_IDENTITY" \
     "${CODESIGN_KEYCHAIN_ARGS[@]}" \
     --options runtime \
     $TIMESTAMP_ARG \

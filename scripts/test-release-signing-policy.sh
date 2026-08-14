@@ -64,6 +64,7 @@ for timestamp_surface in \
   "$ROOT_DIR/scripts/release-macos-app.sh" \
   "$ROOT_DIR/scripts/create-release-dmg.sh"; do
   rg -Fq 'http://timestamp.apple.com/ts01' "$timestamp_surface"
+  rg -Fq 'codesign-with-retry.sh' "$timestamp_surface"
 done
 
 for release_build in \

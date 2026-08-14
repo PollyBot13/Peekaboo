@@ -466,8 +466,8 @@ fi
 verify_app_payload "$APP_BUNDLE"
 
 log "Developer ID signing"
-codesign --force --deep --options runtime --timestamp="$CODESIGN_TIMESTAMP_URL" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
-codesign --force --options runtime --timestamp="$CODESIGN_TIMESTAMP_URL" --entitlements "$ENTITLEMENTS_PATH" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+"$ROOT/scripts/codesign-with-retry.sh" --force --deep --options runtime --timestamp="$CODESIGN_TIMESTAMP_URL" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+"$ROOT/scripts/codesign-with-retry.sh" --force --options runtime --timestamp="$CODESIGN_TIMESTAMP_URL" --entitlements "$ENTITLEMENTS_PATH" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 verify_app_entitlements "$APP_BUNDLE"
 verify_developer_id_signature "$APP_BUNDLE"

@@ -152,7 +152,7 @@ ENTITLEMENTS_PATH="$SWIFT_PROJECT_PATH/Sources/Resources/peekaboo.entitlements"
 resolve_signing_identity
 resolve_timestamp_arg
 if [[ -f "$ENTITLEMENTS_PATH" ]]; then
-    codesign --force --sign "$SIGN_IDENTITY" \
+    "$PROJECT_ROOT/scripts/codesign-with-retry.sh" --force --sign "$SIGN_IDENTITY" \
         --options runtime \
         $TIMESTAMP_ARG \
         --identifier "boo.peekaboo" \
@@ -161,7 +161,7 @@ if [[ -f "$ENTITLEMENTS_PATH" ]]; then
     echo "✅ Debug binary signed with entitlements"
 else
     echo "⚠️  Entitlements file not found, signing without entitlements"
-    codesign --force --sign "$SIGN_IDENTITY" \
+    "$PROJECT_ROOT/scripts/codesign-with-retry.sh" --force --sign "$SIGN_IDENTITY" \
         --options runtime \
         $TIMESTAMP_ARG \
         --identifier "boo.peekaboo" \

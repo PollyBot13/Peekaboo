@@ -65,13 +65,13 @@ if [ -n "$SIGN_IDENTITY" ]; then
     for runtime_library in "$DESTINATION_DIR"/libswiftCompatibility*.dylib; do
         [ -e "$runtime_library" ] || continue
         if [ -n "$CODESIGN_KEYCHAIN" ]; then
-            "$CODESIGN_BIN" --force --sign "$SIGN_IDENTITY" \
+            MAC_RELEASE_CODESIGN_BIN="$CODESIGN_BIN" "$(dirname "$0")/codesign-with-retry.sh" --force --sign "$SIGN_IDENTITY" \
                 --keychain "$CODESIGN_KEYCHAIN" \
                 --options runtime \
                 $TIMESTAMP_ARG \
                 "$runtime_library"
         else
-            "$CODESIGN_BIN" --force --sign "$SIGN_IDENTITY" \
+            MAC_RELEASE_CODESIGN_BIN="$CODESIGN_BIN" "$(dirname "$0")/codesign-with-retry.sh" --force --sign "$SIGN_IDENTITY" \
                 --options runtime \
                 $TIMESTAMP_ARG \
                 "$runtime_library"
