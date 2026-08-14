@@ -7,6 +7,9 @@ FOUNDATION_IDENTITY='Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)'
 FOUNDATION_TEAM='FWJYW4S8P8'
 
 pushd "$ROOT_DIR" >/dev/null
+NOTARYTOOL_KEYCHAIN_PROFILE=stale-inherited-profile
+NOTARYTOOL_PROFILE=stale-inherited-profile
+export NOTARYTOOL_KEYCHAIN_PROFILE NOTARYTOOL_PROFILE
 # shellcheck source=/Users/steipete/Projects/Peekaboo/.mac-release.env
 source .mac-release.env
 popd >/dev/null
@@ -14,7 +17,11 @@ popd >/dev/null
 [[ "$MAC_RELEASE_CODESIGN_IDENTITY" == "$FOUNDATION_IDENTITY" ]]
 [[ "$MAC_RELEASE_CLI_CODESIGN_IDENTITY" == "$FOUNDATION_IDENTITY" ]]
 [[ "$MAC_RELEASE_CLI_CODESIGN_TEAM_ID" == "$FOUNDATION_TEAM" ]]
-[[ "$NOTARYTOOL_KEYCHAIN_PROFILE" == "openclaw-release" ]]
+[[ -z "${NOTARYTOOL_KEYCHAIN_PROFILE:-}" ]]
+[[ -z "${NOTARYTOOL_PROFILE:-}" ]]
+[[ "$MAC_RELEASE_OP_FIELDS" == *APP_STORE_CONNECT_KEY_ID* ]]
+[[ "$MAC_RELEASE_OP_FIELDS" == *APP_STORE_CONNECT_ISSUER_ID* ]]
+[[ "$MAC_RELEASE_OP_FIELDS" == *APP_STORE_CONNECT_API_KEY_P8* ]]
 
 policy_files=(
   "$ROOT_DIR/.mac-release.env"

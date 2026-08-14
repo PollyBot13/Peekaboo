@@ -24,8 +24,9 @@ produces the same `errSecInternalComponent`. Do not export a bare `SIGN_IDENTITY
 it is a fallback for the build scripts and will substitute for the Foundation identity wherever
 `MAC_RELEASE_CODESIGN_IDENTITY` is not explicitly set.
 
-Notarization uses the `openclaw-release` keychain profile. On a Mac that lacks it, create it from the same App
-Store Connect key with `xcrun notarytool store-credentials`.
+Notarization resolves the three App Store Connect API fields from the canonical Molty release item, validates them
+with `notarytool history`, and submits with S3 acceleration disabled. The tracked manifest clears both supported
+keychain-profile variables so a stale value inherited from the caller cannot override the current release item.
 
 ## 1. Prepare
 
