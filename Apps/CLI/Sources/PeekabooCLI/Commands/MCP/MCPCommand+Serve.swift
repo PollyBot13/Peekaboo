@@ -71,7 +71,8 @@ extension MCPCommand {
                 let mutationCoordinator = runtime.toolSnapshotMutationCoordinator
                 let toolContext = Self.makeToolContext(
                     services: runtime.services,
-                    snapshotMutationCoordinator: mutationCoordinator
+                    snapshotMutationCoordinator: mutationCoordinator,
+                    capturePreflightRefusal: runtime.toolCapturePreflightRefusal
                 )
                 let server = try await PeekabooMCPServer(toolContext: toolContext)
                 try await server.serve(transport: transportType, port: self.port)
@@ -93,11 +94,13 @@ extension MCPCommand {
 
         static func makeToolContext(
             services: any PeekabooServiceProviding,
-            snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)?
+            snapshotMutationCoordinator: (any MCPToolSnapshotMutationCoordinating)?,
+            capturePreflightRefusal: MCPToolCapturePreflightRefusal? = nil
         ) -> MCPToolContext {
             let snapshotExecutionGate: MCPToolSnapshotExecutionGate
             if let agent = services.agent as? PeekabooAgentService {
                 agent.configureSnapshotMutationCoordinator(snapshotMutationCoordinator)
+                agent.configureCapturePreflightRefusal(capturePreflightRefusal)
                 snapshotExecutionGate = agent.snapshotExecutionGate
             } else {
                 snapshotExecutionGate = MCPToolSnapshotExecutionGate()
@@ -106,7 +109,8 @@ extension MCPCommand {
             return MCPToolContext(
                 services: services,
                 snapshotMutationCoordinator: snapshotMutationCoordinator,
-                snapshotExecutionGate: snapshotExecutionGate
+                snapshotExecutionGate: snapshotExecutionGate,
+                capturePreflightRefusal: capturePreflightRefusal
             )
         }
 

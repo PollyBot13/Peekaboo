@@ -843,6 +843,8 @@ extension ScreenCaptureKitOwnerRuntimeTests {
             processIdentifier: 3131,
             processStartIdentity: 4141
         )])
+        #expect(resolution.toolCapturePreflightRefusal?.message.contains("/tmp/old-host.sock") == true)
+        #expect(resolution.toolCapturePreflightRefusal?.message.contains("No capture was dispatched") == true)
         #expect(localFactoryCalls == 1)
     }
 
@@ -1384,7 +1386,7 @@ extension ScreenCaptureKitOwnerRuntimeTests {
         return options
     }
 
-    private static func ownerReceipt() -> ScreenCaptureKitOwnerLease.OwnerReceipt {
+    static func ownerReceipt() -> ScreenCaptureKitOwnerLease.OwnerReceipt {
         ScreenCaptureKitOwnerLease.OwnerReceipt(
             processIdentifier: 4242,
             processStartIdentity: 9001,
@@ -1427,7 +1429,7 @@ extension ScreenCaptureKitOwnerRuntimeTests {
         )
     }
 
-    private static func startHost(
+    static func startHost(
         socketPath: String,
         processIdentifier: pid_t,
         processStartIdentity: UInt64,
@@ -1448,7 +1450,20 @@ extension ScreenCaptureKitOwnerRuntimeTests {
             hostKind: .onDemand,
             allowlistedTeams: [],
             allowlistedBundles: [],
-            allowedOperations: [.captureScreen, .desktopObservation, .invalidateImplicitLatestSnapshot],
+            allowedOperations: [
+                .captureScreen,
+                .desktopObservation,
+                .invalidateImplicitLatestSnapshot,
+                .launchApplicationWithOptions,
+                .activateApplication,
+                .targetedHotkey,
+                .targetedTypeActions,
+                .targetedClick,
+                .targetedDialogListElements,
+                .prepareDialogAction,
+                .exactDialogClickButton,
+                .exactDialogDismiss,
+            ],
             hostIdentity: PeekabooBridgeHostIdentity(
                 processIdentifier: processIdentifier,
                 processStartIdentity: processStartIdentity,
