@@ -262,7 +262,7 @@ public struct PeekabooBridgeTargetedClickRequest: Codable, Sendable {
 
     public static func requiresPostEventPermission(target: ClickTarget, clickType: ClickType) -> Bool {
         switch (target, clickType) {
-        case (.coordinates, _), (_, .double), (_, .longPress):
+        case (.coordinates, _), (_, .middle), (_, .double), (_, .triple), (_, .longPress):
             true
         case (_, .single), (_, .right):
             false

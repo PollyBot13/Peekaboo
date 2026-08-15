@@ -36,6 +36,13 @@ struct WindowRoutedPointerDriver {
         let buttonNumber: Int64
     }
 
+    struct HeldButtonRoute {
+        let receipt: RouteReceipt
+        let clickGroup: Int64
+        let transport: WindowRoutedPointerTransport
+        let button: MouseButton
+    }
+
     private struct DispatchContext {
         let receipt: RouteReceipt
         let clickGroup: Int64
@@ -128,12 +135,8 @@ struct WindowRoutedPointerDriver {
         expectedWindowIdentity: WindowMutationIdentity? = nil,
         expectedWindowBounds: CGRect? = nil) async throws -> DesktopActionOutcome
     {
-        guard button == .left || button == .right else {
-            throw PeekabooError.serviceUnavailable(
-                "Window-routed background pointer delivery supports left and right buttons only")
-        }
-        guard (1...2).contains(count) else {
-            throw PeekabooError.invalidInput("Window-routed click count must be 1 or 2")
+        guard (1...3).contains(count) else {
+            throw PeekabooError.invalidInput("Window-routed click count must be between 1 and 3")
         }
         guard self.hasPostEventAccess() else {
             throw PeekabooError.permissionDeniedEventSynthesizing
@@ -170,16 +173,8 @@ struct WindowRoutedPointerDriver {
         for pairIndex in 0..<count {
             try Self.checkCancellation(afterPosting: postedEventCount)
             let clickState = Int64(pairIndex + 1)
-            let down = EventSpecification(
-                type: button == .right ? .rightMouseDown : .leftMouseDown,
-                button: button == .right ? .right : .left,
-                clickState: clickState,
-                buttonNumber: button == .right ? 1 : 0)
-            let up = EventSpecification(
-                type: button == .right ? .rightMouseUp : .leftMouseUp,
-                button: button == .right ? .right : .left,
-                clickState: clickState,
-                buttonNumber: button == .right ? 1 : 0)
+            let down = Self.buttonEventSpecification(button: button, down: true, clickState: clickState)
+            let up = Self.buttonEventSpecification(button: button, down: false, clickState: clickState)
 
             try self.post(
                 down,
@@ -231,6 +226,89 @@ struct WindowRoutedPointerDriver {
                 causeDescription: error.localizedDescription)
         }
         return outcome
+    }
+
+    /// Posts a routed mouse-down and returns the exact route needed for its eventual release.
+    ///
+    /// The caller owns the returned route until `mouseUp` succeeds. Any failure after the down
+    /// event is posted releases it to the original process generation before returning.
+    func mouseDown(
+        at point: CGPoint,
+        button: MouseButton,
+        targetProcessIdentifier: pid_t,
+        targetWindowID: CGWindowID,
+        expectedWindowIdentity: WindowMutationIdentity,
+        expectedWindowBounds: CGRect) async throws -> (route: HeldButtonRoute, outcome: DesktopActionOutcome)
+    {
+        guard self.hasPostEventAccess() else {
+            throw PeekabooError.permissionDeniedEventSynthesizing
+        }
+        try Task.checkCancellation()
+
+        let receipt = try self.resolveRoute(targetProcessIdentifier, targetWindowID, point)
+        guard receipt.identity == expectedWindowIdentity,
+              receipt.bounds == expectedWindowBounds,
+              receipt.bounds.contains(point)
+        else {
+            throw PeekabooError.snapshotStale(
+                "Resolved background pointer hold does not match the captured PID, window, bounds, or point")
+        }
+
+        let route = HeldButtonRoute(
+            receipt: receipt,
+            clickGroup: self.clickGroupIdentifier(),
+            transport: self.resolveTransport(targetProcessIdentifier),
+            button: button)
+        var postedEventCount = 0
+        let primer = EventSpecification(type: .mouseMoved, button: .left, clickState: 0, buttonNumber: 0)
+        try self.post(
+            primer,
+            receipt: receipt,
+            clickGroup: route.clickGroup,
+            transport: route.transport,
+            postedEventCount: &postedEventCount)
+        await self.sleep(.milliseconds(12))
+        try Self.checkCancellation(afterPosting: postedEventCount)
+
+        let down = Self.buttonEventSpecification(button: button, down: true, clickState: 1)
+        let up = Self.buttonEventSpecification(button: button, down: false, clickState: 1)
+        try self.post(
+            down,
+            receipt: receipt,
+            clickGroup: route.clickGroup,
+            transport: route.transport,
+            postedEventCount: &postedEventCount)
+        do {
+            try Self.checkCancellation(afterPosting: postedEventCount)
+            try self.requireCurrentRoute(receipt, afterPosting: postedEventCount)
+        } catch {
+            try self.releaseAfterInterruptedDown(
+                up,
+                context: DispatchContext(
+                    receipt: receipt,
+                    clickGroup: route.clickGroup,
+                    transport: route.transport),
+                postedEventCount: &postedEventCount,
+                cause: error)
+        }
+        return try (route, Self.pointerOutcome(eventCount: postedEventCount))
+    }
+
+    /// Releases a previously returned held-button route without requiring the window to remain
+    /// stationary. Cleanup is restricted to the original live process generation.
+    func mouseUp(_ route: HeldButtonRoute) throws -> DesktopActionOutcome {
+        var postedEventCount = 0
+        try self.postRelease(
+            Self.buttonEventSpecification(button: route.button, down: false, clickState: 1),
+            receipt: route.receipt,
+            clickGroup: route.clickGroup,
+            transport: route.transport,
+            postedEventCount: &postedEventCount)
+        return try Self.pointerOutcome(eventCount: postedEventCount)
+    }
+
+    func originalProcessGenerationIsCurrent(for route: HeldButtonRoute) -> Bool {
+        self.processGenerationIsCurrent(route.receipt)
     }
 
     /// Posts line-based wheel events to one exact visible background window without cursor movement.
@@ -514,6 +592,44 @@ struct WindowRoutedPointerDriver {
     private static func setIntegerField(_ rawField: UInt32, clickState value: Int64, on event: CGEvent) {
         guard let field = CGEventField(rawValue: rawField) else { return }
         event.setIntegerValueField(field, value: value)
+    }
+
+    private static func buttonEventSpecification(
+        button: MouseButton,
+        down: Bool,
+        clickState: Int64) -> EventSpecification
+    {
+        switch button {
+        case .left:
+            EventSpecification(
+                type: down ? .leftMouseDown : .leftMouseUp,
+                button: .left,
+                clickState: clickState,
+                buttonNumber: 0)
+        case .right:
+            EventSpecification(
+                type: down ? .rightMouseDown : .rightMouseUp,
+                button: .right,
+                clickState: clickState,
+                buttonNumber: 1)
+        case .middle:
+            EventSpecification(
+                type: down ? .otherMouseDown : .otherMouseUp,
+                button: .center,
+                clickState: clickState,
+                buttonNumber: 2)
+        }
+    }
+
+    private static func pointerOutcome(eventCount: Int) throws -> DesktopActionOutcome {
+        guard let unitCount = DesktopActionOutcome.DispatchUnitCount(eventCount) else {
+            throw PeekabooError.operationError(
+                message: "Window-routed pointer delivery completed without posting an event")
+        }
+        return .dispatchedUnverified(
+            delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+            evidence: .deliveryAccepted,
+            unitCount: unitCount)
     }
 
     private static func stampRoutingFields(

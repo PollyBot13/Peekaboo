@@ -31,8 +31,26 @@ public enum ElementType: String, Sendable, Codable {
 public enum ClickType: String, Sendable, Codable {
     case single
     case right
+    case middle
     case double
+    case triple
     case longPress
+}
+
+/// Mouse button used by split background pointer holds.
+public enum PointerButton: String, Sendable, Equatable, Codable {
+    case left
+    case right
+    case middle
+}
+
+/// Opaque ownership token returned by a successful background mouse-down.
+public struct BackgroundPointerHoldToken: Sendable, Equatable, Hashable, Codable {
+    public let id: UUID
+
+    public init(id: UUID = UUID()) {
+        self.id = id
+    }
 }
 
 // MARK: - Scroll & Swipe
@@ -232,7 +250,9 @@ extension ClickType: CustomStringConvertible {
         switch self {
         case .single: "single"
         case .right: "right"
+        case .middle: "middle"
         case .double: "double"
+        case .triple: "triple"
         case .longPress: "long press"
         }
     }

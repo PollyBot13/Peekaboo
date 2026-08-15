@@ -284,6 +284,100 @@ struct WindowRoutedPointerDriverTests {
 
     @Test
     @MainActor
+    func `middle and triple clicks use routed button events`() async throws {
+        let cases: [(MouseButton, Int, [CGEventType], [Int64])] = [
+            (.middle, 1, [.mouseMoved, .otherMouseDown, .otherMouseUp], [0, 2, 2]),
+            (
+                .left,
+                3,
+                [
+                    .mouseMoved,
+                    .leftMouseDown,
+                    .leftMouseUp,
+                    .leftMouseDown,
+                    .leftMouseUp,
+                    .leftMouseDown,
+                    .leftMouseUp,
+                ],
+                [0, 0, 0, 0, 0, 0, 0]),
+        ]
+
+        for (button, count, expectedTypes, expectedButtonNumbers) in cases {
+            var specifications: [WindowRoutedPointerDriver.EventSpecification] = []
+            let receipt = Self.receipt()
+            let driver = WindowRoutedPointerDriver(
+                hasPostEventAccess: { true },
+                resolveRoute: { _, _, _ in receipt },
+                routeIsCurrent: { _ in true },
+                makeEvent: { specification, point in
+                    specifications.append(specification)
+                    return CGEvent(
+                        mouseEventSource: nil,
+                        mouseType: specification.type,
+                        mouseCursorPosition: point,
+                        mouseButton: specification.button)
+                },
+                stampWindowLocation: { _, _ in true },
+                postSkyLight: { _, _ in true },
+                postPublic: { _, _ in },
+                resolveTransport: { _ in .publicCGEvent },
+                sleep: { _ in })
+
+            let outcome = try await driver.click(
+                at: receipt.screenPoint,
+                button: button,
+                count: count,
+                targetProcessIdentifier: receipt.identity.ownerProcessIdentifier,
+                targetWindowID: CGWindowID(receipt.identity.windowID))
+
+            #expect(specifications.map(\.type) == expectedTypes)
+            #expect(specifications.map(\.buttonNumber) == expectedButtonNumbers)
+            #expect(outcome.dispatchState.unitCount?.rawValue == expectedTypes.count)
+        }
+    }
+
+    @Test
+    @MainActor
+    func `split mouse down and up retain the exact routed destination`() async throws {
+        var specifications: [WindowRoutedPointerDriver.EventSpecification] = []
+        var processGenerationChecks = 0
+        let receipt = Self.receipt()
+        let driver = WindowRoutedPointerDriver(
+            hasPostEventAccess: { true },
+            resolveRoute: { _, _, _ in receipt },
+            routeIsCurrent: { _ in true },
+            processGenerationIsCurrent: { _ in processGenerationChecks += 1; return true },
+            makeEvent: { specification, point in
+                specifications.append(specification)
+                return CGEvent(
+                    mouseEventSource: nil,
+                    mouseType: specification.type,
+                    mouseCursorPosition: point,
+                    mouseButton: specification.button)
+            },
+            stampWindowLocation: { _, _ in true },
+            postSkyLight: { _, _ in true },
+            postPublic: { _, _ in },
+            resolveTransport: { _ in .publicCGEvent },
+            sleep: { _ in })
+
+        let down = try await driver.mouseDown(
+            at: receipt.screenPoint,
+            button: .left,
+            targetProcessIdentifier: receipt.identity.ownerProcessIdentifier,
+            targetWindowID: CGWindowID(receipt.identity.windowID),
+            expectedWindowIdentity: receipt.identity,
+            expectedWindowBounds: receipt.bounds)
+        let up = try driver.mouseUp(down.route)
+
+        #expect(specifications.map(\.type) == [.mouseMoved, .leftMouseDown, .leftMouseUp])
+        #expect(down.outcome.dispatchState.unitCount?.rawValue == 2)
+        #expect(up.dispatchState.unitCount?.rawValue == 1)
+        #expect(processGenerationChecks == 1)
+    }
+
+    @Test
+    @MainActor
     func `final route drift retains exact dispatched event evidence`() async {
         var validations = 0
         var posted = 0

@@ -257,6 +257,28 @@ struct HotkeyServiceTargetingTests {
         #expect(postedEvents.allSatisfy { $0.pid == getpid() })
     }
 
+    @Test func `cancelling a held targeted key releases the key and modifiers`() async {
+        var postedEvents: [CGEventType] = []
+        let service = HotkeyService(
+            inputPolicy: UIInputPolicy(defaultStrategy: .synthOnly),
+            postEventAccessEvaluator: { true },
+            eventPoster: { event, _ in postedEvents.append(event.type) })
+        let task = Task { @MainActor in
+            try await service.hotkey(
+                keys: "cmd,s",
+                holdDuration: 10000,
+                targetProcessIdentifier: getpid())
+        }
+
+        while postedEvents.count < 2 {
+            await Task.yield()
+        }
+        task.cancel()
+        _ = try? await task.value
+
+        #expect(postedEvents == [.flagsChanged, .keyDown, .keyUp, .flagsChanged])
+    }
+
     @Test func `exact window validator failure before modifiers posts no events`() async throws {
         var validationCount = 0
         var postedEventCount = 0

@@ -112,6 +112,7 @@ extension UIAutomationService {
      * - `.double`: Double-click for opening/selecting
      * - `.right`: Right-click for context menus
      * - `.middle`: Middle-click (wheel button)
+     * - `.triple`: Triple-click for paragraph selection and app-specific actions
      *
      * ## Visual Feedback
      * When visualizer is connected, shows:

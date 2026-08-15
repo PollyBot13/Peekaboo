@@ -47,7 +47,8 @@ struct HotkeyServiceFactoryContext {
 @MainActor
 public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedTypeServiceProtocol,
     ExactWindowTargetedClickServiceProtocol, TargetedFocusedElementServiceProtocol,
-    ExactWindowTargetedKeyboardServiceProtocol, UIAutomationActionOutcomeProviding
+    ExactWindowTargetedKeyboardServiceProtocol, UIAutomationActionOutcomeProviding,
+    BackgroundInputServiceProtocol
 {
     public let supportsProcessGenerationPinnedHotkeys = true
     public let supportsProcessGenerationPinnedTypeActions = true
@@ -77,6 +78,7 @@ public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedT
     let processStartIdentityProvider: @Sendable (pid_t) -> UInt64?
     let operationLaneCoordinator: DesktopOperationLaneCoordinator
     let desktopOperationExecutor: DesktopOperationExecutor
+    let backgroundInputHoldCoordinator: BackgroundInputHoldCoordinator
 
     // Search constraints to prevent unbounded AX traversals
     var searchLimits: UIAutomationSearchLimits
@@ -182,6 +184,7 @@ public final class UIAutomationService: TargetedHotkeyServiceProtocol, TargetedT
         self.operationLaneCoordinator = operationLaneCoordinator
         let executor = desktopOperationExecutor ?? DesktopOperationExecutor(laneCoordinator: operationLaneCoordinator)
         self.desktopOperationExecutor = executor
+        self.backgroundInputHoldCoordinator = BackgroundInputHoldCoordinator()
 
         // Initialize specialized services
         let elementDetectionService = ElementDetectionService(snapshotManager: manager)

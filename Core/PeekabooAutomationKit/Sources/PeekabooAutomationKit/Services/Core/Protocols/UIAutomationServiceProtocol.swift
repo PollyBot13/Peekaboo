@@ -519,3 +519,42 @@ public protocol ElementActionAutomationServiceProtocol: UIAutomationServiceProto
     func setValue(target: String, value: UIElementValue, snapshotId: String?) async throws -> ElementActionResult
     func performAction(target: String, actionName: String, snapshotId: String?) async throws -> ElementActionResult
 }
+
+/// Additive capability for exact-window background input that must remain held across an await or call boundary.
+///
+/// These routes neither activate the target nor move the shared cursor. Pointer holds are owned by an opaque token and
+/// automatically released after a bounded idle period. Held keys are bounded to ten seconds and use the same
+/// cancellation-safe key-up cleanup as targeted hotkeys.
+@MainActor
+public protocol BackgroundInputServiceProtocol: UIAutomationServiceProtocol {
+    func mouseDown(
+        at point: CGPoint,
+        button: PointerButton,
+        expectedWindowIdentity: WindowMutationIdentity,
+        expectedWindowBounds: CGRect) async throws -> BackgroundPointerHoldToken
+
+    func mouseDownWithOutcome(
+        at point: CGPoint,
+        button: PointerButton,
+        expectedWindowIdentity: WindowMutationIdentity,
+        expectedWindowBounds: CGRect) async throws -> UIAutomationActionResult<BackgroundPointerHoldToken>
+
+    func mouseUpWithOutcome(
+        hold: BackgroundPointerHoldToken) async throws -> UIAutomationActionResult<Void>
+
+    func mouseUp(hold: BackgroundPointerHoldToken) async throws
+
+    func releaseHeldInput() async
+
+    func holdKeyWithOutcome(
+        keys: String,
+        durationMilliseconds: Int,
+        target: ExactWindowKeyboardTarget) async throws -> UIAutomationActionResult<Void>
+
+    func holdKey(
+        keys: String,
+        durationMilliseconds: Int,
+        target: ExactWindowKeyboardTarget) async throws
+
+    func getCursorPosition() -> CGPoint?
+}

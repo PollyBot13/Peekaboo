@@ -191,7 +191,7 @@ public final class ClickService {
             return result
         case .right:
             return try await self.actionInputDriver.tryRightClick(element: element)
-        case .double:
+        case .middle, .double, .triple:
             throw ActionInputError.unsupported(.actionUnsupported)
         case .longPress:
             throw ActionInputError.unsupported(.actionUnsupported)
@@ -815,11 +815,23 @@ public final class ClickService {
                 button: .right,
                 count: 1,
                 destination: destination)
+        case .middle:
+            return try await self.performSyntheticClick(
+                at: point,
+                button: .middle,
+                count: 1,
+                destination: destination)
         case .double:
             return try await self.performSyntheticClick(
                 at: point,
                 button: .left,
                 count: 2,
+                destination: destination)
+        case .triple:
+            return try await self.performSyntheticClick(
+                at: point,
+                button: .left,
+                count: 3,
                 destination: destination)
         case .longPress:
             guard destination.processIdentifier == nil else {

@@ -15,7 +15,7 @@ public struct ClickTool: MCPTool {
 
     public var description: String {
         """
-        Clicks on UI elements or coordinates.
+        Clicks on UI elements or coordinates, including middle and triple clicks.
         Supports element queries, specific IDs from `see` or `inspect_ui`, or raw coordinates.
         Background delivery is the default. Background coordinates require a nonempty snapshot or coordinate_reference
         from a fresh exact-window `see`; pid alone is never a safe coordinate target. Set `foreground` to true only for
@@ -72,6 +72,12 @@ public struct ClickTool: MCPTool {
                     default: false),
                 "right": SchemaBuilder.boolean(
                     description: "Optional. Right-click (secondary click) instead of left-click.",
+                    default: false),
+                "middle": SchemaBuilder.boolean(
+                    description: "Optional. Middle-click instead of left-click.",
+                    default: false),
+                "triple": SchemaBuilder.boolean(
+                    description: "Optional. Triple-click instead of single click.",
                     default: false),
                 "foreground": SchemaBuilder.boolean(
                     description: "Use foreground/shared-pointer delivery. Background delivery is the default.",
@@ -749,7 +755,13 @@ private struct ClickRequest {
         self.coordinateReference = coordinateReference
         let isDouble = arguments.getBool("double") ?? false
         let isRight = arguments.getBool("right") ?? false
-        self.intent = ClickIntent(double: isDouble, right: isRight)
+        let isMiddle = arguments.getBool("middle") ?? false
+        let isTriple = arguments.getBool("triple") ?? false
+        self.intent = try ClickIntent(
+            double: isDouble,
+            right: isRight,
+            middle: isMiddle,
+            triple: isTriple)
         let foreground = arguments.getBool("foreground") ?? false
         self.deliveryMode = if foreground || arguments.getBool("background") == false {
             .foreground
@@ -865,10 +877,19 @@ private struct ClickIntent {
     let automationType: ClickType
     let displayVerb: String
 
-    init(double: Bool, right: Bool) {
+    init(double: Bool, right: Bool, middle: Bool, triple: Bool) throws {
+        guard [double, right, middle, triple].filter(\.self).count <= 1 else {
+            throw ClickToolError("Choose at most one of double, right, middle, or triple.")
+        }
         if right {
             self.automationType = .right
             self.displayVerb = "Right-clicked"
+        } else if middle {
+            self.automationType = .middle
+            self.displayVerb = "Middle-clicked"
+        } else if triple {
+            self.automationType = .triple
+            self.displayVerb = "Triple-clicked"
         } else if double {
             self.automationType = .double
             self.displayVerb = "Double-clicked"

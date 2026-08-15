@@ -147,6 +147,25 @@ extension MCPToolExecutionTests {
     }
 
     @Test
+    func `Click tool forwards middle and triple variants`() async throws {
+        let automation = await MainActor.run { MockAutomationService(accessibilityGranted: true) }
+        let context = await MCPToolTestHelpers.makeLegacyContext(automation: automation)
+        let tool = ClickTool(context: context)
+
+        let variants: [(String, ClickType)] = [("middle", .middle), ("triple", .triple)]
+        for (flag, expected) in variants {
+            let response = try await tool.execute(arguments: ToolArguments(raw: [
+                "coords": "10,20",
+                "foreground": true,
+                flag: true,
+            ]))
+
+            #expect(response.isError == false)
+            #expect(await MainActor.run { automation.clickCalls.last?.clickType } == expected)
+        }
+    }
+
+    @Test
     func `Click tool invalidates snapshot after indeterminate delivery`() async throws {
         await UISnapshotManager.shared.removeAllSnapshots()
         let automation = await MainActor.run {
@@ -297,6 +316,8 @@ extension MCPToolExecutionTests {
             ["query": "OK", "coords": "10,20", "foreground": true],
             ["on": "B1", "query": "OK", "coords": "10,20", "foreground": true],
             ["on": " ", "query": " "],
+            ["coords": "10,20", "foreground": true, "middle": true, "triple": true],
+            ["coords": "10,20", "foreground": true, "right": true, "double": true],
         ]
 
         for arguments in invalidArguments {
