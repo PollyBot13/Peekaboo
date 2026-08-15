@@ -169,14 +169,14 @@ read_launch_process_receipt() {
     [[ -n "$result_file" && -s "$result_file" ]] || return 1
     receipt="$(jq -er '
         .data as $data |
-        if ($data | has("pid")) and ($data | has("process_start_identity")) and
-           (($data | has("new_pid")) | not) and (($data | has("new_process_start_identity")) | not)
-        then [$data.pid, $data.process_start_identity]
-        elif ($data | has("new_pid")) and ($data | has("new_process_start_identity")) and
-             (($data | has("pid")) | not) and (($data | has("process_start_identity")) | not)
-        then [$data.new_pid, $data.new_process_start_identity]
-        else empty
-        end as $receipt |
+        (if ($data | has("pid")) and ($data | has("process_start_identity")) and
+            (($data | has("new_pid")) | not) and (($data | has("new_process_start_identity")) | not)
+         then [$data.pid, $data.process_start_identity]
+         elif ($data | has("new_pid")) and ($data | has("new_process_start_identity")) and
+              (($data | has("pid")) | not) and (($data | has("process_start_identity")) | not)
+         then [$data.new_pid, $data.new_process_start_identity]
+         else empty
+         end) as $receipt |
         $receipt[0] as $pid |
         $receipt[1] as $identity |
         select(
