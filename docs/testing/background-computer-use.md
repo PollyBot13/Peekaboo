@@ -64,6 +64,52 @@ deltas; result contracts cover the remaining cases. Unrelated app windows and co
 directories must be new or empty so a rerun cannot reuse old summaries, images, or logs. Results go under
 `.artifacts/background-computer-use/<UTC>/`.
 
+The native monitor has one authorization-epoch state machine for producer publication and all input, activation, and
+focused-window callbacks. Each callback is admitted on one atomic cutoff and retains that epoch plus the PID,
+process-start identity, and focused window sampled during the callback. Admission reserves a cheap immutable token,
+releases the publication lock while sampling native process/focus evidence, and completes that exact token afterward;
+sealed epochs cannot reach a heartbeat while any reservation remains incomplete. Input and activation callbacks use
+exact Accessibility focus lookup rather than a broad WindowServer inventory. Each window lookup is bracketed by matching
+process-generation reads; generation drift discards the combined evidence instead of synthesizing a PID/window pair.
+Publishing a higher producer revision closes the old epoch before the new epoch can admit evidence; heartbeat closure
+uses the same cutoff, so there is no separate drain-to-heartbeat interval. Each heartbeat samples system state, drains
+callbacks that became ready during sampling, and only then closes/evaluates that epoch. Every higher revision is a
+transition barrier, including a producer-only update or
+an unchanged foreground target. A separate full callback run-loop turn and `beforeWaiting` idle barrier must finish before
+that revision becomes eligible for acknowledgement. A missed bounded idle barrier defers the transition while stable
+monitoring continues; persistent backlog eventually times out the harness acknowledgement wait rather than relabeling
+queued callbacks. Admission remains on the previously acknowledged policy through that barrier. A grant therefore cannot
+credit its new controller early, while a queued event from the prior grant is neither relabeled nor treated as outside
+input during
+revoke. The monitor will not publish an acknowledgement while its pre-ack bucket has a pending reservation or unevaluated
+event. Once that bucket is empty, observer reconciliation, the atomic heartbeat write, and the admission switch to the
+new authorization share one cutoff. Heartbeat bytes and the same-directory temporary file are prepared outside the
+cutoff, then a final adjacent terminal-order idle barrier requires two `beforeWaiting` passes so work queued by another
+observer receives one more drain turn; any resulting evidence defers acknowledgement again. Current and prior controller
+generations and targets are revalidated inside the cutoff before observer retirement
+and atomic rename, so liveness cannot drift during the final barrier. Every evaluated transition summary is still published
+with `transitionAcknowledged: false` while waiting, so activation/focus counts are never discarded. The eventual
+acknowledgement advertises the new revision and target but cannot advance `lastCleanSequence`; the next fully closed stable
+epoch may do so. Repeating the current revision is idempotent only when the exact producer set (ignoring array order) and
+optional foreground payload are unchanged.
+
+The producer document may label one exact process generation with role `foreground-controller` and pair it with
+`foreground: {active: true, target: {pid, startIdentity, windowID}}`. A foreground grant requires exactly one such
+controller and at least one ordinary Bridge producer; inactive policy permits neither a controller nor a target. The
+baseline focus observer remains installed, a new granted-target observer is installed before publication, and observers
+for prior targets remain alive while transition evidence is evaluated. They retire inside the acknowledgement cutoff;
+removal or final liveness failure prevents the acknowledgement, publishes a non-acknowledging heartbeat, and records a
+sticky attribution failure without terminating the watcher. Every heartbeat revalidates all effective and pending
+foreground-controller generations even when no input arrived; ordinary Bridge generations remain publication-validated
+and event-time validated because short-lived CLI producers may exit before the post-command heartbeat. Foreground-activity
+counters are scoped to the advertised revision so an earlier grant cannot satisfy a later grant. Controller recycling or
+current/deferred target generation or window drift disables attribution. Hardware-origin mouse movement may be recorded as
+observational when the harness opts in; other user input still makes the attempt indeterminate.
+
+This state machine is deterministic infrastructure only in the current slice. The dual-controller command continues to
+refuse before UI setup: no physical foreground grant/revoke coordinator is enabled, and these epoch contracts alone are
+not concurrent certification.
+
 The 34 required CLI cases are source-controlled in `scripts/background-computer-use-catalog.json`. Each row declares
 its exit contract and, where applicable, its effect, delivery, refusal code, allowed outcome tuples, and named checks.
 The catalog is the canonical list of monitored invariant families and projects their names into the native probe,
