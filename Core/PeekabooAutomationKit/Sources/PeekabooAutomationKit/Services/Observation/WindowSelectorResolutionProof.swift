@@ -73,6 +73,9 @@ public enum WindowSelectorResolutionProof {
     {
         switch selection {
         case .automatic:
+            // Automatic is a provenance label shared by capture and dialog callers with different
+            // route-specific rankers. The mutation planner therefore never emits an automatic proof;
+            // it retains the exact selected identity and revalidates that target directly instead.
             return (.automaticWindowRank, 1)
         case let .index(index):
             let explicit = candidates.filter { $0.index == index }

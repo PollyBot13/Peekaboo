@@ -5,6 +5,9 @@
 ### Added
 - Add authenticated `peekaboo bridge receipt validate` for fail-closed, agent-readable verification of private protocol 1.29 bundles against the exact live listener that produced them.
 
+### Fixed
+- Make application and window inventories report omitted or identity-incomplete rows as partial, while keeping complete AX-only window listings usable without Screen Recording.
+
 ## [4.2.0] - 2026-08-16
 
 ### Added
