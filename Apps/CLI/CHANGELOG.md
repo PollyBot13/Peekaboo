@@ -5,11 +5,15 @@ All notable changes to Peekaboo CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.2.1] - Unreleased
+## [4.2.0] - 2026-08-16
 
 ### Added
 - Add Bridge protocol 1.29 peer-bound signed operation sessions and exact target/result receipts, with bounded rollover, replay protection, and fail-closed recovery for long-running background automation.
 - Make protocol 1.29 browser receipts require a fully resolved explicit DevTools endpoint, and make exact dialog text entry use background Accessibility value mutation while refusing receipt-incapable legacy dialog mutations before dispatch.
+- Add protocol 1.26 explicit-reference-only snapshot publication so exact-window `see --no-elements` can return coordinate receipts without replacing implicit latest element maps, while older hosts fail before allocation.
+- Add `browser connect --browser-url` for an exact loopback DevTools endpoint and expose its pinned browser identity in status metadata through Bridge protocol 1.26.
+- Add protocol 1.25 exact dialog click/dismiss receipts with unique target planning, raw AX identity revalidation, verified disappearance outcomes, and read-only targeted listing.
+- Add capability-gated exact-window background wheel delivery for opaque WKWebView/Tauri scroll targets, with retry-unsafe unverifiable outcomes and no activation or shared-cursor fallback.
 
 ### Fixed
 - Require explicit foreground consent for Space switching and followed window moves across CLI and MCP, and compose their native move/switch receipts without synthesizing success or dispatch counts.
@@ -17,16 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Let later exact maximize readbacks supersede transient poll errors while preserving cancellation and identity contradictions, and route idempotent no-change receipts by the actual execution host.
 - Return canonical retry-safe pre-dispatch refusals when window owner-generation or bounds-provenance evidence does not match the selected mutation target.
 - Bind protocol 1.29 window and frontmost capture receipts to the exact captured process/window, reject missing or contradictory target metadata, and keep screen/area captures explicitly global.
-
-## [4.2.0] - 2026-08-15
-
-### Added
-- Add protocol 1.26 explicit-reference-only snapshot publication so exact-window `see --no-elements` can return coordinate receipts without replacing implicit latest element maps, while older hosts fail before allocation.
-- Add `browser connect --browser-url` for an exact loopback DevTools endpoint and expose its pinned browser identity in status metadata through Bridge protocol 1.26.
-- Add protocol 1.25 exact dialog click/dismiss receipts with unique target planning, raw AX identity revalidation, verified disappearance outcomes, and read-only targeted listing.
-- Add capability-gated exact-window background wheel delivery for opaque WKWebView/Tauri scroll targets, with retry-unsafe unverifiable outcomes and no activation or shared-cursor fallback.
-
-### Fixed
 - Keep root help and version order-independent across canonical kebab- and camel-case runtime-option aliases while preserving correct missing-value errors.
 - Treat `capture video` as caller-local media ingestion so valid files and typed media failures bypass Screen Recording and ScreenCaptureKit-owner preflight while live capture remains gated.
 - Keep normal exact-window Finder `see` usable when the window exposes no semantic AX value, without weakening hard Accessibility-read failures or the typed incomplete-evidence refusal.
