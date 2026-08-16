@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import PeekabooAutomationKitTestSupport
 import PeekabooFoundation
 import Testing
 @testable import PeekabooAutomationKit
@@ -79,11 +80,14 @@ struct ObservationActionResultSemanticsTests {
         let provider = try DesktopTargetIdentity(processIdentity: .init(
             processIdentifier: 543,
             processStartIdentity: 6543))
-        let payload = Self.detectionResult(
-            processIdentifier: 544,
-            processStartIdentity: 6544,
+        let payloadFixture = AutomationTestFixtures.linkedDesktopTarget(
+            processIdentity: .init(processIdentifier: 544, processStartIdentity: 6544),
             windowID: 73,
             bounds: bounds)
+        let payload = AutomationTestFixtures.detectionResult(
+            snapshotID: "targeted",
+            screenshotPath: "",
+            windowContext: payloadFixture.windowContext)
         let outcome = DesktopActionOutcome.dispatchedUnverified(
             delivery: Self.delivery,
             evidence: .deliveryAccepted,
@@ -111,11 +115,14 @@ struct ObservationActionResultSemanticsTests {
         let provider = try DesktopTargetIdentity(processIdentity: .init(
             processIdentifier: 545,
             processStartIdentity: 6545))
-        let payload = Self.detectionResult(
-            processIdentifier: 545,
-            processStartIdentity: 6545,
+        let payloadFixture = AutomationTestFixtures.linkedDesktopTarget(
+            processIdentity: provider.processIdentity,
             windowID: 74,
             bounds: bounds)
+        let payload = AutomationTestFixtures.detectionResult(
+            snapshotID: "targeted",
+            screenshotPath: "",
+            windowContext: payloadFixture.windowContext)
 
         let target = try ObservationActionResultSemantics.coalescedTarget(
             actionTarget: provider,
@@ -151,50 +158,35 @@ struct ObservationActionResultSemanticsTests {
     @Test
     func `menu-bar mutation target excludes the captured popover identity`() throws {
         let statusBounds = CGRect(x: 900, y: 0, width: 20, height: 20)
-        let statusIdentity = WindowMutationIdentity(
+        let statusFixture = AutomationTestFixtures.linkedDesktopTarget(
+            processIdentity: .init(processIdentifier: 545, processStartIdentity: 6545),
             windowID: 70,
-            ownerProcessIdentifier: 545,
-            ownerProcessStartIdentity: 6545,
-            capturedBounds: statusBounds)
-        let statusTarget = try DesktopTargetIdentity(exactWindow: UIAutomationTarget.ExactWindow(
-            identity: statusIdentity,
-            bounds: statusBounds))
+            bounds: statusBounds)
+        let statusTarget = statusFixture.windowTargetIdentity
         let popoverBounds = CGRect(x: 700, y: 20, width: 240, height: 300)
-        let popoverIdentity = WindowMutationIdentity(
-            windowID: 71,
-            ownerProcessIdentifier: 546,
-            ownerProcessStartIdentity: 6546,
-            capturedBounds: popoverBounds)
-        let popoverApplication = ServiceApplicationInfo(
-            processIdentifier: 546,
-            processStartIdentity: 6546,
+        let popoverFixture = AutomationTestFixtures.linkedDesktopTarget(
+            processIdentity: .init(processIdentifier: 546, processStartIdentity: 6546),
             bundleIdentifier: "dev.peekaboo.popover",
-            name: "Popover")
-        let popoverWindow = ServiceWindowInfo(
+            applicationName: "Popover",
             windowID: 71,
-            title: "Popover",
+            windowTitle: "Popover",
             bounds: popoverBounds,
-            index: 0,
-            mutationIdentity: popoverIdentity)
+            isMainWindow: false)
         let payload = DesktopObservationResult(
             target: ResolvedObservationTarget(
                 kind: .menubarPopover,
-                app: ApplicationIdentity(popoverApplication),
-                window: WindowIdentity(popoverWindow),
+                app: ApplicationIdentity(popoverFixture.application),
+                window: WindowIdentity(popoverFixture.window),
                 bounds: popoverBounds,
-                detectionContext: WindowContext(
-                    applicationProcessId: 546,
-                    windowID: 71,
-                    windowBounds: popoverBounds,
-                    windowMutationIdentity: popoverIdentity),
+                detectionContext: popoverFixture.windowContext,
                 mutationTargetIdentity: DesktopObservationMutationTargetIdentity(statusTarget)),
             capture: CaptureResult(
                 imageData: Data([1]),
                 metadata: CaptureMetadata(
                     size: popoverBounds.size,
                     mode: .window,
-                    applicationInfo: popoverApplication,
-                    windowInfo: popoverWindow)),
+                    applicationInfo: popoverFixture.application,
+                    windowInfo: popoverFixture.window)),
             elements: nil)
 
         let target = try ObservationActionResultSemantics.coalescedTarget(
@@ -209,6 +201,48 @@ struct ObservationActionResultSemanticsTests {
 
         #expect(target == statusTarget)
         #expect(target?.exactWindow?.identity.windowID == 70)
+    }
+
+    @Test
+    func `generic failures reject selected leaves from an unrelated target`() throws {
+        let phase = AutomationTestFixtures.linkedDesktopTarget(
+            processIdentity: .init(processIdentifier: 545, processStartIdentity: 6545),
+            windowID: 70)
+        let unrelated = AutomationTestFixtures.linkedDesktopTarget(
+            processIdentity: .init(processIdentifier: 546, processStartIdentity: 6546),
+            windowID: 71)
+        let evidence = try DesktopSelectedLeafEvidence(
+            kind: .menuBarItem,
+            normalizedSelector: "fixture",
+            matchKind: .exact,
+            selectedTargetReceipt: unrelated.windowTargetReceipt,
+            selectedIndex: 0,
+            selectedTitle: "Fixture",
+            selectedIdentifier: "fixture.item",
+            selectedRole: "AXMenuBarItem",
+            selectedFrame: CGRect(x: 0, y: 0, width: 18, height: 18),
+            candidateSetSHA256: DesktopSelectedLeafEvidence.digestCandidateSet(["fixture"]),
+            candidateCount: 1)
+        let result = UIAutomationActionResult(
+            payload: (),
+            outcome: DesktopActionOutcome.dispatchedUnverified(
+                delivery: Self.delivery,
+                evidence: .deliveryAccepted,
+                unitCount: .one),
+            targetIdentity: phase.windowTargetIdentity,
+            selectedLeafEvidence: [evidence])
+
+        let preserved = ObservationActionResultSemantics.preservingFailure(
+            FixtureError.failed,
+            after: result,
+            operation: "Fixture observation")
+        let failure = try #require(preserved as? DesktopActionFailure)
+
+        #expect(failure.outcome.state == .dispatchedUnverified)
+        #expect(failure.message == FixtureError.failed.localizedDescription)
+        #expect(failure.causeDescription == String(describing: FixtureError.failed))
+        #expect(failure.targetReceipt == phase.windowTargetReceipt)
+        #expect(failure.selectedLeafEvidence == nil)
     }
 
     private static let delivery = DesktopActionOutcome.Delivery(
@@ -231,29 +265,7 @@ struct ObservationActionResultSemanticsTests {
         .dispatchedUnverified(delivery: Self.delivery, evidence: .deliveryAccepted, unitCount: .one),
     ]
 
-    private static func detectionResult(
-        processIdentifier: Int32,
-        processStartIdentity: UInt64,
-        windowID: Int,
-        bounds: CGRect) -> ElementDetectionResult
-    {
-        let identity = WindowMutationIdentity(
-            windowID: windowID,
-            ownerProcessIdentifier: processIdentifier,
-            ownerProcessStartIdentity: processStartIdentity,
-            capturedBounds: bounds)
-        return ElementDetectionResult(
-            snapshotId: "targeted",
-            screenshotPath: "",
-            elements: DetectedElements(),
-            metadata: DetectionMetadata(
-                detectionTime: 0,
-                elementCount: 0,
-                method: "fixture",
-                windowContext: WindowContext(
-                    applicationProcessId: processIdentifier,
-                    windowID: windowID,
-                    windowBounds: bounds,
-                    windowMutationIdentity: identity)))
+    private enum FixtureError: Error {
+        case failed
     }
 }

@@ -123,6 +123,19 @@ public enum ObservationActionResultSemantics {
 
     public static func preservingFailure(
         _ error: any Error,
+        after result: UIAutomationActionResult<some Sendable>,
+        operation: String) -> any Error
+    {
+        self.preservingFailure(
+            error,
+            after: result.outcome,
+            targetReceipt: self.targetReceipt(result.targetIdentity),
+            selectedLeafEvidence: result.selectedLeafEvidence,
+            operation: operation)
+    }
+
+    public static func preservingFailure(
+        _ error: any Error,
         after outcome: DesktopActionOutcome?,
         targetIdentity: DesktopTargetIdentity?,
         operation: String) -> any Error
@@ -131,6 +144,7 @@ public enum ObservationActionResultSemantics {
             error,
             after: outcome,
             targetReceipt: self.targetReceipt(targetIdentity),
+            selectedLeafEvidence: nil,
             operation: operation)
     }
 
@@ -140,21 +154,47 @@ public enum ObservationActionResultSemantics {
         targetReceipt: DesktopActionTargetReceipt?,
         operation: String) -> any Error
     {
+        self.preservingFailure(
+            error,
+            after: outcome,
+            targetReceipt: targetReceipt,
+            selectedLeafEvidence: nil,
+            operation: operation)
+    }
+
+    private static func preservingFailure(
+        _ error: any Error,
+        after outcome: DesktopActionOutcome?,
+        targetReceipt: DesktopActionTargetReceipt?,
+        selectedLeafEvidence: [DesktopSelectedLeafEvidence]?,
+        operation: String) -> any Error
+    {
         guard let outcome else { return error }
         if let failure = error as? DesktopActionFailure {
-            var sequence = DesktopActionSequenceAccumulator()
-            sequence.record(.outcome(outcome))
-            let composed = sequence.failure(
+            var sequence = UIAutomationActionResultSequenceAccumulator()
+            sequence.record(
+                outcome: outcome,
+                targetReceipt: targetReceipt,
+                selectedLeafEvidence: selectedLeafEvidence,
+                attribution: .operationTarget)
+            return sequence.failure(
                 combining: failure,
+                operation: operation,
                 message: failure.message,
                 hint: failure.hint ?? "Observe the target before retrying \(operation).",
                 causeDescription: failure.causeDescription)
-            return composed.attributed(
-                to: self.aggregateTarget(
-                    priorOutcome: outcome,
-                    priorTarget: targetReceipt,
-                    laterFailure: failure))
         }
+
+        var validation = UIAutomationActionResultSequenceAccumulator()
+        validation.record(
+            outcome: outcome,
+            targetReceipt: targetReceipt,
+            selectedLeafEvidence: selectedLeafEvidence,
+            attribution: .operationTarget)
+        let validationResolution = validation.resolution
+        let validatedSelectedLeafEvidence = validationResolution.hasInvalidSelectedLeafEvidence
+            ? nil
+            : validationResolution.selectedLeafEvidence
 
         let message = error.localizedDescription
         let hint = "Observe the target before retrying \(operation)."
@@ -166,7 +206,7 @@ public enum ObservationActionResultSemantics {
             causeDescription: causeDescription,
             targetReceipt: targetReceipt)
         {
-            return failure
+            return failure.selectingLeaves(validatedSelectedLeafEvidence)
         }
         switch outcome.state {
         case .confirmedChange:
@@ -179,6 +219,7 @@ public enum ObservationActionResultSemantics {
                 hint: hint,
                 causeDescription: causeDescription)
                 .attributed(to: targetReceipt)
+                .selectingLeaves(validatedSelectedLeafEvidence)
         case .confirmedNoChange:
             return DesktopActionFailure.preDispatchRefusal(
                 route: outcome.route,
@@ -211,50 +252,6 @@ public enum ObservationActionResultSemantics {
         -> DesktopActionTargetReceipt?
     {
         identity?.actionTargetReceipt
-    }
-
-    private static func aggregateTarget(
-        priorOutcome: DesktopActionOutcome,
-        priorTarget: DesktopActionTargetReceipt?,
-        laterFailure: DesktopActionFailure) -> DesktopActionTargetReceipt?
-    {
-        switch (
-            priorOutcome.dispatchState.mutationDispatched,
-            laterFailure.outcome.dispatchState.mutationDispatched)
-        {
-        case (true, true):
-            guard priorTarget != nil, laterFailure.targetReceipt != nil else { return nil }
-            return self.compatibleTarget(priorTarget, laterFailure.targetReceipt)
-        case (true, false):
-            return priorTarget
-        case (false, true):
-            return laterFailure.targetReceipt
-        case (false, false):
-            return self.compatibleTarget(priorTarget, laterFailure.targetReceipt)
-        }
-    }
-
-    private static func compatibleTarget(
-        _ prior: DesktopActionTargetReceipt?,
-        _ later: DesktopActionTargetReceipt?) -> DesktopActionTargetReceipt?
-    {
-        switch (prior, later) {
-        case let (prior?, later?):
-            guard prior.processIdentifier == later.processIdentifier,
-                  prior.processStartIdentity == later.processStartIdentity
-            else { return nil }
-            if prior.windowID == later.windowID {
-                return prior
-            }
-            guard prior.windowID == nil || later.windowID == nil else { return nil }
-            return DesktopActionTargetReceipt(
-                processIdentifier: prior.processIdentifier,
-                processStartIdentity: prior.processStartIdentity)
-        case (let target?, nil), (nil, let target?):
-            return target
-        case (nil, nil):
-            return nil
-        }
     }
 
     private static func coalescedTarget(
@@ -847,76 +844,23 @@ public final class DesktopObservationService: DesktopObservationActionResultProv
         requireCompatibleTarget: Bool) throws -> UIAutomationActionResult<ResolvedObservationTarget>
     {
         guard let actionOutcome = action.outcome else { return resolution }
-        var sequence = DesktopActionSequenceAccumulator()
-        if let resolutionOutcome = resolution.outcome {
-            sequence.record(.outcome(resolutionOutcome))
-        }
-        sequence.record(.outcome(actionOutcome))
-        let sequenceResolution = sequence.successResolution()
-        let outcome = sequenceResolution.outcome ?? .indeterminate(
+        var sequence = UIAutomationActionResultSequenceAccumulator()
+        sequence.record(resolution, attribution: .mutationTarget)
+        sequence.record(action, attribution: .mutationTarget)
+        let sequenceResolution = sequence.resolution
+        let fallbackOutcome = DesktopActionOutcome.indeterminate(
             route: actionOutcome.route,
             delivery: nil,
             evidence: .completionUnknown,
             unitCount: sequenceResolution.mutationDisposition.unitCount)
-        let targetComposition = self.composedMutationTarget(
-            priorOutcome: resolution.outcome,
-            priorTarget: resolution.targetIdentity,
-            laterOutcome: actionOutcome,
-            laterTarget: action.targetIdentity)
-        let selectedLeafEvidence = self.combinedSelectedLeafEvidence(
-            resolution.selectedLeafEvidence,
-            action.selectedLeafEvidence)
-        if requireCompatibleTarget, targetComposition.conflicts {
-            throw self.incompatiblePipelineFailure(
-                outcome: outcome,
-                selectedLeafEvidence: selectedLeafEvidence,
-                operation: operation,
-                cause: DesktopTargetIdentityError.contradictoryWindowIdentity)
-        }
-        return UIAutomationActionResult(
+        return try sequence.result(
             payload: resolution.payload,
-            outcome: outcome,
-            targetIdentity: targetComposition.target,
-            selectedLeafEvidence: selectedLeafEvidence)
-    }
-
-    private static func composedMutationTarget(
-        priorOutcome: DesktopActionOutcome?,
-        priorTarget: DesktopTargetIdentity?,
-        laterOutcome: DesktopActionOutcome,
-        laterTarget: DesktopTargetIdentity?) -> (target: DesktopTargetIdentity?, conflicts: Bool)
-    {
-        let priorDispatched = priorOutcome?.dispatchState.mutationDispatched == true
-        let laterDispatched = laterOutcome.dispatchState.mutationDispatched
-        switch (priorDispatched, laterDispatched) {
-        case (false, false):
-            return (nil, false)
-        case (true, false):
-            return (priorTarget, false)
-        case (false, true):
-            return (laterTarget, false)
-        case (true, true):
-            switch (priorTarget, laterTarget) {
-            case let (prior?, later?):
-                do {
-                    return try (prior.coalescing(later), false)
-                } catch {
-                    return (nil, true)
-                }
-            case (nil, nil):
-                return (nil, false)
-            case (.some, nil), (nil, .some):
-                return (nil, true)
-            }
-        }
-    }
-
-    private static func combinedSelectedLeafEvidence(
-        _ prior: [DesktopSelectedLeafEvidence]?,
-        _ later: [DesktopSelectedLeafEvidence]?) -> [DesktopSelectedLeafEvidence]?
-    {
-        let combined = (prior ?? []) + (later ?? [])
-        return combined.isEmpty ? nil : combined
+            fallbackOutcome: fallbackOutcome,
+            operation: operation,
+            requiresOutcome: true,
+            requiresCompatibleTarget: requireCompatibleTarget,
+            failureMessage: "Desktop observation could not safely compose its setup and \(operation) targets.",
+            failureHint: "Observe both targets before retrying this observation.")
     }
 
     private static func incompatiblePipelineFailure(
@@ -1058,15 +1002,10 @@ public final class DesktopObservationService: DesktopObservationActionResultProv
         _ error: any Error,
         resolution: UIAutomationActionResult<ResolvedObservationTarget>) -> any Error
     {
-        let preserved = ObservationActionResultSemantics.preservingFailure(
+        ObservationActionResultSemantics.preservingFailure(
             error,
-            after: resolution.outcome,
-            targetIdentity: resolution.targetIdentity,
+            after: resolution,
             operation: "desktop observation")
-        guard let failure = preserved as? DesktopActionFailure else { return preserved }
-        return failure.selectingLeaves(self.combinedSelectedLeafEvidence(
-            resolution.selectedLeafEvidence,
-            failure.selectedLeafEvidence))
     }
 
     private func withCaptureTransaction<T: Sendable>(
