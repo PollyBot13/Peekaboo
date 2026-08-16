@@ -51,13 +51,12 @@ peekaboo see --app Finder --json
 
 That is the core loop: observe the current screen, choose an element from the result, and act on it.
 
-## What's new in 4.0
+## What's new in 4.2
 
-Peekaboo 4 has an exact 33-command root surface, consistent duration and
-coordinate grammar, native `verify` polling, and honest JSON effects after an action request has been
-parsed and classified. Pre-dispatch argument parse/bind failures may omit `effect`. If you have
-existing scripts or agent instructions, use the [Peekaboo 4 migration guide](docs/v4-migration.md)
-for the complete old-to-new command and flag map.
+Peekaboo 4.2 deepens background automation with exact, generation-bound receipts for browser
+connections, dialogs, coordinate snapshots, and opaque web-view scrolling. These protocol upgrades
+keep long-lived Bridge sessions pinned to the process, window, and semantic target they actually
+validated, so stale or ambiguous work fails before dispatch instead of drifting to the active app.
 
 ## Automate an app
 

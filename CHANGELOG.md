@@ -1,6 +1,6 @@
 # Changelog
 
-## [4.1.1] - Unreleased
+## [4.2.0] - 2026-08-15
 
 ### Added
 - Add Bridge protocol 1.26 exact browser connection receipts, binding persistent Chrome DevTools MCP sessions to one process generation or validated loopback DevTools browser identity.
