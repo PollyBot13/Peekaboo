@@ -142,15 +142,10 @@ struct FocusRemoteHostTests {
         )
         let applications = StubApplicationService(applications: [Self.application])
         let windows = RemoteFocusWindowService(windowsByApp: ["Safari": [Self.window]])
-        windows.listHandler = { target in
-            switch target {
-            case .application:
-                [Self.window]
-            case .windowId:
-                [replacement]
-            default:
-                []
-            }
+        var listCallCount = 0
+        windows.listHandler = { _ in
+            listCallCount += 1
+            return listCallCount == 1 ? [Self.window] : [replacement]
         }
         let services = RemoteFocusTestServices(base: TestServicesFactory.makePeekabooServices(
             applications: applications,
@@ -169,7 +164,7 @@ struct FocusRemoteHostTests {
 
         #expect(windows.listTargets.map(\.description) == [
             "application(Safari)",
-            "windowId(77)",
+            "application(Safari)",
         ])
         #expect(windows.pinnedFocusCalls.count == 1)
         #expect(windows.pinnedFocusCalls.first?.identity.hasSameStableReceipt(as: expectedIdentity) == true)

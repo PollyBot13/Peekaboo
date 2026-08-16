@@ -138,7 +138,10 @@ private enum LifecycleOperation: String, CaseIterable, Sendable {
         case .quit:
             try await ApplicationServiceBridge.quitApplication(
                 applications: service,
-                request: ApplicationQuitRequest(identifier: "Fixture")
+                request: ApplicationQuitRequest(
+                    identifier: "Fixture",
+                    expectedIdentity: service.application.processIdentity
+                )
             ).outcome
         case .hide:
             try await ApplicationServiceBridge.hideApplication(

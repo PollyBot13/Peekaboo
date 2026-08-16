@@ -40,7 +40,14 @@ struct TargetedInteractionDefaultDeliveryTests {
             bundleIdentifier: "com.apple.TextEdit",
             name: "TextEdit"
         )
-        let automation = StubAutomationService()
+        let automation = OutcomeStubAutomationService()
+        automation.actionOutcome = .confirmedChange(
+            delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+            unitCount: .one
+        )
+        automation.actionOutcomeTargetIdentity = try DesktopTargetIdentity(
+            processIdentity: #require(app.processIdentity)
+        )
         let applications = StubApplicationService(applications: [app])
         let services = TestServicesFactory.makePeekabooServices(
             applications: applications,
@@ -393,7 +400,14 @@ struct TargetedInteractionDefaultDeliveryTests {
             bundleIdentifier: "com.apple.TextEdit",
             name: "TextEdit"
         )
-        let automation = StubAutomationService()
+        let automation = OutcomeStubAutomationService()
+        automation.actionOutcome = .confirmedChange(
+            delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+            unitCount: .one
+        )
+        automation.actionOutcomeTargetIdentity = try DesktopTargetIdentity(
+            processIdentity: #require(app.processIdentity)
+        )
         let applications = StubApplicationService(applications: [app])
         let clipboard = StubClipboardService()
         let windowBounds = CGRect(x: 0, y: 0, width: 800, height: 600)

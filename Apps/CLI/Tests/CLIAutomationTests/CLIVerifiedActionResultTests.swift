@@ -9,7 +9,7 @@ import Testing
 @Suite(.serialized, .tags(.safe))
 struct CLIVerifiedActionResultTests {
     @Test
-    func `verified menu bar click promotes its canonical outcome`() async throws {
+    func `verified menu bar click preserves an outcome without observed change evidence`() async throws {
         let preFocusApp = ServiceApplicationInfo(
             processIdentifier: 7,
             processStartIdentity: 70,
@@ -52,8 +52,8 @@ struct CLIVerifiedActionResultTests {
         let projection = try #require(object["outcome"] as? [String: Any])
         let data = try #require(object["data"] as? [String: Any])
         #expect(result.exitStatus == 0)
-        #expect(object["effect"] as? String == "confirmed")
-        #expect(projection["state"] as? String == "confirmed_change")
+        #expect(object["effect"] as? String == "unverifiable")
+        #expect(projection["state"] as? String == "dispatched_unverified")
         #expect(projection["route"] as? String == "bridge")
         #expect(projection["dispatched_unit_count"] as? Int == 1)
         #expect(data["verified"] as? Bool == true)
@@ -105,7 +105,7 @@ struct CLIVerifiedActionResultTests {
     }
 
     @Test
-    func `verified Dock launch promotes its canonical outcome`() async throws {
+    func `verified Dock launch preserves an outcome without observed change evidence`() async throws {
         let app = ServiceApplicationInfo(
             processIdentifier: 42,
             processStartIdentity: 420,
@@ -135,8 +135,8 @@ struct CLIVerifiedActionResultTests {
         let object = try Self.jsonObject(result.stdout)
         let projection = try #require(object["outcome"] as? [String: Any])
         #expect(result.exitStatus == 0)
-        #expect(object["effect"] as? String == "confirmed")
-        #expect(projection["state"] as? String == "confirmed_change")
+        #expect(object["effect"] as? String == "unverifiable")
+        #expect(projection["state"] as? String == "dispatched_unverified")
         #expect(projection["route"] as? String == "bridge")
         #expect(projection["dispatched_unit_count"] as? Int == 1)
         try Self.expectProcessTarget(in: object)
@@ -199,7 +199,7 @@ struct CLIVerifiedActionResultTests {
     private static func processTarget() throws -> DesktopTargetIdentity {
         try DesktopTargetIdentity(processIdentity: ApplicationProcessIdentity(
             processIdentifier: 42,
-            processStartIdentity: 9_007_199_254_740_993
+            processStartIdentity: 420
         ))
     }
 
@@ -221,7 +221,7 @@ struct CLIVerifiedActionResultTests {
         let target = try #require(object["target_identity"] as? [String: Any])
         #expect(target["kind"] as? String == "process")
         #expect(target["pid"] as? Int == 42)
-        #expect(target["process_start_identity_decimal"] as? String == "9007199254740993")
+        #expect(target["process_start_identity_decimal"] as? String == "420")
     }
 
     private static func jsonObject(_ output: String) throws -> [String: Any] {

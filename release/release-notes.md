@@ -8,6 +8,7 @@
 ### Changed
 - Build branded release disk images from pinned direct Finder-metadata tooling, preserving the signed and notarized drag-to-Applications layout without GUI automation.
 ### Fixed
+- Complete the Bridge 1.29 receipt-session handshake before daemon status or stop control, validate explicit move snapshots before focus setup, and preserve actionable quit recovery over generic escalation guidance.
 - Require explicit foreground consent for Space switching and followed window moves across CLI and MCP, and compose their native move/switch receipts without synthesizing success or dispatch counts.
 - Establish and verify a window's destination Space before removing prior memberships, and retain its exact generation-bound identity through Space-aware focus.
 - Let later exact maximize readbacks supersede transient poll errors while preserving cancellation and identity contradictions, and route idempotent no-change receipts by the actual execution host.

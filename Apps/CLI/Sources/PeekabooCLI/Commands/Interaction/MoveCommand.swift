@@ -229,6 +229,7 @@ struct MoveCommand: ActionOutputFormattable, ErrorHandlingCommand, OutputFormatt
             fallbackToLatest: true,
             snapshots: self.services.snapshots
         )
+        try await observation.validateIfExplicit(using: self.services.snapshots)
         observation = try await InteractionObservationRefresher.refreshForMissingElementsIfNeeded(
             observation,
             elementIds: [elementId],

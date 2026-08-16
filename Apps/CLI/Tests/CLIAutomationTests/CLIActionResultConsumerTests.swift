@@ -752,7 +752,7 @@ struct CLIActionResultConsumerTests {
             #expect(metadata.outcome?.evidence == .completionUnknown)
             #expect(metadata.outcome?.retrySafety == .unsafe)
             #expect(metadata.targetIdentity == target)
-            #expect(metadata.failure?.targetReceipt == nil)
+            #expect(metadata.failure?.targetReceipt == target.actionTargetReceipt)
         }
     }
 
@@ -1097,7 +1097,7 @@ struct CLIActionResultConsumerTests {
         #expect(error["retry_safe"] as? Bool == false)
         #expect(error["mutation_dispatched"] as? Bool == true)
         #expect((error["details"] as? String)?.localizedCaseInsensitiveContains(cause) == true)
-        try Self.expectProcessTarget(in: object, expectsReceipt: true)
+        try Self.expectProcessTarget(in: object)
     }
 
     private static func windowTarget() throws -> DesktopTargetIdentity {
@@ -1114,22 +1114,16 @@ struct CLIActionResultConsumerTests {
         ))
     }
 
-    private static func expectProcessTarget(
-        in object: [String: Any],
-        expectsReceipt: Bool = false
-    ) throws {
+    private static func expectProcessTarget(in object: [String: Any]) throws {
         let target = try #require(object["target_identity"] as? [String: Any])
         #expect(target["kind"] as? String == "process")
         #expect(target["pid"] as? Int == 42)
         #expect(target["process_start_identity_decimal"] as? String == "9007199254740993")
         #expect(target["window_id"] == nil)
-        if expectsReceipt {
-            let receipt = try #require(object["target_receipt"] as? [String: Any])
-            #expect(receipt["pid"] as? Int == 42)
-            #expect(receipt["process_start_identity_decimal"] as? String == "9007199254740993")
-        } else {
-            #expect(object["target_receipt"] == nil)
-        }
+        let receipt = try #require(object["target_receipt"] as? [String: Any])
+        #expect(receipt["pid"] as? Int == 42)
+        #expect(receipt["process_start_identity_decimal"] as? String == "9007199254740993")
+        #expect(receipt["window_id"] == nil)
     }
 
     private static func expectProcessReceipt(in object: [String: Any]) throws {

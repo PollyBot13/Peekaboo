@@ -268,8 +268,10 @@ extension AppCommand {
             aggregateOutcome: DesktopActionOutcome?,
             singleFailureHint: String?
         ) -> String? {
+            let canonicalPlaceholder = "Follow the canonical escalation metadata before deciding whether to retry."
             if let singleFailureHint,
-               !singleFailureHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+               !singleFailureHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               singleFailureHint != canonicalPlaceholder {
                 return singleFailureHint
             }
             guard let aggregateOutcome else {
