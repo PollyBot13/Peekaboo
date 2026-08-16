@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.2.1] - Unreleased
 
+### Added
+- Add authenticated `bridge receipt validate` for fail-closed, agent-readable verification of private protocol 1.29 bundles against the exact live listener that produced them.
+
 ## [4.2.0] - 2026-08-16
 
 ### Added

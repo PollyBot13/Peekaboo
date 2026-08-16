@@ -109,14 +109,12 @@ each request uses a decimal-string session sequence and deterministic request UU
 one request backed by a fully verified signed refusal proving `mutation_dispatched=false` and `retry_safe=true` and
 carrying the successor session. Protocol 1.28 remains receiptless.
 
-Live overlap execution is still deliberately reserved because the CLI does not yet expose a public first-party
-`bridge receipt validate` command that the shell harness can use for every exported verification bundle, including
-session and predecessor/successor linkage. `bridge status` host identity and structural `jq` checks are not substitutes
-for Ed25519 and canonical-digest validation. The current command therefore refuses before UI setup; its deterministic
-contract/self-test is landable infrastructure, while physical signed-live proof remains pending. Once that verifier is
-available, the opt-in invocation will require a clean source tree, matching stamped CLI/host source commits, one exact
-signed Bridge host, an already-running sentinel receipt, and a private
-`PEEKABOO_OPERATION_RECEIPT_DIRECTORY` whose expected terminal bundles all validate:
+`peekaboo bridge receipt validate` now authenticates one exact live listener and validates one exported protocol 1.29
+bundle against that independently obtained trust anchor. Live overlap execution remains deliberately reserved: the
+shell harness does not yet have the separately audited multi-target coordinator and certification contract needed to
+bind every expected request, session rollover, target, and terminal bundle without widening the single-target receipt
+policy. `bridge status`, structural `jq` checks, and a bundle's self-signature are not substitutes. The current command
+therefore still refuses before UI setup; its deterministic self-test remains non-live infrastructure.
 
 ```bash
 PEEKABOO_RUN_DUAL_CONTROLLER_OVERLAP=1 \
