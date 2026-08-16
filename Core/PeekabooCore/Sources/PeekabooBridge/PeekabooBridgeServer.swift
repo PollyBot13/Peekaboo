@@ -50,6 +50,18 @@ public struct PeekabooBridgePeer: Sendable {
     }
 }
 
+struct PeekabooBridgeHeldPointerOwnerBinding {
+    let peerIdentity: ApplicationProcessIdentity
+    var pendingBeginTarget: DesktopTargetIdentity?
+    var activeReceipt: ExactWindowHeldPointerReceipt?
+    var closedAt: ContinuousClock.Instant?
+}
+
+struct PeekabooBridgeReceiptlessNegotiation {
+    let protocolVersion: PeekabooBridgeProtocolVersion
+    let recordedAt: ContinuousClock.Instant
+}
+
 @MainActor
 public final class PeekabooBridgeServer {
     let services: any PeekabooBridgeServiceProviding
@@ -74,6 +86,8 @@ public final class PeekabooBridgeServer {
     let encoder: JSONEncoder
     let decoder: JSONDecoder
     let logger = Logger(subsystem: "boo.peekaboo.bridge", category: "server")
+    var heldPointerBridgeOwners: [ExactWindowHeldPointerOwner: PeekabooBridgeHeldPointerOwnerBinding] = [:]
+    var receiptlessNegotiations: [PeekabooBridgeLivePeerIdentity: PeekabooBridgeReceiptlessNegotiation] = [:]
     #if DEBUG
     var requestDecodeObserverForTesting: (@Sendable () -> Void)?
     var admissionRefusalObserverForTesting: (@Sendable () async -> Void)?
@@ -774,6 +788,7 @@ public final class PeekabooBridgeServer {
 
     func validateOperationAccess(
         for request: PeekabooBridgeRequest,
+        peer: PeekabooBridgePeer? = nil,
         permissions: PermissionsStatus,
         effectiveOps: Set<PeekabooBridgeOperation>) throws
     {
@@ -786,6 +801,21 @@ public final class PeekabooBridgeServer {
             throw PeekabooBridgeErrorEnvelope(
                 code: .operationNotSupported,
                 message: "Operation \(op.rawValue) is not supported by this host")
+        }
+        if let minimumVersion = request.minimumNegotiatedProtocolVersion {
+            let session = PeekabooBridgeRequestContext.negotiatedSessionCapabilities
+            let negotiatedVersion = session?.protocolVersion ?? self.receiptlessProtocolVersion(for: peer)
+            guard (negotiatedVersion ?? .init(major: 0, minor: 0)) >= minimumVersion,
+                  !request.requiresBackgroundStatelessClickVariantSupport || session?.statelessClickVariants == true,
+                  !request.requiresExactWindowHeldPointerLifecycleSupport ||
+                  session?.exactWindowHeldPointerLifecycle == true
+            else {
+                throw PeekabooBridgeErrorEnvelope(
+                    code: .operationNotSupported,
+                    message:
+                    "Operation \(op.rawValue) requires its negotiated Bridge protocol " +
+                        "\(minimumVersion.major).\(minimumVersion.minor) capability")
+            }
         }
         if PeekabooBridgeRequestContext.usesAttestedOperationResultSemantics,
            op == .exactDialogEnterText,
@@ -873,14 +903,17 @@ public final class PeekabooBridgeServer {
         _ request: PeekabooBridgeTargetedClickRequest,
         permissions: PermissionsStatus) throws
     {
-        // All background clicks are delivered through accessibility actions; positioned
-        // pid-routed mouse events are broken on modern macOS (they land at the window corner),
-        // so Event Synthesizing permission no longer enables any targeted click path.
         guard permissions.accessibility else {
             throw PeekabooBridgeErrorEnvelope(
                 code: .permissionDenied,
                 message: "Background clicks require Accessibility permission",
                 permission: .accessibility)
+        }
+        guard !request.requiresPostEventPermission || permissions.postEvent else {
+            throw PeekabooBridgeErrorEnvelope(
+                code: .permissionDenied,
+                message: "This background click requires Event Synthesizing permission",
+                permission: .postEvent)
         }
     }
 }
@@ -908,6 +941,12 @@ private func protocolHostCapabilities(
     }
     if supportedVersions.upperBound >= PeekabooBridgeConstants.plannerInventoryTransportVersion {
         capabilities.insert(PeekabooBridgeHostCapability.plannerInventoryTransport)
+    }
+    if supportedVersions.upperBound >= PeekabooBridgeConstants.exactWindowHeldPointerLifecycleVersion {
+        capabilities.insert(PeekabooBridgeHostCapability.exactWindowHeldPointerLifecycle)
+    }
+    if supportedVersions.upperBound >= PeekabooBridgeConstants.statelessClickVariantVersion {
+        capabilities.insert(PeekabooBridgeHostCapability.statelessClickVariants)
     }
     return capabilities
 }

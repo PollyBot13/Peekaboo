@@ -5,7 +5,7 @@ import Darwin
 import Foundation
 import PeekabooFoundation
 
-enum WindowRoutedPointerTransport: Equatable {
+enum WindowRoutedPointerTransport: Equatable, Sendable {
     case publicCGEvent
     case skyLight
 }
@@ -17,7 +17,7 @@ enum WindowRoutedPointerTransport: Equatable {
 /// owner, owner process generation, and bounds are revalidated before every event boundary.
 @MainActor
 struct WindowRoutedPointerDriver {
-    struct RouteReceipt: Equatable {
+    struct RouteReceipt: Equatable, Sendable {
         let identity: WindowMutationIdentity
         let bounds: CGRect
         let screenPoint: CGPoint
@@ -42,7 +42,7 @@ struct WindowRoutedPointerDriver {
         }
     }
 
-    struct EventSpecification: Equatable {
+    struct EventSpecification: Equatable, Sendable {
         let type: CGEventType
         let button: CGMouseButton
         let clickState: Int64
@@ -53,6 +53,20 @@ struct WindowRoutedPointerDriver {
         let receipt: RouteReceipt
         let clickGroup: Int64
         let transport: WindowRoutedPointerTransport
+    }
+
+    struct HeldPointerDispatch: Sendable {
+        let receipt: RouteReceipt
+        let clickGroup: Int64
+        let transport: WindowRoutedPointerTransport
+        let down: EventSpecification
+        let up: EventSpecification
+    }
+
+    enum HeldPointerRouteState: Equatable, Sendable {
+        case current
+        case windowChanged
+        case processGenerationChanged
     }
 
     typealias RouteResolver = @MainActor (
@@ -143,12 +157,12 @@ struct WindowRoutedPointerDriver {
         allowedWindowLayers: Set<Int> = [Int(CGWindowLevelForKey(.normalWindow))]) async throws
         -> DesktopActionOutcome
     {
-        guard button == .left || button == .right else {
+        guard button == .left || button == .right || button == .middle else {
             throw PeekabooError.serviceUnavailable(
-                "Window-routed background pointer delivery supports left and right buttons only")
+                "Window-routed background pointer delivery supports left, right, and middle buttons only")
         }
-        guard (1...2).contains(count) else {
-            throw PeekabooError.invalidInput("Window-routed click count must be 1 or 2")
+        guard (1...3).contains(count) else {
+            throw PeekabooError.invalidInput("Window-routed click count must be between 1 and 3")
         }
         guard self.hasPostEventAccess() else {
             throw PeekabooError.permissionDeniedEventSynthesizing
@@ -186,16 +200,17 @@ struct WindowRoutedPointerDriver {
         for pairIndex in 0..<count {
             try Self.checkCancellation(afterPosting: postedEventCount)
             let clickState = Int64(pairIndex + 1)
+            let eventKinds = Self.eventKinds(for: button)
             let down = EventSpecification(
-                type: button == .right ? .rightMouseDown : .leftMouseDown,
-                button: button == .right ? .right : .left,
+                type: eventKinds.down,
+                button: eventKinds.button,
                 clickState: clickState,
-                buttonNumber: button == .right ? 1 : 0)
+                buttonNumber: eventKinds.buttonNumber)
             let up = EventSpecification(
-                type: button == .right ? .rightMouseUp : .leftMouseUp,
-                button: button == .right ? .right : .left,
+                type: eventKinds.up,
+                button: eventKinds.button,
                 clickState: clickState,
-                buttonNumber: button == .right ? 1 : 0)
+                buttonNumber: eventKinds.buttonNumber)
 
             try self.post(
                 down,
@@ -247,6 +262,118 @@ struct WindowRoutedPointerDriver {
                 causeDescription: error.localizedDescription)
         }
         return outcome
+    }
+
+    func prepareHold(
+        at point: CGPoint,
+        button: MouseButton,
+        target: ExactWindowPointerTarget) throws -> HeldPointerDispatch
+    {
+        guard button == .left || button == .right else {
+            throw PeekabooError.serviceUnavailable(
+                "Exact-window held pointer delivery supports left and right buttons only")
+        }
+        guard self.hasPostEventAccess() else {
+            throw PeekabooError.permissionDeniedEventSynthesizing
+        }
+        try Task.checkCancellation()
+
+        let targetProcessIdentifier = target.identity.ownerProcessIdentifier
+        let receipt = try self.resolveRoute(
+            targetProcessIdentifier,
+            CGWindowID(target.identity.windowID),
+            point)
+        guard receipt.identity == target.identity,
+              receipt.bounds == target.bounds,
+              receipt.windowLayer == Int(CGWindowLevelForKey(.normalWindow)),
+              receipt.bounds.contains(point)
+        else {
+            throw PeekabooError.snapshotStale(
+                "Resolved held pointer route does not match the requested process generation, window, bounds, or point")
+        }
+        let isRight = button == .right
+        return HeldPointerDispatch(
+            receipt: receipt,
+            clickGroup: self.clickGroupIdentifier(),
+            transport: self.resolveTransport(targetProcessIdentifier),
+            down: EventSpecification(
+                type: isRight ? .rightMouseDown : .leftMouseDown,
+                button: isRight ? .right : .left,
+                clickState: 1,
+                buttonNumber: isRight ? 1 : 0),
+            up: EventSpecification(
+                type: isRight ? .rightMouseUp : .leftMouseUp,
+                button: isRight ? .right : .left,
+                clickState: 1,
+                buttonNumber: isRight ? 1 : 0))
+    }
+
+    /// Posts the routing primer and mouse-down while the caller owns the exact-window lane.
+    func postHeldDown(_ dispatch: HeldPointerDispatch) async throws -> Int {
+        var postedEventCount = 0
+        let primer = EventSpecification(
+            type: .mouseMoved,
+            button: .left,
+            clickState: 0,
+            buttonNumber: 0)
+        try self.post(
+            primer,
+            receipt: dispatch.receipt,
+            clickGroup: dispatch.clickGroup,
+            transport: dispatch.transport,
+            postedEventCount: &postedEventCount)
+        await self.sleep(.milliseconds(12))
+        do {
+            try self.post(
+                dispatch.down,
+                receipt: dispatch.receipt,
+                clickGroup: dispatch.clickGroup,
+                transport: dispatch.transport,
+                postedEventCount: &postedEventCount)
+        } catch {
+            throw InputDeliveryIndeterminateError(
+                operation: .click,
+                emittedUnitCount: postedEventCount,
+                causeDescription: "The held-pointer routing primer was posted, but mouse-down failed. " +
+                    error.localizedDescription)
+        }
+        return postedEventCount
+    }
+
+    /// Releases only to the original live process generation. Window drift is deliberately ignored
+    /// for cleanup because the matching generation received the down event; PID recycling is not.
+    func postHeldRelease(_ dispatch: HeldPointerDispatch) throws -> Int {
+        var postedEventCount = 0
+        try self.postRelease(
+            dispatch.up,
+            receipt: dispatch.receipt,
+            clickGroup: dispatch.clickGroup,
+            transport: dispatch.transport,
+            postedEventCount: &postedEventCount)
+        return postedEventCount
+    }
+
+    func heldPointerRouteState(_ dispatch: HeldPointerDispatch) -> HeldPointerRouteState {
+        guard self.processGenerationIsCurrent(dispatch.receipt) else {
+            return .processGenerationChanged
+        }
+        return self.routeIsCurrent(dispatch.receipt) ? .current : .windowChanged
+    }
+
+    private static func eventKinds(for button: MouseButton) -> (
+        button: CGMouseButton,
+        down: CGEventType,
+        up: CGEventType,
+        buttonNumber: Int64)
+    {
+        switch button {
+        case .left:
+            (.left, .leftMouseDown, .leftMouseUp, 0)
+        case .right:
+            (.right, .rightMouseDown, .rightMouseUp, 1)
+        case .middle:
+            (.center, .otherMouseDown, .otherMouseUp, 2)
+        }
     }
 
     // swiftlint:disable function_parameter_count

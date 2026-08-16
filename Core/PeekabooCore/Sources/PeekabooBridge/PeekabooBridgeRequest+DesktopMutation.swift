@@ -15,12 +15,82 @@ extension PeekabooBridgeRequest {
             self
         }
     }
+
+    var requiresStatelessClickVariantSupport: Bool {
+        switch self.unwrappedOperationRequest {
+        case let .click(payload):
+            payload.clickType.requiresStatelessVariantSupport
+        case let .targetedClick(payload):
+            payload.clickType.requiresStatelessVariantSupport
+        default:
+            false
+        }
+    }
+
+    var minimumNegotiatedProtocolVersion: PeekabooBridgeProtocolVersion? {
+        if self.requiresStatelessClickVariantSupport {
+            return PeekabooBridgeConstants.statelessClickVariantVersion
+        }
+        switch self.unwrappedOperationRequest.operation {
+        case .createExactWindowHeldPointerOwner,
+             .beginExactWindowHeldPointer,
+             .releaseExactWindowHeldPointer,
+             .revokeExactWindowHeldPointer,
+             .disconnectExactWindowHeldPointerOwner:
+            return PeekabooBridgeConstants.exactWindowHeldPointerLifecycleVersion
+        default:
+            return nil
+        }
+    }
+
+    var requiresExactWindowHeldPointerLifecycleSupport: Bool {
+        switch self.unwrappedOperationRequest.operation {
+        case .createExactWindowHeldPointerOwner,
+             .beginExactWindowHeldPointer,
+             .releaseExactWindowHeldPointer,
+             .revokeExactWindowHeldPointer,
+             .disconnectExactWindowHeldPointerOwner:
+            true
+        default:
+            false
+        }
+    }
+
+    var requiresExactWindowHeldPointerBeginSupport: Bool {
+        switch self.unwrappedOperationRequest.operation {
+        case .createExactWindowHeldPointerOwner, .beginExactWindowHeldPointer:
+            true
+        default:
+            false
+        }
+    }
+
+    var requiresExactWindowHeldPointerTerminalSupport: Bool {
+        switch self.unwrappedOperationRequest.operation {
+        case .releaseExactWindowHeldPointer,
+             .revokeExactWindowHeldPointer,
+             .disconnectExactWindowHeldPointerOwner:
+            true
+        default:
+            false
+        }
+    }
+
+    var requiresBackgroundStatelessClickVariantSupport: Bool {
+        switch self.unwrappedOperationRequest {
+        case let .targetedClick(payload):
+            payload.clickType.requiresStatelessVariantSupport
+        default:
+            false
+        }
+    }
 }
 
 enum PeekabooBridgeRequestContext {
     @TaskLocal static var clientConnectionProbe: (@Sendable () -> Bool)?
     @TaskLocal static var operationReceiptAuthority: PeekabooBridgeOperationReceiptAuthority?
     @TaskLocal static var usesAttestedOperationResultSemantics = false
+    @TaskLocal static var negotiatedSessionCapabilities: PeekabooBridgeNegotiatedSessionCapabilities?
 
     static func checkRequestIsActive() throws {
         try Task.checkCancellation()

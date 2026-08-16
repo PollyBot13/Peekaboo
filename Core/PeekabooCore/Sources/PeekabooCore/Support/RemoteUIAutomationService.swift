@@ -24,6 +24,7 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
     public let targetedTypeRequiresEventSynthesizingPermission: Bool
     public let supportsTargetedClicks: Bool
     public let supportsProcessGenerationPinnedClicks: Bool
+    public let supportsStatelessClickVariants: Bool
     public let targetedClickUnavailableReason: String?
     public let targetedClickRequiresEventSynthesizingPermission: Bool
     public let supportsExactWindowTargetedClicks: Bool
@@ -32,6 +33,7 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
     public let inspectAccessibilityTreeUnavailableReason: String?
     public let supportsExactWindowTargetedKeyboard: Bool
     public let exactWindowTargetedKeyboardUnavailableReason: String?
+    public let supportsExactWindowHeldPointerLifecycle: Bool
 
     public init(
         client: PeekabooBridgeClient,
@@ -45,6 +47,7 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
         targetedTypeRequiresEventSynthesizingPermission: Bool = false,
         supportsTargetedClicks: Bool = false,
         supportsProcessGenerationPinnedClicks: Bool = false,
+        supportsStatelessClickVariants: Bool = false,
         targetedClickUnavailableReason: String? = nil,
         targetedClickRequiresEventSynthesizingPermission: Bool = false,
         supportsExactWindowTargetedClicks: Bool = false,
@@ -52,7 +55,8 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
         supportsInspectAccessibilityTree: Bool = false,
         inspectAccessibilityTreeUnavailableReason: String? = nil,
         supportsExactWindowTargetedKeyboard: Bool = false,
-        exactWindowTargetedKeyboardUnavailableReason: String? = nil)
+        exactWindowTargetedKeyboardUnavailableReason: String? = nil,
+        supportsExactWindowHeldPointerLifecycle: Bool = false)
     {
         self.client = client
         self.supportsTargetedHotkeys = supportsTargetedHotkeys
@@ -65,6 +69,7 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
         self.targetedTypeRequiresEventSynthesizingPermission = targetedTypeRequiresEventSynthesizingPermission
         self.supportsTargetedClicks = supportsTargetedClicks
         self.supportsProcessGenerationPinnedClicks = supportsProcessGenerationPinnedClicks
+        self.supportsStatelessClickVariants = supportsStatelessClickVariants
         self.targetedClickUnavailableReason = targetedClickUnavailableReason
         self.targetedClickRequiresEventSynthesizingPermission = targetedClickRequiresEventSynthesizingPermission
         self.supportsExactWindowTargetedClicks = supportsExactWindowTargetedClicks
@@ -73,6 +78,7 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
         self.inspectAccessibilityTreeUnavailableReason = inspectAccessibilityTreeUnavailableReason
         self.supportsExactWindowTargetedKeyboard = supportsExactWindowTargetedKeyboard
         self.exactWindowTargetedKeyboardUnavailableReason = exactWindowTargetedKeyboardUnavailableReason
+        self.supportsExactWindowHeldPointerLifecycle = supportsExactWindowHeldPointerLifecycle
     }
 
     public func detectElements(
@@ -170,10 +176,8 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
                 requiresEventSynthesizingPermission: self.targetedClickRequiresEventSynthesizingPermission)
         }
 
-        // No Event Synthesizing preflight: current hosts deliver every targeted click (coordinates
-        // included) through accessibility, so a coordinate click on an Accessibility-only host must
-        // reach the server rather than being rejected here. Variants the host genuinely cannot
-        // deliver (e.g. background double-click) are rejected authoritatively by the server.
+        // The server owns request-specific permission checks: semantic single/right clicks can
+        // remain Accessibility-only, while exact-window routed variants also require PostEvent.
         do {
             try await self.client.click(
                 target: target,
@@ -223,7 +227,7 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
                 requiresEventSynthesizingPermission: self.targetedClickRequiresEventSynthesizingPermission)
         }
 
-        // See the process-targeted overload: no Event Synthesizing preflight, the server decides.
+        // See the process-targeted overload: request-specific Event Synthesizing checks stay server-owned.
         do {
             try await self.client.click(
                 target: target,
@@ -623,5 +627,44 @@ ElementActionAutomationServiceProtocol {
         } catch let envelope as PeekabooBridgeErrorEnvelope {
             throw Self.automationError(for: envelope, snapshotId: snapshotId)
         }
+    }
+}
+
+extension RemoteUIAutomationService: ExactWindowHeldPointerLifecycleServiceProtocol {
+    public func createExactWindowHeldPointerOwner(
+        boundTo _: ApplicationProcessIdentity?) async throws -> ExactWindowHeldPointerOwner
+    {
+        try await self.client.createExactWindowHeldPointerOwner()
+    }
+
+    public func beginExactWindowPointerHold(
+        owner: ExactWindowHeldPointerOwner,
+        request: ExactWindowHeldPointerRequest) async throws
+        -> UIAutomationActionResult<ExactWindowHeldPointerReceipt>
+    {
+        try await self.client.beginExactWindowPointerHold(owner: owner, request: request)
+    }
+
+    public func releaseExactWindowPointerHold(
+        owner: ExactWindowHeldPointerOwner,
+        receipt: ExactWindowHeldPointerReceipt) async throws
+        -> UIAutomationActionResult<ExactWindowHeldPointerTermination>
+    {
+        try await self.client.releaseExactWindowPointerHold(owner: owner, receipt: receipt)
+    }
+
+    public func revokeExactWindowPointerHold(
+        owner: ExactWindowHeldPointerOwner,
+        receipt: ExactWindowHeldPointerReceipt) async throws
+        -> UIAutomationActionResult<ExactWindowHeldPointerTermination>
+    {
+        try await self.client.revokeExactWindowPointerHold(owner: owner, receipt: receipt)
+    }
+
+    public func disconnectExactWindowHeldPointerOwner(
+        _ owner: ExactWindowHeldPointerOwner) async throws
+        -> UIAutomationActionResult<ExactWindowHeldPointerTermination?>
+    {
+        try await self.client.disconnectExactWindowHeldPointerOwner(owner)
     }
 }

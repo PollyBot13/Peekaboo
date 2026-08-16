@@ -1,12 +1,182 @@
 import Foundation
-import PeekabooAutomationKit
 import PeekabooFoundation
 import Testing
+@testable import PeekabooAutomationKit
 @testable import PeekabooBridge
 @testable import PeekabooCore
 
 @Suite("Bridge operation result semantics")
 struct PeekabooBridgeOperationResultSemanticsTests {
+    @Test
+    func `held terminal no change replay requires an exact pre dispatch owner disconnect`() {
+        let bounds = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let identity = WindowMutationIdentity(
+            windowID: 42,
+            ownerProcessIdentifier: 9001,
+            ownerProcessStartIdentity: 7,
+            capturedBounds: bounds)
+        let owner = ExactWindowHeldPointerOwner()
+        let holdRequest = ExactWindowHeldPointerRequest(
+            point: CGPoint(x: 20, y: 30),
+            windowIdentity: identity,
+            windowBounds: bounds,
+            button: .left,
+            expiresAfterSeconds: 10)
+        let receipt = ExactWindowHeldPointerReceipt(
+            token: UUID(),
+            owner: owner,
+            request: holdRequest,
+            expiresAt: Date().addingTimeInterval(10))
+        let release = PeekabooBridgeRequest.releaseExactWindowHeldPointer(.init(
+            owner: owner,
+            receipt: receipt))
+        let revoke = PeekabooBridgeRequest.revokeExactWindowHeldPointer(.init(
+            owner: owner,
+            receipt: receipt))
+        let begin = PeekabooBridgeRequest.beginExactWindowHeldPointer(.init(
+            owner: owner,
+            request: holdRequest))
+        let noChange = DesktopActionOutcome.confirmedNoChange(route: .bridge)
+
+        func response(
+            reason: ExactWindowHeldPointerTerminalReason,
+            lifecycleUnits: Int,
+            cleanup: DesktopActionOutcome = .confirmedNoChange()) -> PeekabooBridgeResponse
+        {
+            .exactWindowHeldPointerTermination(.init(
+                receipt: receipt,
+                reason: reason,
+                cleanupOutcome: cleanup,
+                lifecycleDispatchedUnitCount: lifecycleUnits))
+        }
+
+        let exactReplay = response(reason: .ownerDisconnected, lifecycleUnits: 0)
+        for request in [release, revoke] {
+            #expect(PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                noChange,
+                response: exactReplay,
+                request: request))
+            #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                noChange,
+                response: response(reason: .released, lifecycleUnits: 0),
+                request: request))
+            #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                noChange,
+                response: response(reason: .ownerDisconnected, lifecycleUnits: 1),
+                request: request))
+            #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                noChange,
+                response: response(
+                    reason: .ownerDisconnected,
+                    lifecycleUnits: 0,
+                    cleanup: .dispatchedUnverified(
+                        delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+                        evidence: .deliveryAccepted,
+                        unitCount: .one)),
+                request: request))
+        }
+        #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+            noChange,
+            response: exactReplay,
+            request: begin))
+    }
+
+    @Test
+    func `middle and triple click success requires exact routed delivery and event counts`() throws {
+        let identity = WindowMutationIdentity(
+            windowID: 42,
+            ownerProcessIdentifier: 9001,
+            ownerProcessStartIdentity: 7,
+            capturedBounds: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let bounds = try #require(identity.capturedBounds)
+
+        for (clickType, units) in [(ClickType.middle, 3), (.triple, 7)] {
+            let request = PeekabooBridgeRequest.targetedClick(.init(
+                target: .elementId("B1"),
+                clickType: clickType,
+                snapshotId: "snapshot",
+                targetProcessIdentifier: identity.ownerProcessIdentifier,
+                targetWindowID: identity.windowID,
+                expectedWindowIdentity: identity,
+                expectedWindowBounds: bounds))
+            let accepted = DesktopActionOutcome.dispatchedUnverified(
+                delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+                evidence: .deliveryAccepted,
+                unitCount: .init(units)).routed(to: .bridge)
+            let wrongUnits = DesktopActionOutcome.dispatchedUnverified(
+                delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+                evidence: .deliveryAccepted,
+                unitCount: .init(units + 1)).routed(to: .bridge)
+            let falseAX = DesktopActionOutcome.confirmedChange(
+                delivery: .init(mechanism: .accessibilityAction, mode: .background),
+                unitCount: .one).routed(to: .bridge)
+
+            #expect(PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                accepted,
+                response: .ok,
+                request: request))
+            #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                wrongUnits,
+                response: .ok,
+                request: request))
+            #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                falseAX,
+                response: .ok,
+                request: request))
+        }
+    }
+
+    @Test
+    func `process-only right and double clicks preserve truthful routed outcomes`() {
+        for (clickType, units) in [(ClickType.right, 3), (.double, 5)] {
+            let request = PeekabooBridgeRequest.targetedClick(.init(
+                target: .elementId("B1"),
+                clickType: clickType,
+                snapshotId: "snapshot",
+                targetProcessIdentifier: 9001,
+                expectedProcessIdentity: .init(
+                    processIdentifier: 9001,
+                    processStartIdentity: 7)))
+            let accepted = DesktopActionOutcome.dispatchedUnverified(
+                route: .bridge,
+                delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+                evidence: .deliveryAccepted,
+                unitCount: .init(units))
+            let wrongUnits = DesktopActionOutcome.dispatchedUnverified(
+                route: .bridge,
+                delivery: .init(mechanism: .windowTargetedEvents, mode: .background),
+                evidence: .deliveryAccepted,
+                unitCount: .init(units + 1))
+            let oneUnitAccessibility = DesktopActionOutcome.confirmedChange(
+                route: .bridge,
+                delivery: .init(mechanism: .accessibilityAction, mode: .background),
+                unitCount: .one)
+            let requestedUnitAccessibility = DesktopActionOutcome.confirmedChange(
+                route: .bridge,
+                delivery: .init(mechanism: .accessibilityAction, mode: .background),
+                unitCount: .init(units))
+
+            #expect(PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                accepted,
+                response: .ok,
+                request: request))
+            #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                wrongUnits,
+                response: .ok,
+                request: request))
+            #expect(PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                oneUnitAccessibility,
+                response: .ok,
+                request: request) == (clickType == .right))
+            if clickType == .double {
+                #expect(!PeekabooBridgeOperationResultSemantics.successfulOutcomeMatchesContract(
+                    requestedUnitAccessibility,
+                    response: .ok,
+                    request: request))
+            }
+        }
+    }
+
     @Test
     func `Default generation-pinned menu request admits only background delivery`() {
         let request = PeekabooBridgeRequest.clickMenuItem(.init(
@@ -114,6 +284,10 @@ struct PeekabooBridgeOperationResultSemanticsTests {
             .hotkey,
             .targetedHotkey,
             .exactWindowTargetedHotkey,
+            .beginExactWindowHeldPointer,
+            .releaseExactWindowHeldPointer,
+            .revokeExactWindowHeldPointer,
+            .disconnectExactWindowHeldPointerOwner,
             .targetedClick,
             .exactWindowTargetedClick,
             .swipe,

@@ -58,6 +58,13 @@ extension PeekabooBridgeServer {
             negotiated >= PeekabooBridgeConstants.attestedOperationReceiptVersion &&
             operationReceiptAuthority != nil &&
             self.hostCapabilities.contains(PeekabooBridgeHostCapability.desktopActionOutcomeProjection)
+        let heldPointerOperations: Set<PeekabooBridgeOperation> = [
+            .createExactWindowHeldPointerOwner,
+            .beginExactWindowHeldPointer,
+            .releaseExactWindowHeldPointer,
+            .revokeExactWindowHeldPointer,
+            .disconnectExactWindowHeldPointerOwner,
+        ]
 
         let compatibleOperations = self.handshakeOperations(
             negotiated: negotiated,
@@ -65,6 +72,12 @@ extension PeekabooBridgeServer {
             usesAttestedOperationReceipts: supportsAttestedOperationReceipts)
         var advertisedOps = compatibleOperations.advertised.sorted { $0.rawValue < $1.rawValue }
         var enabledOps = compatibleOperations.enabled
+        if negotiated >= PeekabooBridgeConstants.exactWindowHeldPointerLifecycleVersion,
+           !supportsAttestedOperationReceipts
+        {
+            advertisedOps.removeAll { heldPointerOperations.contains($0) }
+            enabledOps.subtract(heldPointerOperations)
+        }
         if negotiated >= PeekabooBridgeConstants.attestedOperationReceiptVersion,
            !advertisedOps.contains(.listWindows)
         {
@@ -119,6 +132,22 @@ extension PeekabooBridgeServer {
             """)
 
         var advertisedCapabilities = self.hostCapabilities
+        if !supportsAttestedOperationReceipts ||
+            negotiated < PeekabooBridgeConstants.statelessClickVariantVersion ||
+            (self.services.automation as? any TargetedClickServiceProtocol)?.supportsStatelessClickVariants != true ||
+            !advertisedOps.contains(.targetedClick) ||
+            !advertisedOps.contains(.exactWindowTargetedClick)
+        {
+            advertisedCapabilities.remove(PeekabooBridgeHostCapability.statelessClickVariants)
+        }
+        if !supportsAttestedOperationReceipts ||
+            negotiated < PeekabooBridgeConstants.exactWindowHeldPointerLifecycleVersion ||
+            (self.services.automation as? any ExactWindowHeldPointerLifecycleServiceProtocol)?
+            .supportsExactWindowHeldPointerLifecycle != true ||
+            !heldPointerOperations.isSubset(of: advertisedOps)
+        {
+            advertisedCapabilities.remove(PeekabooBridgeHostCapability.exactWindowHeldPointerLifecycle)
+        }
         if supportsAttestedOperationReceipts {
             advertisedCapabilities.insert(PeekabooBridgeHostCapability.attestedOperationReceipts)
         }
@@ -135,7 +164,14 @@ extension PeekabooBridgeServer {
                 operationSessionAttestation = try await operationReceiptAuthority?.createSession(
                     clientInstanceID: clientInstanceID,
                     peer: peer,
+                    negotiatedCapabilities: .init(
+                        protocolVersion: negotiated,
+                        statelessClickVariants: advertisedCapabilities.contains(
+                            PeekabooBridgeHostCapability.statelessClickVariants),
+                        exactWindowHeldPointerLifecycle: advertisedCapabilities.contains(
+                            PeekabooBridgeHostCapability.exactWindowHeldPointerLifecycle)),
                     replacing: payload.replacingOperationSessionID)
+                self.clearReceiptlessNegotiation(peer: peer)
             } catch let error as PeekabooBridgeOperationReceiptError {
                 let code: PeekabooBridgeErrorCode = switch error {
                 case .operationSessionMismatch:
@@ -156,6 +192,7 @@ extension PeekabooBridgeServer {
             }
         } else {
             operationSessionAttestation = nil
+            self.recordReceiptlessNegotiation(peer: peer, protocolVersion: negotiated)
         }
         let response = PeekabooBridgeHandshakeResponse(
             negotiatedVersion: negotiated,
@@ -262,6 +299,17 @@ extension PeekabooBridgeServer {
             operations.remove(.exactWindowTargetedTypeActions)
             operations.remove(.exactWindowTargetedHotkey)
         }
+        if (self.services.automation as? any ExactWindowHeldPointerLifecycleServiceProtocol)?
+            .supportsExactWindowHeldPointerLifecycle != true
+        {
+            operations.subtract([
+                .createExactWindowHeldPointerOwner,
+                .beginExactWindowHeldPointer,
+                .releaseExactWindowHeldPointer,
+                .revokeExactWindowHeldPointer,
+                .disconnectExactWindowHeldPointerOwner,
+            ])
+        }
         if !self.services.snapshots.supportsImplicitLatestSnapshotInvalidation {
             operations.remove(.invalidateImplicitLatestSnapshot)
         }
@@ -292,9 +340,8 @@ extension PeekabooBridgeServer {
                 operation.requiredPermissions.isSubset(of: granted)
             })
 
-        // Targeted clicks are delivered exclusively through accessibility actions; the
-        // synthetic pid-routed mouse path was removed because macOS delivers those events at
-        // the window corner regardless of the requested point.
+        // Every targeted click needs Accessibility for element/window validation. Variants that
+        // use exact-window routed events receive their additional PostEvent check per request.
         if !permissions.accessibility {
             operations.remove(.targetedClick)
             operations.remove(.exactWindowTargetedClick)
@@ -365,6 +412,46 @@ extension PeekabooBridgeServer {
             .postEvent
         default:
             nil
+        }
+    }
+
+    func receiptlessProtocolVersion(for peer: PeekabooBridgePeer?) -> PeekabooBridgeProtocolVersion? {
+        self.pruneReceiptlessNegotiations()
+        guard let liveIdentity = peer?.liveIdentity,
+              self.processStartIdentityProvider(liveIdentity.processIdentifier) ==
+              liveIdentity.processStartIdentity
+        else { return nil }
+        return self.receiptlessNegotiations[liveIdentity]?.protocolVersion
+    }
+
+    private func recordReceiptlessNegotiation(
+        peer: PeekabooBridgePeer?,
+        protocolVersion: PeekabooBridgeProtocolVersion)
+    {
+        guard let liveIdentity = peer?.liveIdentity,
+              self.processStartIdentityProvider(liveIdentity.processIdentifier) ==
+              liveIdentity.processStartIdentity
+        else { return }
+        self.pruneReceiptlessNegotiations()
+        if self.receiptlessNegotiations.count >= 1024,
+           self.receiptlessNegotiations[liveIdentity] == nil,
+           let oldest = self.receiptlessNegotiations.min(by: { $0.value.recordedAt < $1.value.recordedAt })?.key
+        {
+            self.receiptlessNegotiations.removeValue(forKey: oldest)
+        }
+        self.receiptlessNegotiations[liveIdentity] = PeekabooBridgeReceiptlessNegotiation(
+            protocolVersion: protocolVersion,
+            recordedAt: ContinuousClock.now)
+    }
+
+    private func clearReceiptlessNegotiation(peer: PeekabooBridgePeer?) {
+        guard let liveIdentity = peer?.liveIdentity else { return }
+        self.receiptlessNegotiations.removeValue(forKey: liveIdentity)
+    }
+
+    private func pruneReceiptlessNegotiations() {
+        self.receiptlessNegotiations = self.receiptlessNegotiations.filter { liveIdentity, _ in
+            self.processStartIdentityProvider(liveIdentity.processIdentifier) == liveIdentity.processStartIdentity
         }
     }
 }

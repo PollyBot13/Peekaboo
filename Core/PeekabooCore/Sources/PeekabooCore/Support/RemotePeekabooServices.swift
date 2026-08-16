@@ -42,6 +42,7 @@ public final class RemotePeekabooServices: PeekabooServiceProviding {
         targetedTypeUnavailableReason: String? = nil,
         targetedTypeRequiresEventSynthesizingPermission: Bool = false,
         supportsTargetedClicks: Bool = false,
+        supportsStatelessClickVariants: Bool = false,
         targetedClickUnavailableReason: String? = nil,
         targetedClickRequiresEventSynthesizingPermission: Bool = false,
         supportsExactWindowTargetedClicks: Bool = false,
@@ -55,6 +56,7 @@ public final class RemotePeekabooServices: PeekabooServiceProviding {
         inspectAccessibilityTreeUnavailableReason: String? = nil,
         supportsExactWindowTargetedKeyboard: Bool = false,
         exactWindowTargetedKeyboardUnavailableReason: String? = nil,
+        supportsExactWindowHeldPointerLifecycle: Bool = false,
         supportsPostEventPermissionRequest: Bool = false,
         supportsElementActions: Bool = false,
         supportsDesktopObservation: Bool = false,
@@ -109,6 +111,7 @@ public final class RemotePeekabooServices: PeekabooServiceProviding {
                 supportsTargetedClicks: supportsTargetedClicks,
                 supportsProcessGenerationPinnedClicks: supportsProcessGenerationPinnedInteractions &&
                     supportsTargetedClicks,
+                supportsStatelessClickVariants: supportsStatelessClickVariants,
                 targetedClickUnavailableReason: targetedClickUnavailableReason,
                 targetedClickRequiresEventSynthesizingPermission: targetedClickRequiresEventSynthesizingPermission,
                 supportsExactWindowTargetedClicks: supportsExactWindowTargetedClicks,
@@ -116,7 +119,8 @@ public final class RemotePeekabooServices: PeekabooServiceProviding {
                 supportsInspectAccessibilityTree: supportsInspectAccessibilityTree,
                 inspectAccessibilityTreeUnavailableReason: inspectAccessibilityTreeUnavailableReason,
                 supportsExactWindowTargetedKeyboard: supportsExactWindowTargetedKeyboard,
-                exactWindowTargetedKeyboardUnavailableReason: exactWindowTargetedKeyboardUnavailableReason)
+                exactWindowTargetedKeyboardUnavailableReason: exactWindowTargetedKeyboardUnavailableReason,
+                supportsExactWindowHeldPointerLifecycle: supportsExactWindowHeldPointerLifecycle)
         } else {
             RemoteUIAutomationService(
                 client: client,
@@ -132,6 +136,7 @@ public final class RemotePeekabooServices: PeekabooServiceProviding {
                 supportsTargetedClicks: supportsTargetedClicks,
                 supportsProcessGenerationPinnedClicks: supportsProcessGenerationPinnedInteractions &&
                     supportsTargetedClicks,
+                supportsStatelessClickVariants: supportsStatelessClickVariants,
                 targetedClickUnavailableReason: targetedClickUnavailableReason,
                 targetedClickRequiresEventSynthesizingPermission: targetedClickRequiresEventSynthesizingPermission,
                 supportsExactWindowTargetedClicks: supportsExactWindowTargetedClicks,
@@ -139,7 +144,8 @@ public final class RemotePeekabooServices: PeekabooServiceProviding {
                 supportsInspectAccessibilityTree: supportsInspectAccessibilityTree,
                 inspectAccessibilityTreeUnavailableReason: inspectAccessibilityTreeUnavailableReason,
                 supportsExactWindowTargetedKeyboard: supportsExactWindowTargetedKeyboard,
-                exactWindowTargetedKeyboardUnavailableReason: exactWindowTargetedKeyboardUnavailableReason)
+                exactWindowTargetedKeyboardUnavailableReason: exactWindowTargetedKeyboardUnavailableReason,
+                supportsExactWindowHeldPointerLifecycle: supportsExactWindowHeldPointerLifecycle)
         }
         self.windows = RemoteWindowManagementService(
             client: client,

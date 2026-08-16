@@ -310,6 +310,7 @@ enum RuntimeHostResolver {
 
         if let explicitSocket,
            !options.permitsExplicitSocketDiagnosticFallback,
+           options.requiresStatelessClickVariants ||
            self.requiredHostFailure(explicitSocket: explicitSocket, options: options) == nil {
             throw BridgeExplicitSocketUnavailableError(
                 socketPath: NSString(string: explicitSocket).standardizingPath
@@ -382,6 +383,14 @@ enum RuntimeHostResolver {
     }
 
     static func requiredHostFailure(explicitSocket: String?, options: CommandRuntimeOptions) -> String? {
+        if options.requiresStatelessClickVariants {
+            if !options.requiresBackgroundStatelessClickVariants {
+                return "No compatible Bridge host negotiates protocol 1.30 middle/triple-click payloads. " +
+                    "Update and relaunch Peekaboo before retrying."
+            }
+            return "No compatible Bridge host advertises protocol 1.30 middle/triple-click support. " +
+                "Update and relaunch Peekaboo on the selected host, or pass --no-remote to run locally."
+        }
         if options.requiresDesktopObservationOCR {
             return "No compatible Bridge host advertises desktopObservationOCR. Update and relaunch Peekaboo " +
                 "on the selected host, or pass --no-remote to explicitly run Vision OCR in the caller process."
@@ -808,6 +817,7 @@ enum RuntimeHostResolver {
             targetedTypeUnavailableReason: targetedType.unavailableReason,
             targetedTypeRequiresEventSynthesizingPermission: targetedType.missingPermissions.contains(.postEvent),
             supportsTargetedClicks: targetedClick.isEnabled,
+            supportsStatelessClickVariants: BridgeCapabilityPolicy.supportsStatelessClickVariants(for: handshake),
             targetedClickUnavailableReason: targetedClick.unavailableReason,
             targetedClickRequiresEventSynthesizingPermission: targetedClick.missingPermissions.contains(.postEvent),
             supportsExactWindowTargetedClicks: BridgeCapabilityPolicy.supportsExactWindowTargetedClicks(for: handshake),
@@ -824,6 +834,8 @@ enum RuntimeHostResolver {
             exactWindowTargetedKeyboardUnavailableReason: supportsExactKeyboard
                 ? nil
                 : "Bridge host lacks atomic exact-window keyboard delivery",
+            supportsExactWindowHeldPointerLifecycle:
+            BridgeCapabilityPolicy.supportsExactWindowHeldPointerLifecycle(for: handshake),
             supportsPostEventPermissionRequest: BridgeCapabilityPolicy.supportsPostEventPermissionRequest(
                 for: handshake
             ),

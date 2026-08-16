@@ -206,6 +206,14 @@ enum BridgeCapabilityPolicy {
            !self.supportsExactWindowTargetedClicks(for: handshake) {
             return false
         }
+        if options.requiresStatelessClickVariants,
+           handshake.negotiatedVersion < PeekabooBridgeConstants.statelessClickVariantVersion {
+            return false
+        }
+        if options.requiresBackgroundStatelessClickVariants,
+           !self.supportsStatelessClickVariants(for: handshake) {
+            return false
+        }
         if options.requiresTargetedScroll, !self.supportsTargetedScroll(for: handshake) {
             return false
         }
@@ -652,6 +660,29 @@ enum BridgeCapabilityPolicy {
         }
         return (handshake.enabledOperations ?? handshake.supportedOperations)
             .contains(.exactWindowTargetedClick)
+    }
+
+    static func supportsStatelessClickVariants(for handshake: PeekabooBridgeHandshakeResponse) -> Bool {
+        handshake.negotiatedVersion >= PeekabooBridgeConstants.statelessClickVariantVersion &&
+            handshake.hostCapabilities?.contains(PeekabooBridgeHostCapability.statelessClickVariants) == true &&
+            self.supportsOperation(.targetedClick, for: handshake) &&
+            self.supportsOperation(.exactWindowTargetedClick, for: handshake)
+    }
+
+    static func supportsExactWindowHeldPointerLifecycle(for handshake: PeekabooBridgeHandshakeResponse) -> Bool {
+        let requiredOperations: Set<PeekabooBridgeOperation> = [
+            .createExactWindowHeldPointerOwner,
+            .beginExactWindowHeldPointer,
+            .releaseExactWindowHeldPointer,
+            .revokeExactWindowHeldPointer,
+            .disconnectExactWindowHeldPointerOwner,
+        ]
+        return handshake.negotiatedVersion >= PeekabooBridgeConstants.exactWindowHeldPointerLifecycleVersion &&
+            handshake.hostCapabilities?.contains(
+                PeekabooBridgeHostCapability.exactWindowHeldPointerLifecycle
+            ) == true &&
+            requiredOperations.isSubset(of: Set(handshake.supportedOperations)) &&
+            requiredOperations.isSubset(of: Set(handshake.enabledOperations ?? handshake.supportedOperations))
     }
 
     static func supportsTargetedScroll(for handshake: PeekabooBridgeHandshakeResponse) -> Bool {

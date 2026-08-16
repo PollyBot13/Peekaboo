@@ -70,6 +70,14 @@ public enum PeekabooBridgeConstants {
     public static let plannerInventoryTransportVersion =
         PeekabooBridgeProtocolVersion(major: 1, minor: 30)
 
+    /// First protocol with owner-scoped exact-window held-pointer lifecycles.
+    public static let exactWindowHeldPointerLifecycleVersion =
+        PeekabooBridgeProtocolVersion(major: 1, minor: 30)
+
+    /// First protocol whose click payload can carry stateless middle- and triple-click variants.
+    public static let statelessClickVariantVersion =
+        PeekabooBridgeProtocolVersion(major: 1, minor: 30)
+
     /// First protocol with listener-bound, signed per-operation receipts.
     public static let attestedOperationReceiptVersion =
         PeekabooBridgeProtocolVersion(major: 1, minor: 29)

@@ -28,6 +28,7 @@ extension PeekabooBridgeClient {
         operationReceiptRequirement: PeekabooBridgeOperationReceiptRequirement = .whenAvailable) async throws
         -> PeekabooBridgeTransportReply
     {
+        try self.requireNegotiatedInputCapabilities(for: request)
         let explicitlyProjected = if case .projectedAction = request {
             true
         } else {
@@ -165,12 +166,13 @@ extension PeekabooBridgeClient {
         operationReceiptRequirement: PeekabooBridgeOperationReceiptRequirement) async throws
         -> PeekabooBridgePreparedRequest
     {
+        try self.requireNegotiatedInputCapabilities(for: originalRequest)
+        let preparedRequest: PeekabooBridgePreparedRequest
         do {
-            let preparedRequest = try await self.prepareWireRequest(projectedRequest, deadline: deadline)
+            preparedRequest = try await self.prepareWireRequest(projectedRequest, deadline: deadline)
             guard operationReceiptRequirement != .required || preparedRequest.context != nil else {
                 throw PeekabooBridgeClientOperationSessionError.handshakeRequired
             }
-            return preparedRequest
         } catch let cancellation as CancellationError {
             guard originalRequest.mayMutateDesktop,
                   !self.usesExplicitReceiptlessTransport()
@@ -179,6 +181,45 @@ extension PeekabooBridgeClient {
         } catch {
             guard originalRequest.mayMutateDesktop else { throw error }
             throw Self.preTransportSessionUnavailableFailure(operation: operation, cause: error)
+        }
+        try self.requireNegotiatedInputCapabilities(for: originalRequest)
+        return preparedRequest
+    }
+
+    private func requireNegotiatedInputCapabilities(for request: PeekabooBridgeRequest) throws {
+        if request.requiresStatelessClickVariantSupport, !self.statelessClickVariantPayloadsEnabled {
+            throw DesktopActionFailure.preDispatchRefusal(
+                route: .bridge,
+                reason: .runtimeIncompatible,
+                message: "Bridge protocol 1.30 middle/triple-click payload support is unavailable.",
+                hint: "Update or relaunch the Peekaboo Bridge host before retrying.")
+        }
+        if request.requiresBackgroundStatelessClickVariantSupport,
+           !self.statelessClickVariantsEnabled
+        {
+            throw DesktopActionFailure.preDispatchRefusal(
+                route: .bridge,
+                reason: .runtimeIncompatible,
+                message: "Bridge protocol 1.30 background middle/triple-click support is unavailable.",
+                hint: "Use explicit foreground delivery or update and relaunch the Peekaboo Bridge host.")
+        }
+        if request.requiresExactWindowHeldPointerBeginSupport,
+           !self.exactWindowHeldPointerLifecycleEnabled
+        {
+            throw DesktopActionFailure.preDispatchRefusal(
+                route: .bridge,
+                reason: .runtimeIncompatible,
+                message: "Bridge protocol 1.30 exact-window held-pointer support is unavailable.",
+                hint: "Update or relaunch the Peekaboo Bridge host before retrying.")
+        }
+        if request.requiresExactWindowHeldPointerTerminalSupport,
+           !self.exactWindowHeldPointerTerminalCleanupEnabled
+        {
+            throw DesktopActionFailure.preDispatchRefusal(
+                route: .bridge,
+                reason: .runtimeIncompatible,
+                message: "Bridge protocol 1.30 exact-window held-pointer cleanup is unavailable.",
+                hint: "Reconnect to the Bridge host that owns the active hold before retrying.")
         }
     }
 
@@ -612,6 +653,8 @@ extension PeekabooBridgeClient {
             }
         case .handlerRequired, .responseResolved, .external:
             guard resolved != nil else { throw DesktopTargetIdentityError.incompleteExactWindow }
+        case .handlerResolvedOrGlobal:
+            break
         case .notApplicable, .requestDependent:
             throw DesktopTargetIdentityError.incompleteExactWindow
         }

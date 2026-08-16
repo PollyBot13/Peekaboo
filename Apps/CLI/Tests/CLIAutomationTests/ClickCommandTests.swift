@@ -1,5 +1,6 @@
 import Foundation
 import PeekabooCore
+import PeekabooFoundation
 import Testing
 @testable import PeekabooCLI
 
@@ -131,6 +132,114 @@ struct ClickCommandTests {
 
         #expect(throws: (any Error).self) {
             try command.validate()
+        }
+    }
+
+    @Test
+    func `All conflicting click variants refuse before runtime mutation`() async throws {
+        let variants = ["--double", "--right", "--middle", "--triple", "--long-press"]
+        for first in variants.indices {
+            for second in variants.indices where first < second {
+                let context = await makeContext()
+                let result = try await InProcessCommandRunner.run(
+                    ["click", "--at", "100,200", "--foreground", variants[first], variants[second], "--json"],
+                    services: context.services
+                )
+
+                #expect(result.exitStatus == 1)
+                #expect(result.combinedOutput.contains("mutually exclusive"))
+                #expect(await self.automationState(context) { $0.clickCalls }.isEmpty)
+                #expect(await self.automationState(context) { $0.targetedClickCalls }.isEmpty)
+                #expect(context.snapshots.invalidationCutoffs.isEmpty)
+            }
+        }
+    }
+
+    @Test
+    func `Foreground middle and triple variants forward their exact click types`() async throws {
+        for (flag, expected) in [("--middle", ClickType.middle), ("--triple", .triple)] {
+            let context = await makeContext()
+            let result = try await InProcessCommandRunner.run(
+                ["click", "--at", "100,200", "--foreground", flag, "--json"],
+                services: context.services
+            )
+
+            #expect(result.exitStatus == 0)
+            let call = try #require(await self.automationState(context) { $0.clickCalls.first })
+            #expect(call.clickType == expected)
+            #expect(await self.automationState(context) { $0.targetedClickCalls }.isEmpty)
+        }
+    }
+
+    @Test
+    func `Background middle and triple variants preserve exact snapshot window`() async throws {
+        let application = Self.makeApplication()
+        let selectedWindow = Self.makeWindow(id: 42, title: "Editor", index: 0)
+
+        for (flag, expected) in [("--middle", ClickType.middle), ("--triple", .triple)] {
+            let context = await makeContext(application: application, windows: [selectedWindow])
+            let snapshotId = try await storeSnapshot(
+                element: DetectedElement(
+                    id: "B1",
+                    type: .button,
+                    label: "Target",
+                    bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
+                ),
+                windowID: selectedWindow.windowID,
+                windowTitle: selectedWindow.title,
+                in: context.snapshots
+            )
+            let result = try await InProcessCommandRunner.run(
+                ["click", "--on", "B1", "--snapshot", snapshotId, flag, "--json"],
+                services: context.services
+            )
+
+            #expect(result.exitStatus == 0)
+            let call = try #require(await self.automationState(context) { $0.targetedClickCalls.first })
+            #expect(call.clickType == expected)
+            #expect(call.targetWindowID == selectedWindow.windowID)
+        }
+    }
+
+    @Test
+    func `Background stateless click rejects same ID generation and bounds drift`() async throws {
+        let application = Self.makeApplication()
+        let snapshotWindow = Self.makeWindow(id: 42, title: "Editor", index: 0)
+        let mismatchedWindows = [
+            Self.makeWindow(id: 42, title: "Editor", index: 0, processStartIdentity: 8),
+            Self.makeWindow(
+                id: 42,
+                title: "Editor",
+                index: 0,
+                bounds: CGRect(x: 30, y: 40, width: 400, height: 300)
+            ),
+        ]
+
+        for selectedWindow in mismatchedWindows {
+            let context = await makeContext(application: application, windows: [selectedWindow])
+            let snapshotId = try await storeSnapshot(
+                element: DetectedElement(
+                    id: "B1",
+                    type: .button,
+                    label: "Target",
+                    bounds: CGRect(x: 20, y: 30, width: 80, height: 30)
+                ),
+                windowID: snapshotWindow.windowID,
+                windowTitle: snapshotWindow.title,
+                in: context.snapshots
+            )
+
+            let result = try await InProcessCommandRunner.run(
+                [
+                    "click", "--on", "B1", "--snapshot", snapshotId,
+                    "--window-id", String(selectedWindow.windowID), "--middle", "--json",
+                ],
+                services: context.services
+            )
+
+            #expect(result.exitStatus == 1)
+            #expect(result.combinedOutput.contains("no longer matches"))
+            #expect(await self.automationState(context) { $0.targetedClickCalls }.isEmpty)
         }
     }
 
@@ -738,9 +847,14 @@ struct ClickCommandTests {
         )
     }
 
-    private static func makeWindow(id: Int, title: String, index: Int) -> ServiceWindowInfo {
-        let bounds = CGRect(x: 10, y: 20, width: 400, height: 300)
-        return ServiceWindowInfo(
+    private static func makeWindow(
+        id: Int,
+        title: String,
+        index: Int,
+        bounds: CGRect = CGRect(x: 10, y: 20, width: 400, height: 300),
+        processStartIdentity: UInt64 = 7
+    ) -> ServiceWindowInfo {
+        ServiceWindowInfo(
             windowID: id,
             title: title,
             bounds: bounds,
@@ -749,7 +863,7 @@ struct ClickCommandTests {
             mutationIdentity: WindowMutationIdentity(
                 windowID: id,
                 ownerProcessIdentifier: 12345,
-                ownerProcessStartIdentity: 7,
+                ownerProcessStartIdentity: processStartIdentity,
                 capturedBounds: bounds
             )
         )
