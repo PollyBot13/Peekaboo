@@ -5,7 +5,14 @@ All notable changes to Peekaboo CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.2.1] - Unreleased
+## [4.2.1] - 2026-08-17
+
+### Highlights
+
+- **Background type, paste, and press now share one fail-closed planner.** Fuzzy applications, partial window catalogs, ambiguous matches, and stale process identities are refused before input dispatch.
+- **Protocol 1.30 preserves complete-versus-partial target evidence.** CLI inventory and receipt validation expose the exact host source and negotiated protocol while remaining conservative with protocol 1.29 hosts.
+- **Exact-window background input covers more click families.** Middle and triple clicks use generation-bound native event sequences without activating the target or moving the shared cursor.
+- **Automation dependencies are more cancellation-safe.** AX permission observation no longer deadlocks during termination, and Realtime tool execution preserves the first completion or cancellation result.
 
 ### Added
 - Add Bridge protocol 1.30 planner inventory transport with explicit complete/partial evidence, while protocol 1.29 hosts keep legacy list bytes and conservative exact-target compatibility.

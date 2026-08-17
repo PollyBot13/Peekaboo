@@ -1,6 +1,14 @@
 # Changelog
 
-## [4.2.1] - Unreleased
+## [4.2.1] - 2026-08-17
+
+### Highlights
+
+- **Background keyboard automation now fails closed on complete target evidence.** CLI and MCP type, paste, and press share one planner that refuses fuzzy applications, partial window catalogs, ambiguous matches, and stale process identities before dispatch.
+- **Protocol 1.30 makes inventory completeness and exact-target safety explicit.** New transport preserves complete-versus-partial application/window evidence while older hosts retain conservative protocol 1.29 compatibility.
+- **More precise input remains off the shared cursor.** Exact-window background middle and triple clicks gain generation-bound native event sequences, while embedders can own held-pointer lifecycles with signed cleanup receipts.
+- **Runtime evidence is independently verifiable.** Authenticated receipt validation and packaged digest commands let agents recompute certification evidence against the exact live Bridge that produced it.
+- **Long-lived automation recovers more reliably.** Held-input cleanup is bounded to its original process generation, AX permission observation avoids cancellation deadlocks, and Realtime tool execution preserves the first terminal result.
 
 ### Added
 - Add Bridge protocol 1.30 planner inventory transport with explicit complete/partial evidence, while protocol 1.29 hosts keep legacy list bytes and conservative exact-target compatibility.
