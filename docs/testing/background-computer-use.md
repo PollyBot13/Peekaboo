@@ -46,6 +46,16 @@ receipt-pinned background press route and requires an independent PID-scoped sub
 an app or PID must refuse before dispatch with foreground-consent guidance. Fixture windows open through background
 semantic menu actions rather than uncertified shortcuts. The harness invokes the current CLI directly and uses no
 AppleScript or JXA.
+
+Playground exposes a PID-scoped OSLog event oracle for adjunct middle-click and held-pointer qualification. Its closed
+local monitor covers only left, right, and center-button mouse-down and mouse-up. Each event message is one closed JSON
+record with exactly `sequence`, `button`, `phase`, and `window_id`; the surrounding unified-log record supplies the
+exact Playground process ID. The 42-case matrix and live-v4 coordinator do not collect or validate these records. The
+separate final physical-qualification procedure must query them by the exact Playground PID: middle-click evidence is
+one consecutive middle down/up pair with the same window ID, while held-pointer evidence is the corresponding pair
+plus the signed helper's released projection. Neither the app log nor helper projection alone proves both application
+handling and release.
+
 Certification requires a stamped CLI whose `--version --json` output contains one canonical 40-hex `sourceCommit`.
 Remote certification pins every command to one exact Bridge socket and requires its additive host-identity receipt to
 expose the same source commit. Raw SwiftPM and manual unstamped Xcode builds report `unknown` and are intentionally
@@ -186,6 +196,8 @@ The foreground observer is a third signed controller process. Before execution, 
 semantic role plus title and/or identifier, expected value derived from the run nonce, baseline value, and owner-private
 artifact paths. It performs a fresh signed readback during the overlap bracket and proves restoration afterward. The
 monitor also commits crash inventory, sentinel and clipboard state, producer revisions, all six fences, and restoration.
+The closed crash-report prefix set covers `Playground`, the fixture's resolved executable name, and retains the legacy
+`PeekabooPlayground` watch entry.
 Separate owner-private Unix sockets challenge the live monitor and observer by kernel peer PID before and after final
 validation; caller-written files alone never mint authority.
 
