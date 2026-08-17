@@ -101,7 +101,7 @@ extension SeeCommandRuntimeTests {
             )
             defer { try? FileManager.default.removeItem(at: outputURL) }
 
-            let runCommand = {
+            nonisolated(nonsending) func runCommand() async throws -> CommandRunResult {
                 try await InProcessCommandRunner.run(
                     [
                         "see",
