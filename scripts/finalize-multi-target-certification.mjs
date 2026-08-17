@@ -22,7 +22,7 @@ const UUID_V8 = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const UINT64_MAX = 0xffff_ffff_ffff_ffffn;
 const REQUEST_ID_DOMAIN = Buffer.from('peekaboo.bridge.operation-request.v1\0', 'utf8');
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
-const BUILTIN_CATALOG_SHA256 = 'daa55be902b2dc538637b5dc019f40fd93c14579cf3a921906102e1ff951221b';
+const BUILTIN_CATALOG_SHA256 = '5152ff2b843fcd1d6ce7ef0eb38ed333d4ec1ce62557c79360330d4f0397d72c';
 const BUILTIN_DIGEST_SPEC_SHA256 = '6d80d6264a4d3b80c69cee0c68ce3b5c2fd801e8483bb4bbddd4402d87066a33';
 const CLI_VERSION = '2';
 const LIVE_CERTIFICATION_AUTHORITY = Symbol('peekaboo-live-certification-authority');
@@ -44,6 +44,8 @@ const CONTROLLER_SOURCE_PATHS = [
   'Apps/CLI/Sources/PeekabooCertificationController/ControllerPlan.swift',
   'Apps/CLI/Sources/PeekabooCertificationController/ControllerRunner.swift',
   'Apps/CLI/Sources/PeekabooCertificationController/ForegroundSemanticObserver.swift',
+  'Apps/CLI/Sources/PeekabooCertificationController/HeldPointerPlan.swift',
+  'Apps/CLI/Sources/PeekabooCertificationController/HeldPointerRunner.swift',
   'Apps/CLI/Sources/PeekabooCertificationController/LiveCertificationBridge.swift',
   'Apps/CLI/Sources/PeekabooCertificationController/LocalPIDAttestation.swift',
   'Apps/CLI/Sources/PeekabooCertificationController/MonitorAttestationRunner.swift',
