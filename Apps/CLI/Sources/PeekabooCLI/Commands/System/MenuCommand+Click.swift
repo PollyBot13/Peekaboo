@@ -37,47 +37,34 @@ extension MenuCommand {
                     try self.validateForegroundOptions()
                     try self.validateTargetConsent()
                     let appIdentifier = try await self.resolveTargetApplicationIdentifier()
-                    if self.foreground {
-                        let windowID = try await self.target.resolveWindowID(services: self.services)
-                        if self.focusOptions.autoFocus {
-                            self.resolvedRuntime.beginInteractionMutation()
-                        }
-                        if let focusResult = try await ensureFocusIgnoringMissingWindows(
-                            request: FocusIgnoringMissingWindowsRequest(
-                                windowID: windowID,
-                                applicationName: appIdentifier,
-                                windowTitle: self.target.windowTitle
-                            ),
-                            options: self.focusOptions,
-                            services: self.services,
-                            logger: self.logger
-                        ) {
-                            try actionSequence.record(
-                                focusResult,
-                                receiptlessStep: self.focusOptions.autoFocus
-                                    ? .dispatched(
-                                        route: actionRoute,
-                                        delivery: .init(
-                                            mechanism: .accessibilityAction,
-                                            mode: .foreground
-                                        ),
-                                        unitCount: .one
-                                    )
-                                    : nil
+                    let appInfo = try await self.resolveApplicationForMutation(
+                        appIdentifier,
+                        services: self.services
+                    )
+                    let pinnedAppIdentifier = "PID:\(appInfo.processIdentifier)"
+                    if self.foreground, self.focusOptions.autoFocus {
+                        let focusResult = try await self.performForegroundFocus(
+                            appInfo: appInfo,
+                            pinnedAppIdentifier: pinnedAppIdentifier
+                        )
+                        try actionSequence.record(
+                            focusResult,
+                            receiptlessStep: .dispatched(
+                                route: actionRoute,
+                                delivery: .init(
+                                    mechanism: .accessibilityAction,
+                                    mode: .foreground
+                                ),
+                                unitCount: .one
                             )
-                        }
+                        )
                     }
 
                     let canonicalPath: String? = normalizedPath.map(Self.canonicalizeMenuPath)
-                    if let canonicalPath {
-                        try await self.ensureMenuItemEnabled(appIdentifier: appIdentifier, menuPath: canonicalPath)
-                    }
-                    let appInfo = try await self.services.applications.findApplication(identifier: appIdentifier)
                     let clickedPath = canonicalPath ?? normalizedItem!
 
                     self.resolvedRuntime.beginInteractionMutation()
                     let actionResult = try await self.performMenuClick(
-                        appIdentifier: appIdentifier,
                         appInfo: appInfo,
                         itemName: normalizedItem,
                         path: canonicalPath
@@ -188,27 +175,22 @@ extension MenuCommand {
         }
 
         private func performMenuClick(
-            appIdentifier: String,
             appInfo: ServiceApplicationInfo,
             itemName: String?,
             path: String?
         ) async throws -> UIAutomationActionResult<Void> {
+            let identity = try Self.requireMenuProcessIdentity(appInfo)
+            let pinnedAppIdentifier = "PID:\(identity.processIdentifier)"
+            let deliveryMode: DesktopActionOutcome.Delivery.Mode = self.foreground ? .foreground : .background
+
             if let itemName {
-                guard !self.foreground else {
-                    return try await MenuServiceBridge.clickMenuItemByName(
-                        menu: self.services.menu,
-                        appIdentifier: appIdentifier,
-                        itemName: itemName
-                    )
-                }
-                let identity = try Self.requireBackgroundProcessIdentity(appInfo)
                 return try await MenuServiceBridge.clickMenuItemByName(
                     menu: self.services.menu,
                     request: MenuItemByNameActionRequest(
-                        appIdentifier: "PID:\(identity.processIdentifier)",
+                        appIdentifier: pinnedAppIdentifier,
                         itemName: itemName,
                         expectedIdentity: identity,
-                        deliveryMode: .background
+                        deliveryMode: deliveryMode
                     )
                 )
             }
@@ -216,36 +198,98 @@ extension MenuCommand {
             guard let path else {
                 throw ValidationError("Must specify either --item or --path")
             }
-            guard !self.foreground else {
-                return try await MenuServiceBridge.clickMenuItem(
-                    menu: self.services.menu,
-                    appIdentifier: appIdentifier,
-                    itemPath: path
-                )
-            }
-            let identity = try Self.requireBackgroundProcessIdentity(appInfo)
             return try await MenuServiceBridge.clickMenuItem(
                 menu: self.services.menu,
                 request: MenuItemActionRequest(
-                    appIdentifier: "PID:\(identity.processIdentifier)",
+                    appIdentifier: pinnedAppIdentifier,
                     itemPath: path,
                     expectedIdentity: identity,
-                    deliveryMode: .background
+                    deliveryMode: deliveryMode
                 )
             )
         }
 
-        private static func requireBackgroundProcessIdentity(
+        private static func requireMenuProcessIdentity(
             _ application: ServiceApplicationInfo
         ) throws -> ApplicationProcessIdentity {
             guard let identity = application.processIdentity else {
                 throw DesktopActionFailure.preDispatchRefusal(
                     reason: .targetUnavailable,
-                    message: "Background menu click requires a stable application process receipt.",
+                    message: "Menu click requires a stable application process receipt.",
                     hint: "Refresh the application inventory before retrying."
                 )
             }
             return identity
+        }
+
+        private func performForegroundFocus(
+            appInfo: ServiceApplicationInfo,
+            pinnedAppIdentifier: String
+        ) async throws -> UIAutomationActionResult<Void> {
+            if let preparedWindow = try await self.resolvePreparedForegroundWindow(appInfo: appInfo) {
+                self.resolvedRuntime.beginInteractionMutation()
+                return try await ensureFocused(
+                    preparedWindow: preparedWindow,
+                    applicationName: pinnedAppIdentifier,
+                    options: self.focusOptions,
+                    services: self.services
+                )
+            }
+
+            self.resolvedRuntime.beginInteractionMutation()
+            return try await ApplicationServiceBridge.activateApplicationTargeted(
+                applications: self.services.applications,
+                application: appInfo
+            )
+        }
+
+        private func resolvePreparedForegroundWindow(
+            appInfo: ServiceApplicationInfo
+        ) async throws -> ServiceWindowInfo? {
+            let expectedIdentity = try Self.requireMenuProcessIdentity(appInfo)
+            let hasExplicitWindowSelector = self.target.windowId != nil ||
+                self.target.windowTitle != nil ||
+                self.target.windowIndex != nil
+            let inventoryTarget: WindowTarget = if let windowID = self.target.windowId {
+                .windowId(windowID)
+            } else {
+                .application("PID:\(expectedIdentity.processIdentifier)")
+            }
+            let windows = try await WindowServiceBridge.listWindows(
+                windows: self.services.windows,
+                target: inventoryTarget
+            )
+            let window: ServiceWindowInfo
+            if hasExplicitWindowSelector {
+                do {
+                    window = try ExactWindowSelectorResolver.select(
+                        from: windows,
+                        selector: self.target.selector,
+                        operation: "Menu focus"
+                    )
+                } catch {
+                    throw DesktopActionFailure.preDispatchRefusal(
+                        reason: .targetUnavailable,
+                        message: error.localizedDescription,
+                        hint: "Refresh the window inventory and select one exact --window-id."
+                    )
+                }
+            } else {
+                guard let bestWindow = ObservationTargetResolver.bestWindow(from: windows) else {
+                    return nil
+                }
+                window = bestWindow
+            }
+            guard let windowIdentity = window.mutationIdentity,
+                  windowIdentity.ownerProcessIdentifier == expectedIdentity.processIdentifier,
+                  windowIdentity.ownerProcessStartIdentity == expectedIdentity.processStartIdentity
+            else {
+                throw DesktopTargetPlanningError.windowOwnerMismatch(
+                    windowID: window.windowID,
+                    expected: expectedIdentity
+                ).desktopActionFailure
+            }
+            return window
         }
 
         private func resolveTargetApplicationIdentifier() async throws -> String {
@@ -276,37 +320,7 @@ extension MenuCommand {
     }
 }
 
-@MainActor
-private func findMenuItem(
-    canonicalPath: String,
-    in menus: [Menu]
-) -> MenuItem? {
-    for menu in menus {
-        let menuBase = MenuCommand.ClickSubcommand.canonicalizeMenuPath(menu.title)
-        if menuBase == canonicalPath {
-            return nil // top-level menu is not a clickable item
-        }
-        if let item = findMenuItem(in: menu.items, canonicalPath: canonicalPath) {
-            return item
-        }
-    }
-    return nil
-}
-
-private func findMenuItem(
-    in items: [MenuItem],
-    canonicalPath: String
-) -> MenuItem? {
-    for item in items {
-        if MenuCommand.ClickSubcommand.canonicalizeMenuPath(item.path) == canonicalPath {
-            return item
-        }
-        if let nested = findMenuItem(in: item.submenu, canonicalPath: canonicalPath) {
-            return nested
-        }
-    }
-    return nil
-}
+extension MenuCommand.ClickSubcommand: ApplicationResolver {}
 
 @MainActor
 extension MenuCommand.ClickSubcommand {
@@ -316,20 +330,6 @@ extension MenuCommand.ClickSubcommand {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: " > ")
-    }
-
-    fileprivate func ensureMenuItemEnabled(appIdentifier: String, menuPath: String) async throws {
-        let structure = try await MenuServiceBridge.listMenus(
-            menu: self.services.menu,
-            appIdentifier: appIdentifier
-        )
-        let canonical = menuPath
-        guard let item = findMenuItem(canonicalPath: canonical, in: structure.menus) else {
-            throw MenuError.menuItemNotFound(canonical)
-        }
-        guard item.isEnabled else {
-            throw MenuError.menuItemDisabled(canonical)
-        }
     }
 }
 
