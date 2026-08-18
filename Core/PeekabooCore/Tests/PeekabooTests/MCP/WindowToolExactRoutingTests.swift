@@ -83,6 +83,138 @@ struct WindowToolExactRoutingTests {
         #expect(meta["retry_safe"] == .bool(true))
     }
 
+    @Test
+    @MainActor
+    func `background window mutation refuses one title match from a partial catalog`() async throws {
+        let service = ExactRoutingWindowService()
+        service.mutationInventoryWarnings = ["AX enumeration timed out"]
+        let context = await MCPToolTestHelpers.makeContext(
+            applications: Self.fixtureApplications(),
+            windows: service,
+            executionPolicy: .backgroundOnly)
+
+        let response = try await context.execute(
+            tool: WindowTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "close",
+                "app": "Fixture",
+                "title": "Fixture",
+            ]))
+
+        #expect(response.isError)
+        #expect(service.mutationDispatchCount == 0)
+        #expect(service.listTargets.map(\.description) == ["application(PID:42)"])
+        guard case let .text(message, _, _)? = response.content.first else {
+            Issue.record("Expected partial-inventory refusal text")
+            return
+        }
+        #expect(message.contains("incomplete"))
+        #expect(message.contains("AX enumeration timed out"))
+        let meta = try #require(response.meta?.objectValue)
+        #expect(meta["mutation_dispatched"] == .bool(false))
+        #expect(meta["retry_safe"] == .bool(true))
+    }
+
+    @Test
+    @MainActor
+    func `background window mutation refuses a fuzzy application selector before window lookup`() async throws {
+        let service = ExactRoutingWindowService()
+        let context = await MCPToolTestHelpers.makeContext(
+            applications: Self.fixtureApplications(),
+            windows: service,
+            executionPolicy: .backgroundOnly)
+
+        let response = try await context.execute(
+            tool: WindowTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "close",
+                "app": "Fixt",
+            ]))
+
+        #expect(response.isError)
+        #expect(service.mutationDispatchCount == 0)
+        #expect(service.listTargets.isEmpty)
+        guard case let .text(message, _, _)? = response.content.first else {
+            Issue.record("Expected fuzzy-selector refusal text")
+            return
+        }
+        #expect(message.contains("not allowed for mutation"))
+    }
+
+    @Test
+    @MainActor
+    func `background exact window ID remains admissible with legacy partial catalog evidence`() async throws {
+        let service = ExactRoutingWindowService()
+        service.mutationInventoryWarnings = ["Legacy host omitted completeness metadata"]
+        let context = await MCPToolTestHelpers.makeContext(
+            applications: Self.fixtureApplications(),
+            windows: service,
+            executionPolicy: .backgroundOnly)
+
+        let response = try await context.execute(
+            tool: WindowTool(context: context),
+            arguments: ToolArguments(raw: [
+                "action": "close",
+                "window_id": 924,
+            ]))
+
+        #expect(!response.isError)
+        #expect(service.mutationDispatchCount == 1)
+        #expect(service.closeTargets.map(\.description) == ["windowId(924)"])
+        #expect(service.receivedIdentities.map(\.ownerProcessStartIdentity) == [7])
+    }
+
+    @Test
+    @MainActor
+    func `background target revalidation preserves cancellation before dispatch`() async throws {
+        let service = ExactRoutingWindowService()
+        service.mutationInventoryErrorAtCall = (2, CancellationError())
+        let context = await MCPToolTestHelpers.makeContext(
+            applications: Self.fixtureApplications(),
+            windows: service,
+            executionPolicy: .backgroundOnly)
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await context.execute(
+                tool: WindowTool(context: context),
+                arguments: ToolArguments(raw: [
+                    "action": "close",
+                    "app": "Fixture",
+                ]))
+        }
+
+        #expect(service.mutationDispatchCount == 0)
+        #expect(service.closeTargets.isEmpty)
+
+        let followUpCompleted = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                do {
+                    let response = try await context.execute(
+                        tool: WindowTool(context: context),
+                        arguments: ToolArguments(raw: [
+                            "action": "close",
+                            "app": "Fixture",
+                        ]))
+                    return !response.isError
+                } catch {
+                    return false
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(250))
+                return false
+            }
+
+            let completed = await group.next() ?? false
+            group.cancelAll()
+            return completed
+        }
+
+        #expect(followUpCompleted)
+        #expect(service.mutationDispatchCount == 1)
+        #expect(service.closeTargets.map(\.description) == ["windowId(924)"])
+    }
+
     @Test(arguments: ["close", "minimize", "restore", "maximize", "move", "resize", "set-bounds"])
     @MainActor
     func `background window selectors stay pinned across post-authorization inventory reorder`(
@@ -697,6 +829,7 @@ struct WindowToolExactRoutingTests {
 
 private final class ExactRoutingWindowService: WindowManagementActionResultProviding,
     WindowManagementPinnedFocusActionResultProviding,
+    WindowMutationInventoryProviding,
     @unchecked Sendable
 {
     nonisolated(unsafe) var actionOutcome: DesktopActionOutcome? = .confirmedChange(
@@ -735,6 +868,9 @@ private final class ExactRoutingWindowService: WindowManagementActionResultProvi
     nonisolated(unsafe) var postMutationReadbackStartingAtListCall = 2
     nonisolated(unsafe) var replacementWindowStartingAtListCall: (Int, ServiceWindowInfo)?
     nonisolated(unsafe) var listHandler: ((WindowTarget, Int) -> [ServiceWindowInfo])?
+    nonisolated(unsafe) var mutationInventoryWarnings: [String] = []
+    nonisolated(unsafe) var mutationInventoryErrorAtCall: (Int, any Error)?
+    private(set) nonisolated(unsafe) var mutationInventoryRequestCount = 0
     private(set) nonisolated(unsafe) var mutationDispatchCount = 0
 
     func listWindows(target: WindowTarget) async throws -> [ServiceWindowInfo] {
@@ -756,6 +892,20 @@ private final class ExactRoutingWindowService: WindowManagementActionResultProvi
             return [replacementWindowStartingAtListCall.1]
         }
         return [self.window]
+    }
+
+    func windowMutationInventory(
+        target: WindowTarget) async throws -> DesktopTargetPlanning.Inventory<ServiceWindowInfo>
+    {
+        self.mutationInventoryRequestCount += 1
+        if let (call, error) = self.mutationInventoryErrorAtCall,
+           self.mutationInventoryRequestCount == call
+        {
+            throw error
+        }
+        let windows = try await self.listWindows(target: target)
+        guard !self.mutationInventoryWarnings.isEmpty else { return .complete(windows) }
+        return .partial(windows, warnings: self.mutationInventoryWarnings)
     }
 
     func closeWindow(target: WindowTarget) async throws {
