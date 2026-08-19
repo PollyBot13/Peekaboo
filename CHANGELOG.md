@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 ### Added
-- Add Bridge protocol 1.31 one-request signed background Agent execution with authenticated CLI derivation, an irreversible no-child-process gate, exact-leader reaping, canonical terminal receipt bundles, and nested exact-lane receipts.
+- Add Bridge protocol 1.31 one-request signed background Agent execution with authenticated CLI derivation, an irreversible no-child-process gate, lifecycle-covered release acknowledgement, exact-leader reaping, canonical terminal receipt bundles, and nested exact-lane receipts.
+- Add a Git-blob-bound final qualification manifest that requires byte-identical local/Studio installations, candidate-bound CLI and monitor identities, both elevation receipts, guarded task-owned process trees, and freshly re-executed native-only policy scans.
 
 ### Fixed
 - Pin foreground menu focus, clicks, and listing to one exact process/window generation across CLI and MCP, preserving focus outcomes when a later menu read fails.
@@ -19,6 +20,7 @@
 - Bound asynchronous Accessibility notification add and remove waits, removal joins, and subscription setup retries so one wedged endpoint cannot hang global observer startup or teardown. Thanks @SebTardif for AXorcist #47.
 - Centralize snapshot target-evidence adapters and receipt planning across AutomationKit, CLI, Bridge, and MCP so exact-window identity, coordinate authority, source contradictions, and cancellation keep one fail-closed contract.
 - Route background mutation authorization through one completeness-aware application/window planner, so MCP window, Space, and exact-window paste targets reject fuzzy selectors and partial catalogs before dispatch.
+- Reject copied, hard-linked, remapped, or caller-resealed qualification evidence by re-running the source-bound concurrent validator and binding exact requester, terminal, process-tree, and lifecycle-guard authority.
 
 ## [4.2.1] - 2026-08-17
 
