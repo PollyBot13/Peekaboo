@@ -90,10 +90,11 @@ try await runtime.startChecked()
 The standard assembly uses one durable desktop-mutation watermark with one in-memory snapshot manager, copies retained
 capture artifacts into manager-owned storage, and defaults action-capable input to accessibility-first background
 delivery. Its allowlist is native-only: browser MCP, daemon control, interactive permission prompts, and the legacy
-AppleScript probe cannot be enabled by configuration. The containing app remains responsible for presenting permission
-UI and choosing an app-specific socket path; embedded hosts never compete for Peekaboo.app's socket by default. The
-runtime always advertises the `backgroundBridgeHost` capability; caller-supplied capabilities are additive and cannot
-remove that routing contract.
+AppleScript probe cannot be enabled by configuration. Protocol 1.31 Agent execution is also excluded: the embedded
+native Bridge deliberately has no Agent or provider surface. The containing app remains responsible for presenting
+permission UI and choosing an app-specific socket path; embedded hosts never compete for Peekaboo.app's socket by
+default. The runtime always advertises the `backgroundBridgeHost` capability; caller-supplied capabilities are additive
+and cannot remove that routing contract.
 
 Retain the runtime for the full host lifetime. `startChecked()` returns only after the private UNIX listener is ready,
 and `stopChecked()` waits for non-cooperative in-flight requests to release the socket lease. Concurrent start, stop,
@@ -227,6 +228,61 @@ and mouse-down dispatch. Release, revoke, and disconnect accept only the matchin
 and cleanup outcomes through signed operation receipts, and refuse zero-dispatch against protocol 1.29 or older hosts.
 The host retains the exact-window write lane until terminal cleanup; a short watchdog handles expiry, window drift,
 client-generation exit, and target-generation exit without ever posting mouse-up to a recycled PID.
+
+Protocol `1.31` adds the capability-gated `agentExecutionTrace` operation for one long-running, signed background Agent
+execution. It is a single Bridge request from launch through terminal reap, not a prepare/start or other two-call
+lifecycle. The host derives the executable from the exact authenticated Peekaboo CLI peer and accepts only the task and
+bounded coordination inputs. It never accepts an executable path, shell command, AppleScript, JXA, arbitrary arguments,
+or environment overrides. Because the task is carried in `argv`, its UTF-8 encoding is limited to 256 KiB and the host
+also caps the complete argument, environment, terminator, and pointer payload at 512 KiB before `posix_spawn`; this
+retains half of macOS's 1 MiB `ARG_MAX` as headroom instead of exposing a late `E2BIG`. The closed provider environment
+accepts canonical `X_AI_API_KEY` as well as the `XAI_API_KEY` and `GROK_API_KEY` aliases. The child invocation is fixed
+to background-only `agent run --no-cache --bridge-socket
+<serving-host> --json`; there is no foreground-authority flag, session resume, or cache write.
+
+The host creates bounded anonymous stdout and stderr pipes plus separate anonymous lockdown-readiness and release
+pipes. It spawns the exact CLI with `START_SUSPENDED | SETSID`, then sends `SIGCONT` only to enter the CLI's trusted
+earliest gate. Before command routing, that gate requires an untainted non-root process with equal real and effective
+UIDs, irreversibly lowers both soft and hard `RLIMIT_NPROC` to zero, verifies the readback, removes the private gate
+variables, and writes the exact challenge plus EOF to the lockdown pipe. The host requires that readiness before it
+publishes the owner-private coordination file. Only after the connected client acknowledges the locked-down child and
+all identities are revalidated does the host provision the nested operation-receipt directory. Preparation retains a
+nonblocking exclusive lock on the exact owner-private run-root descriptor but creates no directory, so any refusal
+before coordination publication leaves the same root retryable without deleting caller-visible state. After a valid
+acknowledgement, the host creates an unguessable staging directory, binds its descriptor and inode, and atomically
+publishes it at the canonical receipt path immediately before release. A replacement, nonempty entry, symlink, or
+publish race is preserved and refused rather than removed. The host then writes the challenge plus EOF to the release
+pipe. A stray same-user
+`SIGCONT` can therefore start only the fail-closed gate; it cannot authorize Agent command routing.
+
+Hard `RLIMIT_NPROC = 0` is inherited and cannot be raised by the non-root child. It denies `fork`, `vfork`, and ordinary
+`posix_spawn`, while threads, files, provider networking, and nested Bridge sockets remain available. The fresh session
+therefore contains one process for its entire lifetime; the fixed background Agent also exposes no Shell tool. The host
+observes that exact leader with `waitid(..., WNOWAIT)` and reaps it with `waitpid`; cancellation, timeout, and output
+overflow signal only the leader. If the kernel wait anchor is unexpectedly lost, cleanup never signals an unverified
+numeric PID: it uses the retained PID-version audit token for a generation-bound signal and reaps only after the exact
+WNOWAIT child is reacquired. A future Agent tool that needs child processes requires a new protocol policy or a separate
+broker; it must not weaken this launch contract.
+
+The process limit is not rollback for effects already accepted by external apps, launchd, XPC services, or nested
+Bridge tools, and it is not a containment claim for a compromised signed CLI. Those effects remain governed by their
+own exact target, receipt, permission, and retry semantics.
+
+The signed terminal v1 response commits the exact request, process identity, fixed argv, task and closed-environment
+commitments, coordination and acknowledgement bytes plus hashes, complete bounded stdout/stderr bytes plus hashes and
+sizes, exit status or terminating signal, and launch/lockdown/release/terminal-observation timestamps. Its canonical
+`responseSHA256` binds those fields into the protocol 1.29 receipt chain. The hidden qualification adapter writes the
+canonical `PeekabooBridgeOperationReceiptBundle` itself, not a newly encoded semantic response, so its exact canonical
+request/response bytes and listener/session signatures remain independently checkable. The connected listener
+attestation captured during the authenticated handshake remains the external trust anchor; a bundle's self-carried
+listener proves integrity but not provenance by itself. Once the release pipe accepts the complete challenge, losing
+the response is retry-unsafe: callers must not launch the task again speculatively.
+
+The outer orchestration request deliberately takes no desktop-operation lane or mutation watermark. Each nested Agent
+tool call returns through the same host and acquires its own exact-target lane and signed operation receipt, so a
+long-running Agent does not serialize unrelated desktop work. Protocol 1.30 and older hosts, and 1.31 hosts that do not
+advertise and enable `agentExecutionTrace`, refuse before child launch. The CLI adapter for qualification is hidden and
+deliberately omitted from public help and shell completions.
 
 The client does not treat the response-carried, self-signed listener as provenance by itself. It captures the connected
 socket peer's audit token and requires exact PID/PID-version, process-start, live kernel CDHash, Apple-anchored signing

@@ -82,6 +82,29 @@ read_when:
   separate request and response cases with explicit completeness and warnings. Protocol 1.29 list requests remain
   byte-compatible; clients treat their row-only responses as partial evidence, refusing broad mutation selectors while
   retaining direct exact-PID and exact-window-ID compatibility.
+- Protocol 1.31 advertises `agentExecutionTrace` for one long Bridge request that launches and reaps an authenticated
+  Peekaboo CLI peer as a fixed background-only `agent run --no-cache --bridge-socket <serving-host> --json` child. The
+  host accepts no executable, shell, AppleScript, JXA, arbitrary argv, or environment input. It binds suspended-child
+  identity revalidation, fresh `SETSID` session, earliest-entrypoint lockdown/readiness and release pipes,
+  owner-private challenge/acknowledgement coordination, bounded stdout/stderr, and terminal `waitid`/`waitpid`
+  evidence into a signed v1 response. Task UTF-8 is capped at 256 KiB, and a 512 KiB aggregate argv/environment
+  preflight leaves half of macOS's 1 MiB `ARG_MAX` for runtime overhead. The closed provider environment preserves
+  canonical `X_AI_API_KEY` plus the `XAI_API_KEY` and `GROK_API_KEY` aliases. Preparation locks the exact owner-private
+  run-root descriptor without creating the nested receipt directory. Only after a valid acknowledgement does the host
+  bind a fresh staging directory by descriptor and inode and atomically publish it at the canonical receipt path
+  immediately before release; replacement, nonempty, symlink, and publish-race state is retained and refused. Before
+  readiness, the untainted non-root CLI locks both soft and hard
+  `RLIMIT_NPROC` to zero; the signed response commits that exact policy. `SIGCONT` alone cannot authorize Agent code.
+  The child cannot `fork`, `vfork`, or use ordinary `posix_spawn`, so normal exit, cancellation, timeout, and overflow
+  own and reap one exact WNOWAIT leader. An unexpected lost wait anchor permits only PID-version/audit-token-bound
+  direct signaling and requires the exact WNOWAIT child again before reap, never a raw unverified PID. Threads,
+  provider networking, and nested Bridge sockets remain available, but the fixed background Agent exposes no Shell
+  tool; future child-spawning tools require a new protocol policy or separate broker. External app, launchd, XPC, and
+  nested-tool effects remain outside process rollback. The outer request takes no
+  desktop lane, while nested Agent tools take their own exact lanes and signed receipts. Missing protocol/capability
+  support refuses before launch, and response loss after release is retry-unsafe. The qualification CLI adapter is
+  intentionally hidden from help and completions and emits the canonical signed receipt bundle; it is not a public
+  two-call lifecycle or a general process-launch command.
 - Target attribution delegates to the same canonical process/window receipt coalescer used by local automation.
   One exhaustive operation semantic plan also owns each success response family, allowed terminal states and result
   values, delivery/mode alternatives, dispatched-unit policy, and request/response/handler target provenance. The
