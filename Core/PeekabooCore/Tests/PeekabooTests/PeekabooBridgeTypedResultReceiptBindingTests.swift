@@ -68,6 +68,8 @@ struct PeekabooBridgeTypedResultReceiptBindingTests {
         let resolvedContext = Self.resolvedTreeContext(fixture: fixture)
         let response = PeekabooBridgeResponse.elementDetection(
             Self.detection(snapshotID: "resolved-tree", context: resolvedContext))
+        let bundlePath = "/Applications/Fixture.app"
+        let executablePath = bundlePath + "/Contents/MacOS/fixture"
         let validSelectors = [
             WindowContext(windowID: fixture.windowIdentity.windowID),
             WindowContext(
@@ -76,7 +78,10 @@ struct PeekabooBridgeTypedResultReceiptBindingTests {
             WindowContext(
                 applicationName: "Fixt",
                 windowID: fixture.windowIdentity.windowID),
-            WindowContext(windowTitle: "doc", windowID: fixture.windowIdentity.windowID),
+            WindowContext(applicationName: bundlePath, windowID: fixture.windowIdentity.windowID),
+            WindowContext(applicationName: executablePath, windowID: fixture.windowIdentity.windowID),
+            WindowContext(windowTitle: "dOcUmEnT", windowID: fixture.windowIdentity.windowID),
+            WindowContext(windowTitle: "cume", windowID: fixture.windowIdentity.windowID),
             WindowContext(
                 applicationBundleId: "dev.peekaboo.fixture",
                 windowID: fixture.windowIdentity.windowID),
@@ -116,6 +121,12 @@ struct PeekabooBridgeTypedResultReceiptBindingTests {
             capturedBounds: fixture.windowIdentity.capturedBounds)
         let contradictorySelectors = [
             WindowContext(applicationName: "Other", windowID: fixture.windowIdentity.windowID),
+            WindowContext(
+                applicationName: "/Applications/Other.app",
+                windowID: fixture.windowIdentity.windowID),
+            WindowContext(
+                applicationName: "/Applications/Fixture.app/Contents/MacOS/other",
+                windowID: fixture.windowIdentity.windowID),
             WindowContext(applicationBundleId: "dev.peekaboo.other", windowID: fixture.windowIdentity.windowID),
             WindowContext(
                 applicationProcessId: fixture.windowIdentity.ownerProcessIdentifier + 1,
@@ -204,6 +215,68 @@ struct PeekabooBridgeTypedResultReceiptBindingTests {
                     request: unconstrainedRequest,
                     response: forgedResponse)
             }
+        }
+    }
+
+    @Test
+    func `signed detect projection binds only explicitly requested application paths`() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let pathless = Self.exactDetectionContext(
+            fixture: fixture,
+            applicationBundlePath: nil,
+            applicationExecutablePath: nil)
+        let pathlessRequest = PeekabooBridgeRequest.detectElements(.init(
+            imageData: Data([1]),
+            snapshotId: "snapshot",
+            windowContext: pathless))
+        let pathlessResponse = PeekabooBridgeResponse.elementDetection(
+            Self.detection(snapshotID: "snapshot", context: pathless))
+        let pathlessBundle = try await Self.signedBundle(
+            fixture: fixture,
+            sequence: 0,
+            request: pathlessRequest,
+            response: pathlessResponse,
+            target: .global)
+        try pathlessBundle.validateIntegrity()
+
+        let canonical = Self.exactDetectionContext(
+            fixture: fixture,
+            applicationBundlePath: "/Applications/Fixture.app",
+            applicationExecutablePath: "/Applications/Fixture.app/Contents/MacOS/fixture")
+        let canonicalRequest = PeekabooBridgeRequest.detectElements(.init(
+            imageData: Data([1]),
+            snapshotId: "snapshot",
+            windowContext: canonical))
+        let canonicalResponse = PeekabooBridgeResponse.elementDetection(
+            Self.detection(snapshotID: "snapshot", context: canonical))
+        let canonicalBundle = try await Self.signedBundle(
+            fixture: fixture,
+            sequence: 1,
+            request: canonicalRequest,
+            response: canonicalResponse,
+            target: .global)
+        try canonicalBundle.validateIntegrity()
+
+        let contradictory = Self.exactDetectionContext(
+            fixture: fixture,
+            applicationBundlePath: "/Applications/Other.app",
+            applicationExecutablePath: "/Applications/Other.app/Contents/MacOS/other")
+        let contradictoryRequest = PeekabooBridgeRequest.detectElements(.init(
+            imageData: Data([1]),
+            snapshotId: "snapshot",
+            windowContext: contradictory))
+        let contradictoryBundle = try await Self.signedBundle(
+            fixture: fixture,
+            sequence: 2,
+            request: contradictoryRequest,
+            response: canonicalResponse,
+            target: .global)
+        #expect(throws: PeekabooBridgeOperationReceiptError.receiptMismatch(
+            "element-detection response window context"))
+        {
+            try contradictoryBundle.validateIntegrity()
         }
     }
 
@@ -495,6 +568,28 @@ struct PeekabooBridgeTypedResultReceiptBindingTests {
                 windowContext: context))
     }
 
+    private static func exactDetectionContext(
+        fixture: Fixture,
+        applicationBundlePath: String?,
+        applicationExecutablePath: String?) -> WindowContext
+    {
+        WindowContext(
+            applicationName: "Fixture",
+            applicationBundleId: "dev.peekaboo.fixture",
+            applicationBundlePath: applicationBundlePath,
+            applicationExecutablePath: applicationExecutablePath,
+            applicationProcessId: fixture.windowIdentity.ownerProcessIdentifier,
+            windowTitle: "Document",
+            windowID: fixture.windowIdentity.windowID,
+            windowBounds: fixture.windowIdentity.capturedBounds,
+            windowMutationIdentity: fixture.windowIdentity,
+            shouldFocusWebContent: false,
+            includeMenuBarElements: true,
+            traversalBudget: AXTraversalBudget(),
+            requiresFreshAccessibilityTree: false,
+            accessibilityTimeoutSeconds: 20)
+    }
+
     private static func resolvedTreeContext(
         fixture: Fixture,
         shouldFocusWebContent: Bool? = false,
@@ -506,6 +601,8 @@ struct PeekabooBridgeTypedResultReceiptBindingTests {
         WindowContext(
             applicationName: "Fixture",
             applicationBundleId: "dev.peekaboo.fixture",
+            applicationBundlePath: "/Applications/Fixture.app",
+            applicationExecutablePath: "/Applications/Fixture.app/Contents/MacOS/fixture",
             applicationProcessId: fixture.windowIdentity.ownerProcessIdentifier,
             windowTitle: "Document",
             windowID: fixture.windowIdentity.windowID,

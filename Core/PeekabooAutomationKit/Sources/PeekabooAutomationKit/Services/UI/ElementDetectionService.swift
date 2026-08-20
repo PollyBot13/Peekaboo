@@ -167,6 +167,8 @@ public final class ElementDetectionService {
         let resolvedWindowContext = WindowContext(
             applicationName: applicationIdentity.name,
             applicationBundleId: applicationIdentity.bundleIdentifier,
+            applicationBundlePath: applicationIdentity.bundlePath,
+            applicationExecutablePath: applicationIdentity.executablePath,
             applicationProcessId: windowContext?.applicationProcessId ?? targetApp.processIdentifier,
             windowTitle: windowName,
             windowID: resolvedWindowID,
@@ -330,6 +332,8 @@ public final class ElementDetectionService {
         let preliminaryContext = WindowContext(
             applicationName: applicationIdentity.name,
             applicationBundleId: applicationIdentity.bundleIdentifier,
+            applicationBundlePath: applicationIdentity.bundlePath,
+            applicationExecutablePath: applicationIdentity.executablePath,
             applicationProcessId: processIdentifier,
             windowTitle: context?.windowTitle,
             windowID: context?.windowID,
@@ -387,6 +391,8 @@ public final class ElementDetectionService {
         let resolvedContext = WindowContext(
             applicationName: applicationIdentity.name,
             applicationBundleId: applicationIdentity.bundleIdentifier,
+            applicationBundlePath: applicationIdentity.bundlePath,
+            applicationExecutablePath: applicationIdentity.executablePath,
             applicationProcessId: processIdentifier,
             windowTitle: outcome.windowTitle,
             windowID: outcome.windowID,
@@ -433,6 +439,8 @@ public final class ElementDetectionService {
             return WindowContext(
                 applicationName: applicationIdentity.name,
                 applicationBundleId: applicationIdentity.bundleIdentifier,
+                applicationBundlePath: applicationIdentity.bundlePath,
+                applicationExecutablePath: applicationIdentity.executablePath,
                 applicationProcessId: targetApp.processIdentifier,
                 windowTitle: requested?.windowTitle ?? liveWindow.title,
                 windowID: requestedWindowID,
@@ -465,6 +473,8 @@ public final class ElementDetectionService {
         return WindowContext(
             applicationName: applicationIdentity.name,
             applicationBundleId: applicationIdentity.bundleIdentifier,
+            applicationBundlePath: applicationIdentity.bundlePath,
+            applicationExecutablePath: applicationIdentity.executablePath,
             applicationProcessId: targetApp.processIdentifier,
             windowTitle: window.title,
             windowID: window.windowID,
@@ -477,9 +487,11 @@ public final class ElementDetectionService {
             accessibilityTimeoutSeconds: requested?.accessibilityTimeoutSeconds)
     }
 
-    private struct ResolvedApplicationIdentity {
+    struct ResolvedApplicationIdentity: Sendable {
         let name: String
         let bundleIdentifier: String?
+        let bundlePath: String?
+        let executablePath: String?
     }
 
     private static func applicationIdentity(
@@ -489,14 +501,29 @@ public final class ElementDetectionService {
     {
         let canonicalName = application.localizedName ?? application.bundleIdentifier ??
             "PID:\(application.processIdentifier)"
-        guard preservesRequestedIdentity else {
-            return ResolvedApplicationIdentity(
+        return self.projectedApplicationIdentity(
+            canonical: ResolvedApplicationIdentity(
                 name: canonicalName,
-                bundleIdentifier: application.bundleIdentifier)
+                bundleIdentifier: application.bundleIdentifier,
+                bundlePath: application.bundleURL?.standardizedFileURL.path,
+                executablePath: application.executableURL?.standardizedFileURL.path),
+            requested: requested,
+            preservesRequestedIdentity: preservesRequestedIdentity)
+    }
+
+    nonisolated static func projectedApplicationIdentity(
+        canonical: ResolvedApplicationIdentity,
+        requested: WindowContext?,
+        preservesRequestedIdentity: Bool) -> ResolvedApplicationIdentity
+    {
+        guard preservesRequestedIdentity else {
+            return canonical
         }
         return ResolvedApplicationIdentity(
-            name: requested?.applicationName ?? canonicalName,
-            bundleIdentifier: requested?.applicationBundleId ?? application.bundleIdentifier)
+            name: requested?.applicationName ?? canonical.name,
+            bundleIdentifier: requested?.applicationBundleId ?? canonical.bundleIdentifier,
+            bundlePath: requested?.applicationBundlePath == nil ? nil : canonical.bundlePath,
+            executablePath: requested?.applicationExecutablePath == nil ? nil : canonical.executablePath)
     }
 
     nonisolated struct ActionableWindowReceipt: Equatable {
