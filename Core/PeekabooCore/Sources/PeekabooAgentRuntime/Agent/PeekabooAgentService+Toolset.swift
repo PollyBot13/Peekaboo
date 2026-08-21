@@ -13,17 +13,42 @@ extension PeekabooAgentService {
         snapshotOwner: MCPToolSnapshotOwner = MCPToolSnapshotOwner(),
         executionPolicy: MCPToolExecutionPolicy = .backgroundOnly) async -> [AgentTool]
     {
+        let filtered = self.filteredAgentTools(
+            snapshotOwner: snapshotOwner,
+            executionPolicy: executionPolicy)
+
+        self.logToolsetDetails(filtered, model: model)
+        return filtered
+    }
+
+    /// The exact tool catalog exposed by a normal public Agent session.
+    /// Public Agent entry points are background-only by default and never expose Shell.
+    public func publicAgentTools(
+        snapshotOwner: MCPToolSnapshotOwner = MCPToolSnapshotOwner()) -> [AgentTool]
+    {
+        self.filteredAgentTools(
+            snapshotOwner: snapshotOwner,
+            executionPolicy: .backgroundOnly)
+    }
+
+    private func filteredAgentTools(
+        snapshotOwner: MCPToolSnapshotOwner,
+        executionPolicy: MCPToolExecutionPolicy) -> [AgentTool]
+    {
         let tools = Self.$toolConstructionSnapshotOwner.withValue(snapshotOwner) {
             Self.$toolConstructionExecutionPolicy.withValue(executionPolicy) {
                 self.createAgentTools()
             }
         }
-        let authorityFiltered = executionPolicy == .unrestricted
-            ? tools
-            : tools.filter { $0.name != "shell" }
+        let authorityFiltered: [AgentTool] = switch executionPolicy {
+        case .unrestricted:
+            tools
+        case .backgroundOnly, .foregroundAllowed:
+            tools.filter { $0.name != "shell" }
+        }
 
         let filters = ToolFiltering.currentFilters()
-        let filtered = ToolFiltering.applyInputStrategyAvailability(
+        return ToolFiltering.applyInputStrategyAvailability(
             ToolFiltering.apply(
                 authorityFiltered,
                 filters: filters,
@@ -34,9 +59,6 @@ extension PeekabooAgentService {
             log: { [logger] message in
                 logger.notice("\(message, privacy: .public)")
             })
-
-        self.logToolsetDetails(filtered, model: model)
-        return filtered
     }
 
     private func runtimeInputPolicy() -> UIInputPolicy {

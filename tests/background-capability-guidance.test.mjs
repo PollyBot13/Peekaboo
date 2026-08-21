@@ -74,12 +74,24 @@ test('foreground-exposing action examples include consent', () => {
 
 test('generated guidance sources retain CLI and policy distinctions', () => {
   const learn = read('Apps/CLI/Sources/PeekabooCLI/Commands/Core/LearnCommand.swift');
+  const toolRegistry = read(
+    'Core/PeekabooCore/Sources/PeekabooAgentRuntime/ToolRegistry/ToolRegistry.swift'
+  );
+  const typeTool = read(
+    'Core/PeekabooCore/Sources/PeekabooAgentRuntime/MCP/Tools/TypeTool.swift'
+  );
   const pressMetadata = read(
     'Apps/CLI/Sources/PeekabooCLI/Commands/Interaction/PressCommand+CommanderMetadata.swift'
   );
 
   assert.match(learn, /fresh exact non-dialog snapshot form/);
   assert.match(learn, /dialog input.*background AXValue/);
+  assert.doesNotMatch(learn, /\*\*System\*\*:\s*shell/);
+  assert.doesNotMatch(learn, /type --app/);
+  assert.doesNotMatch(toolRegistry, /peekaboo type .*--app/);
+  assert.doesNotMatch(toolRegistry, /ToolOverride|toolOverrides/);
+  assert.match(toolRegistry, /publicAgentTools\(\)/);
+  assert.match(typeTool, /explicit fresh exact non-dialog snapshot receipt/);
   assert.match(pressMetadata, /Agent\/MCP background-only policy/);
   assert.match(pressMetadata, /never infers latest/);
 });
