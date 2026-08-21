@@ -8,6 +8,8 @@ ROOT="${ROOT:-$ROOT_DIR}"
 ROOT="$(cd "$ROOT" && pwd)"
 # shellcheck source=scripts/source-provenance.sh
 source "$ROOT/scripts/source-provenance.sh"
+# shellcheck source=scripts/release-version.sh
+source "$ROOT/scripts/release-version.sh"
 SOURCE_COMMIT=""
 MAC_RELEASE_MANIFEST="${MAC_RELEASE_MANIFEST:-$ROOT/.mac-release.env}"
 MAC_RELEASE_MANIFEST_LOADED=false
@@ -36,59 +38,8 @@ else
   MAC_RELEASE_HELPER_LOADED=false
 fi
 
-version_to_build_number() {
-  if declare -F mac_release_build_number >/dev/null; then
-    mac_release_build_number "$1"
-    return
-  fi
-
-  local version=${1:?"version required"} core prerelease major minor patch suffix prerelease_label prerelease_number
-  core=${version%%-*}
-  prerelease=
-  if [[ "$version" == *-* ]]; then
-    prerelease=${version#*-}
-  fi
-  IFS=. read -r major minor patch <<<"$core"
-  if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ || ! "$patch" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: Version must be numeric semver: $version" >&2
-    exit 1
-  fi
-  if ((10#$minor > 99 || 10#$patch > 99)); then
-    echo "ERROR: Minor and patch versions must be <= 99 for generated build numbers: $version" >&2
-    exit 1
-  fi
-
-  suffix=99
-  if [[ -n "$prerelease" ]]; then
-    prerelease_label=${prerelease%%.*}
-    prerelease_label=${prerelease_label%%-*}
-    prerelease_label=${prerelease_label%%[0-9]*}
-    prerelease_label=${prerelease_label,,}
-    if [[ "$prerelease" =~ ([0-9]+)$ ]]; then
-      prerelease_number=${BASH_REMATCH[1]}
-    else
-      prerelease_number=1
-    fi
-    if ((10#$prerelease_number < 1 || 10#$prerelease_number > 29)); then
-      echo "ERROR: Prerelease number must be 1..29 for generated build numbers: $version" >&2
-      exit 1
-    fi
-    case "$prerelease_label" in
-      alpha | a) suffix=$((10#$prerelease_number)) ;;
-      beta | b) suffix=$((30 + 10#$prerelease_number)) ;;
-      rc) suffix=$((60 + 10#$prerelease_number)) ;;
-      *)
-        echo "ERROR: Prerelease label must be alpha, beta, or rc for generated build numbers: $version" >&2
-        exit 1
-        ;;
-    esac
-  fi
-
-  printf '%d\n' $((((10#$major * 100 + 10#$minor) * 100 + 10#$patch) * 100 + 10#$suffix))
-}
-
 MARKETING_VERSION="${MARKETING_VERSION:-$(node -p "require('$ROOT/package.json').version")}"
-BUILD_NUMBER="${BUILD_NUMBER:-$(version_to_build_number "$MARKETING_VERSION")}"
+BUILD_NUMBER="${BUILD_NUMBER:-$(peekaboo_release_build_number "$MARKETING_VERSION")}"
 
 WORKSPACE="${WORKSPACE:-$ROOT/Apps/Peekaboo.xcworkspace}"
 SCHEME="${SCHEME:-Peekaboo}"
@@ -156,7 +107,7 @@ while [[ $# -gt 0 ]]; do
     --version)
       VERSION="$2"
       TAG="v${VERSION}"
-      BUILD_NUMBER="$(version_to_build_number "$VERSION")"
+      BUILD_NUMBER="$(peekaboo_release_build_number "$VERSION")"
       shift 2
       ;;
     --tag)

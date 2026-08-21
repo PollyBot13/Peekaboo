@@ -8,6 +8,7 @@
 ### Fixed
 - Use the canonical MCP mutation policy for Agent visual verification, including conditional browser and foreground menu actions.
 - Let background certification pin Activity Monitor's exact source-declared window title while refusing unsafe partial, duplicate, or drifting title evidence.
+- Build terminal CLI, Peekaboo.app, Playground, and pinned Node qualification artifacts through isolated credential phases, and bind signed payload trees, notarization receipts, toolchains, and the canonical dependency graph.
 - Fail closed instead of generating or accepting a release-qualification manifest until final-cycle liveness witnesses have a cryptographic trust anchor.
 - Add receipt-required Bridge protocol 1.32 observation of exact process generations for signed liveness and absence evidence.
 - Bind certification crash, monitor, and foreground semantic evidence to exact authenticated producers and listener-signed Bridge receipts.
