@@ -20,7 +20,7 @@ Peekaboo’s mission is to make macOS GUI automation as deterministic—and debu
 1. **CLI-first:** Every capability must be exposed through the `peekaboo` binary. Other surfaces (Peekaboo.app, agents, MCP) are thin shells over the same Swift services.
 2. **Semantic interaction:** Commands operate on accessibility metadata (roles, labels, element IDs) instead of raw coordinates wherever possible.
 3. **Visual transparency:** All interactions should be explainable via JSON output, logs, and annotated screenshots so humans/agents can reason about state.
-4. **Reliability by default:** Commands autofocus windows (`FocusCommandOptions`), wait for actionable elements, and reuse sessions instead of forcing manual sleeps.
+4. **Reliability by default:** Commands prefer background delivery, require explicit target evidence for receipt-pinned routes, wait for actionable elements where supported, and fail closed on stale or ambiguous targets.
 5. **Agent awareness:** Outputs are machine-friendly (`--json`), and behaviors are documented in `docs/commands/*.md` so autonomous clients receive the same guidance as humans.
 
 **Scope:**
@@ -83,8 +83,8 @@ services.installAgentRuntimeDefaults()
 ## 4. Snapshot Lifecycle & Storage
 
 1. **Creation:** `peekaboo see` captures the target, runs element detection, and writes a snapshot under `~/.peekaboo/snapshots/<snapshot-id>/` via `SnapshotManager` (`snapshot.json`, plus `raw.png` / `annotated.png` when available).
-2. **Resolution:** Interaction commands call `services.snapshots.getMostRecentSnapshot()` when `--snapshot` is omitted. Coordinate-only commands skip snapshot usage entirely to avoid stale data.
-3. **Reuse:** Commands that focus applications (`click`, `type`, etc.) merge snapshot info with explicit `--app` or `FocusCommandOptions` to bring the right window/Space forward before interacting.
+2. **Resolution:** Snapshot selection is command-specific. `type` never infers a snapshot when `--snapshot` is omitted; commands whose contract permits implicit reuse, such as element/query `click` and `action`, may resolve the latest unmodified snapshot. Background coordinates require an explicit fresh exact-window snapshot, while explicit foreground global coordinates are snapshot-free.
+3. **Reuse:** Background delivery is the default. Commands bind snapshot metadata to explicit app/window selectors to verify the same process generation and window without focusing it. Focus and Space switching occur only through explicit foreground delivery.
 4. **Cleanup:** `peekaboo clean` proxies into `services.files.clean*Snapshots` helpers. Users can delete all snapshots, those older than N hours, or a single snapshot ID; `--dry-run` reports would-be deletions without touching disk.
 
 This shared cache is the hand-off mechanism between CLI invocations, custom scripts, and agents. Nothing else should read/write UI maps manually.
@@ -100,7 +100,7 @@ This shared cache is the hand-off mechanism between CLI invocations, custom scri
 
 Common helpers:
 - `AutomationServiceBridge`: click/type/scroll/sleep wrappers that add waits and error hints.
-- `ensureFocused(...)`: centralizes Space switching, retries, and no-auto-focus overrides.
+- `ensureFocused(...)`: centralizes opt-in foreground focus, Space switching, retries, and no-auto-focus overrides.
 
 ---
 
@@ -132,7 +132,7 @@ Common helpers:
 
 1. **Capture → Act loop**
    - `see` generates snapshot files + annotated PNG (optional) and prints the `snapshot_id`.
-   - Interaction commands automatically pick up the freshest snapshot (unless `--snapshot` overrides) and autofocus the relevant window.
+   - Pass the returned `snapshot_id` explicitly to interactions that consume observation state. Receipt-pinned background routes require a fresh exact-window snapshot; focus and Space switching occur only with explicit foreground delivery.
    - Logs + JSON output include timings, UI bounds, and hints for debugging (e.g., element not found suggestions).
 
 2. **Configuration & Permissions**
