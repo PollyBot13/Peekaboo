@@ -6,6 +6,7 @@
 - Skip provider discovery and Agent construction for caller-local CLI commands that cannot invoke the Agent, reducing cold startup while preserving full Agent and MCP initialization.
 
 ### Fixed
+- Use the canonical MCP mutation policy for Agent visual verification, including conditional browser and foreground menu actions.
 - Let background certification pin Activity Monitor's exact source-declared window title while refusing unsafe partial, duplicate, or drifting title evidence.
 - Fail closed instead of generating or accepting a release-qualification manifest until final-cycle liveness witnesses have a cryptographic trust anchor.
 - Add receipt-required Bridge protocol 1.32 observation of exact process generations for signed liveness and absence evidence.

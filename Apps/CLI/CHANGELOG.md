@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Skip provider discovery and Agent construction for caller-local commands that cannot invoke the Agent, reducing cold startup while preserving full Agent and MCP initialization.
 
 ### Fixed
+- Use the canonical MCP mutation policy for Agent visual verification, including conditional browser and foreground menu actions.
 - Bind signed `set-value` results to the opaque requested element and refuse older Bridge hosts before dispatch.
 - Keep non-modal SwiftUI `AXDialog`-subrole windows eligible for exact background mutations while preserving modal, sheet, and file-dialog protections, and recognize `inspect_ui` as fresh Agent perception in recovery guidance.
 - Keep legacy Agent JSON tool-call arguments privacy-safe and deterministic instead of exposing Swift implementation details and runtime addresses.
