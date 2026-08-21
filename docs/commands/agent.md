@@ -91,11 +91,18 @@ read_when:
 four dispositions: `executed/succeeded`, `executed/failed`, `skipped-before-dispatch`, or `missing-result`. This lets a
 validator distinguish a model's attempted calls from mutations Peekaboo actually dispatched.
 
+Legacy `result.toolCalls[].arguments` remains a string for compatibility, but that string is now deterministic JSON
+derived from the same bounded, privacy-safe argument projection as the execution trace. It never contains Swift type
+descriptions or runtime addresses. Calls beyond the trace limit and any call/trace mismatch use
+`{"redacted":true}` rather than raw provider arguments.
+
 `executionTrace.entries[].arguments` is a JSON object rather than the legacy string preview. Trace arguments are
 bounded and allowlist only audit-relevant targeting, delivery modes, action enums, timeouts, predicate kinds, and safe
 boolean controls. Content-bearing and unknown values are represented by typed redaction summaries, including typed or
 pasted text, expected values, messages, prompts, shell commands, URLs, open targets, queries, labels, paths, and binary
-image data. Each `result` is a bounded status summary, not the raw tool payload; screenshot bytes and arbitrary output
+image data. Field names also follow one closed policy at the top level and inside allowed containers; unknown
+provider-authored names become deterministic `__peekaboo_trace_unknown_field_<n>` placeholders in sorted order. Each
+`result` is a bounded status summary, not the raw tool payload; screenshot bytes and arbitrary output
 text are intentionally omitted. The trace is capped at 512 entries and reports `totalCallCount` plus `truncated` when
 calls were omitted.
 
