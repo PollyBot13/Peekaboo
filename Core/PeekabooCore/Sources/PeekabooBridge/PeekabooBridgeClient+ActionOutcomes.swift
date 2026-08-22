@@ -3,6 +3,30 @@ import PeekabooAutomationKit
 import PeekabooFoundation
 
 extension PeekabooBridgeClient {
+    public func foregroundModifierClickWithOutcome(
+        _ request: ForegroundModifierClickRequest) async throws
+        -> UIAutomationActionResult<ForegroundModifierClickResult>
+    {
+        try await self.actionResult(
+            for: .foregroundModifierClick(.init(request: request)),
+            expectedResponse: "foreground modifier-click",
+            requiresTargetIdentity: true,
+            operationReceiptRequirement: .required)
+        { response in
+            guard case let .foregroundModifierClickResult(result) = response else { return nil }
+            return result
+        }
+    }
+
+    public func typeActionsByFocusingPixelWithOutcome(
+        _ request: ExactWindowPixelFocusTypeRequest) async throws -> UIAutomationActionResult<TypeResult>
+    {
+        try await self.typeActionResult(
+            for: .exactWindowPixelFocusType(.init(request: request)),
+            requiresTargetIdentity: true,
+            operationReceiptRequirement: .required)
+    }
+
     public func clickWithOutcome(
         target: ClickTarget,
         clickType: ClickType,
@@ -308,9 +332,17 @@ extension PeekabooBridgeClient {
     }
 
     private func typeActionResult(
-        for request: PeekabooBridgeRequest) async throws -> UIAutomationActionResult<TypeResult>
+        for request: PeekabooBridgeRequest,
+        requiresTargetIdentity: Bool = false,
+        operationReceiptRequirement: PeekabooBridgeOperationReceiptRequirement = .whenAvailable) async throws
+        -> UIAutomationActionResult<TypeResult>
     {
-        try await self.actionResult(for: request, expectedResponse: "type actions") { response in
+        try await self.actionResult(
+            for: request,
+            expectedResponse: "type actions",
+            requiresTargetIdentity: requiresTargetIdentity,
+            operationReceiptRequirement: operationReceiptRequirement)
+        { response in
             guard case let .typeResult(result) = response else { return nil }
             return result
         }

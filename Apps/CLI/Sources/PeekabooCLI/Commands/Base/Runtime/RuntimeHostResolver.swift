@@ -299,6 +299,8 @@ enum RuntimeHostResolver {
         if let explicitSocket,
            !options.permitsExplicitSocketDiagnosticFallback,
            options.requiresStatelessClickVariants ||
+           options.requiresForegroundModifierClickSnapshotLease ||
+           options.requiresExactWindowPixelFocusTyping ||
            self.requiredHostFailure(explicitSocket: explicitSocket, options: options) == nil {
             throw BridgeExplicitSocketUnavailableError(
                 socketPath: NSString(string: explicitSocket).standardizingPath
@@ -368,6 +370,14 @@ enum RuntimeHostResolver {
     }
 
     static func requiredHostFailure(explicitSocket: String?, options: CommandRuntimeOptions) -> String? {
+        if options.requiresExactWindowPixelFocusTyping {
+            return "No compatible Bridge host advertises atomic exact-window pixel-focus typing. " +
+                "Update and relaunch Peekaboo, then observe the exact target again before retrying."
+        }
+        if options.requiresForegroundModifierClickSnapshotLease {
+            return "No compatible Bridge host advertises host-leased foreground modifier-click. " +
+                "Update and relaunch Peekaboo, then observe the exact target again before retrying."
+        }
         if options.requiresStatelessClickVariants {
             if !options.requiresBackgroundStatelessClickVariants {
                 return "No compatible Bridge host negotiates protocol 1.30 middle/triple-click payloads. " +
@@ -587,7 +597,9 @@ enum RuntimeHostResolver {
             options.requiresInspectAccessibilityTree ||
             options.requiresBrowserMCP ||
             options.requiresImplicitSnapshotInvalidation ||
-            options.usesPerToolSnapshotInvalidation
+            options.usesPerToolSnapshotInvalidation ||
+            options.requiresForegroundModifierClickSnapshotLease ||
+            options.requiresExactWindowPixelFocusTyping
     }
 
     static func inputPolicyRequiresLocal(
@@ -763,6 +775,8 @@ enum RuntimeHostResolver {
         let targetedType = BridgeCapabilityPolicy.targetedTypeAvailability(for: handshake)
         let targetedClick = BridgeCapabilityPolicy.targetedClickAvailability(for: handshake)
         let supportsExactKeyboard = BridgeCapabilityPolicy.supportsExactWindowTargetedKeyboard(for: handshake)
+        let supportsPixelFocusTyping = BridgeCapabilityPolicy.supportsExactWindowPixelFocusTyping(for: handshake)
+        let supportsForegroundModifierClick = BridgeCapabilityPolicy.supportsForegroundModifierClick(for: handshake)
         let observationCapabilities = BridgeCapabilityPolicy.observationCapabilities(
             for: handshake,
             options: options
@@ -797,6 +811,14 @@ enum RuntimeHostResolver {
             exactWindowTargetedKeyboardUnavailableReason: supportsExactKeyboard
                 ? nil
                 : "Bridge host lacks atomic exact-window keyboard delivery",
+            supportsExactWindowPixelFocusTyping: supportsPixelFocusTyping,
+            exactWindowPixelFocusTypingUnavailableReason: supportsPixelFocusTyping
+                ? nil
+                : "Bridge host lacks atomic exact-window pixel-focus typing",
+            supportsForegroundModifierClick: supportsForegroundModifierClick,
+            foregroundModifierClickUnavailableReason: supportsForegroundModifierClick
+                ? nil
+                : "Bridge host lacks foreground modifier-click",
             supportsExactWindowHeldPointerLifecycle:
             BridgeCapabilityPolicy.supportsExactWindowHeldPointerLifecycle(for: handshake),
             supportsPostEventPermissionRequest: BridgeCapabilityPolicy.supportsPostEventPermissionRequest(

@@ -5,6 +5,23 @@ import Foundation
 import os.log
 import PeekabooFoundation
 
+private struct PixelFocusSnapshotPreparationFailure: Error {
+    let causeDescription: String
+}
+
+private struct PixelFocusSnapshotPreparationCancellation: Error {}
+
+private struct PixelFocusActionPreDispatchCancellation: Error {}
+
+private struct PixelFocusActionPreDispatchFailure: Error {
+    let causeDescription: String
+}
+
+@MainActor
+private final class PixelFocusPlanEntryState {
+    var entered = false
+}
+
 /// Service for handling typing and text input operations
 @MainActor
 public final class TypeService {
@@ -36,6 +53,8 @@ public final class TypeService {
     private let targetedCharacterTyper: @MainActor (Character, pid_t) throws -> Void
     private let desktopOperationExecutor: DesktopOperationExecutor
     private let operationFinalizer: @MainActor () -> Void
+    private let pixelFocusReceiptPlanner: @MainActor @Sendable (String) async throws -> SnapshotTargetReceiptPlan
+    private let pixelFocusPlanEntryHook: @MainActor @Sendable () async throws -> Void
 
     public convenience init(
         snapshotManager: (any SnapshotManagerProtocol)? = nil,
@@ -86,7 +105,9 @@ public final class TypeService {
         targetedCharacterTyper: @escaping @MainActor (Character, pid_t) throws -> Void = TypeService
             .typeTargetedCharacter,
         desktopOperationExecutor: DesktopOperationExecutor = DesktopOperationExecutor(),
-        operationFinalizer: @escaping @MainActor () -> Void = {})
+        operationFinalizer: @escaping @MainActor () -> Void = {},
+        pixelFocusReceiptPlanner: (@MainActor @Sendable (String) async throws -> SnapshotTargetReceiptPlan)? = nil,
+        pixelFocusPlanEntryHook: @escaping @MainActor @Sendable () async throws -> Void = {})
     {
         let manager = snapshotManager ?? SnapshotManager()
         self.snapshotManager = manager
@@ -107,6 +128,10 @@ public final class TypeService {
         self.targetedCharacterTyper = targetedCharacterTyper
         self.desktopOperationExecutor = desktopOperationExecutor
         self.operationFinalizer = operationFinalizer
+        self.pixelFocusReceiptPlanner = pixelFocusReceiptPlanner ?? { snapshotID in
+            try await SnapshotTargetReceiptPlanner(snapshots: manager).plan(snapshotID: snapshotID)
+        }
+        self.pixelFocusPlanEntryHook = pixelFocusPlanEntryHook
     }
 
     /// Type text with optional target and settings
@@ -723,5 +748,261 @@ public final class TypeService {
             return
         }
         try BackgroundInputDriver.typeCharacter(char, targetProcessIdentifier: targetProcessIdentifier)
+    }
+}
+
+extension TypeService {
+    func typeActionsByFocusingPixel(
+        _ request: ExactWindowPixelFocusTypeRequest,
+        deliveryValidator: @escaping @MainActor @Sendable (
+            FocusedElementIdentity) async throws -> Void) async throws
+        -> UIAutomationActionResult<TypeResult>
+    {
+        guard request.point.x.isFinite, request.point.y.isFinite else {
+            throw PeekabooError.invalidInput("Pixel-focus coordinates must be finite")
+        }
+        guard !request.actions.isEmpty else {
+            throw PeekabooError.invalidInput("Pixel-focus typing requires at least one typing action")
+        }
+        guard Self.plannedKeyPressCount(request.actions) > 0 else {
+            throw PeekabooError.invalidInput("Pixel-focus typing requires at least one keyboard unit")
+        }
+        let exactWindow = try UIAutomationTarget.ExactWindow(
+            identity: request.windowIdentity,
+            bounds: request.windowBounds)
+
+        let lease = try await self.snapshotManager.beginSnapshotMutation(snapshotId: request.snapshotID)
+        let planEntryState = PixelFocusPlanEntryState()
+        let result: UIAutomationActionResult<TypeResult>
+        do {
+            result = try await self.executePixelFocusType(
+                request,
+                exactWindow: exactWindow,
+                deliveryValidator: deliveryValidator,
+                planDidEnter: { planEntryState.entered = true })
+        } catch let error as SnapshotTargetReceiptPreDispatchError {
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: false)
+            throw error
+        } catch let error as PixelFocusSnapshotPreparationFailure {
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: false)
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .targetUnavailable,
+                message: "Pixel-focus typing could not validate its snapshot before dispatch.",
+                hint: "Observe the exact target again before retrying.",
+                causeDescription: error.causeDescription)
+        } catch is PixelFocusSnapshotPreparationCancellation {
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: false)
+            throw CancellationError()
+        } catch is PixelFocusActionPreDispatchCancellation {
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: false)
+            throw CancellationError()
+        } catch is CancellationError {
+            guard !planEntryState.entered else { throw CancellationError() }
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: false)
+            throw CancellationError()
+        } catch let error as PixelFocusActionPreDispatchFailure {
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: false)
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .permissionDenied,
+                message: "Pixel-focus typing could not establish Accessibility focus before dispatch.",
+                hint: "Grant Accessibility permission before retrying.",
+                causeDescription: error.causeDescription)
+                .attributed(to: DesktopTargetIdentity(exactWindow: exactWindow).actionTargetReceipt)
+        } catch let failure as DesktopActionFailure {
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: failure.outcome.projection.requiresFreshObservation)
+            throw failure
+        } catch {
+            try? await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: true)
+            throw DesktopActionFailure.indeterminate(
+                evidence: .completionUnknown,
+                message: "Pixel-focus typing failed without a canonical action outcome.",
+                hint: "Observe the exact target before any retry and do not reuse this snapshot.",
+                causeDescription: error.localizedDescription)
+                .attributed(to: DesktopTargetIdentity(exactWindow: exactWindow).actionTargetReceipt)
+        }
+        do {
+            try await self.snapshotManager.finishSnapshotMutation(
+                lease,
+                requiresFreshObservation: result.outcome?.projection.requiresFreshObservation ?? true)
+        } catch {
+            throw DesktopActionFailure.indeterminate(
+                route: result.outcome?.route ?? .local,
+                delivery: result.outcome?.delivery,
+                evidence: .completionUnknown,
+                unitCount: result.outcome?.dispatchState.unitCount,
+                message: "Pixel-focus typing completed, but its snapshot mutation lease could not be finalized.",
+                hint: "Observe the exact target before any retry and do not reuse this snapshot.",
+                causeDescription: error.localizedDescription)
+                .attributed(to: DesktopTargetIdentity(exactWindow: exactWindow).actionTargetReceipt)
+        }
+        return result
+    }
+
+    private func executePixelFocusType(
+        _ request: ExactWindowPixelFocusTypeRequest,
+        exactWindow: UIAutomationTarget.ExactWindow,
+        deliveryValidator: @escaping @MainActor @Sendable (
+            FocusedElementIdentity) async throws -> Void,
+        planDidEnter: @escaping @MainActor @Sendable () -> Void) async throws
+        -> UIAutomationActionResult<TypeResult>
+    {
+        let automationTarget = UIAutomationTarget.exactWindow(exactWindow)
+        let captureReceipt = DesktopOperationPlan.CaptureReceipt(
+            snapshotID: request.snapshotID,
+            target: automationTarget)
+        var payloadSummary: TypeActionPayloadSummary?
+        var sequenceResolution: DesktopActionSequenceAccumulator.Resolution?
+
+        let plan = try DesktopOperationPlan(
+            verb: .type,
+            selector: .coordinates(request.point),
+            captureReceipt: captureReceipt,
+            strategy: .synthOnly,
+            prepare: {
+                planDidEnter()
+                try await self.pixelFocusPlanEntryHook()
+                do {
+                    let receiptPlan = try await self.pixelFocusReceiptPlanner(request.snapshotID)
+                    let authority = try receiptPlan.receipt.requireCoordinateAuthority()
+                    guard authority.target == exactWindow else {
+                        throw SnapshotTargetReceiptPreDispatchError(.coordinateWindowMismatch)
+                    }
+                    guard authority.sourceBounds.contains(request.point),
+                          exactWindow.bounds.contains(request.point)
+                    else {
+                        throw SnapshotTargetReceiptPreDispatchError(.coordinateBoundsMismatch)
+                    }
+                } catch let error as SnapshotTargetReceiptPreDispatchError {
+                    throw error
+                } catch is CancellationError {
+                    throw PixelFocusSnapshotPreparationCancellation()
+                } catch {
+                    throw PixelFocusSnapshotPreparationFailure(causeDescription: error.localizedDescription)
+                }
+            },
+            action: nil,
+            synthesis: DesktopOperationPlan.SynthesisRoute {
+                var sequence = DesktopActionSequenceAccumulator()
+                do {
+                    let focus = try await self.clickService.focusExactWindowPixelOwned(
+                        at: request.point,
+                        exactWindow: exactWindow)
+                    guard let focusOutcome = focus.outcome else {
+                        throw DesktopActionFailure.indeterminate(
+                            delivery: .init(mechanism: .accessibilityValue, mode: .background),
+                            evidence: .completionUnknown,
+                            message: "Pixel focus returned no canonical action outcome.",
+                            hint: "Observe the exact target before deciding whether to retry typing.")
+                    }
+                    sequence.record(.reportedOutcome(
+                        focusOutcome,
+                        defaultDispatchedUnitCount: .one))
+
+                    let focusedElement = focus.payload
+                    let validateFocusedElement: @MainActor @Sendable () async throws -> Void = {
+                        try await deliveryValidator(focusedElement)
+                    }
+                    try await validateFocusedElement()
+                    let typed = try await self.performSyntheticTypeActions(
+                        request.actions,
+                        cadence: request.cadence,
+                        snapshotId: request.snapshotID,
+                        targetProcessIdentifier: request.windowIdentity.ownerProcessIdentifier,
+                        deliveryValidator: validateFocusedElement)
+                    guard let typingUnits = DesktopActionOutcome.DispatchUnitCount(typed.result.keyPresses) else {
+                        throw PeekabooError.invalidInput("Pixel-focus typing produced no keyboard input")
+                    }
+                    payloadSummary = typed
+                    sequence.record(.dispatched(
+                        route: .local,
+                        delivery: automationTarget.keyboardDelivery,
+                        unitCount: typingUnits))
+                    let resolution = sequence.successResolution()
+                    sequenceResolution = resolution
+                    guard let outcome = resolution.outcome else {
+                        throw DesktopActionFailure.indeterminate(
+                            delivery: automationTarget.keyboardDelivery,
+                            evidence: .completionUnknown,
+                            unitCount: resolution.mutationDisposition.unitCount,
+                            message: "Pixel-focus typing completed without a composable action outcome.",
+                            hint: "Observe the exact target before deciding whether to retry.")
+                    }
+                    return outcome
+                } catch is CancellationError {
+                    if let failure = sequence.cancellationFailure(
+                        fallbackRoute: .local,
+                        message: "Pixel-focus typing was cancelled after dispatch began.",
+                        hint: "Observe the exact target before deciding whether to retry.",
+                        causeDescription: "Pixel-focus typing task cancelled")
+                    {
+                        throw failure
+                    }
+                    throw PixelFocusActionPreDispatchCancellation()
+                } catch let error as InputDeliveryIndeterminateError {
+                    throw sequence.failure(
+                        combining: error.desktopActionFailure(delivery: automationTarget.keyboardDelivery),
+                        message: "Pixel-focus typing stopped after a click or keyboard prefix was dispatched.",
+                        hint: "Observe the exact target before deciding whether to retry.")
+                } catch let failure as DesktopActionFailure {
+                    throw sequence.failure(
+                        combining: failure,
+                        message: "Pixel-focus typing did not complete after its focus write.",
+                        hint: "Observe the exact target before deciding whether to retry.")
+                } catch {
+                    guard sequence.mutationDisposition.mutationDispatched else {
+                        if let peekabooError = error as? PeekabooError,
+                           case .permissionDeniedAccessibility = peekabooError
+                        {
+                            throw PixelFocusActionPreDispatchFailure(
+                                causeDescription: error.localizedDescription)
+                        }
+                        throw error
+                    }
+                    let leaf = DesktopActionFailure.preDispatchRefusal(
+                        reason: .targetUnavailable,
+                        message: error.localizedDescription)
+                    throw sequence.failure(
+                        combining: leaf,
+                        message: "Pixel-focus typing could not prove its destination after focusing.",
+                        hint: "Observe the exact target before deciding whether to retry.",
+                        causeDescription: error.localizedDescription)
+                }
+            },
+            finalize: self.operationFinalizer)
+
+        _ = try await self.desktopOperationExecutor.executeWithTargetIdentity(plan)
+        guard let payloadSummary, sequenceResolution != nil else {
+            throw PeekabooError.operationError(message: "Pixel-focus typing produced no result")
+        }
+        return UIAutomationActionResult(
+            payload: payloadSummary.result,
+            outcome: sequenceResolution?.outcome,
+            targetIdentity: DesktopTargetIdentity(exactWindow: exactWindow))
+    }
+
+    private static func plannedKeyPressCount(_ actions: [TypeAction]) -> Int {
+        actions.reduce(into: 0) { count, action in
+            switch action {
+            case let .text(text): count += text.count
+            case .key: count += 1
+            case .clear: count += 2
+            }
+        }
     }
 }

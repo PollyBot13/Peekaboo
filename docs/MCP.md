@@ -240,10 +240,14 @@ alias); either reference opts into capture-context and live-target validation ev
 
 The `double`, `triple`, `right`, and `middle` click booleans are mutually exclusive; conflicts are rejected before snapshot lookup or dispatch. Background right-, double-, middle-, and triple-clicks use exact PID/window-routed native events without activating the app or moving the physical cursor. Middle/triple require a fresh exact-window snapshot, Event Synthesizing permission, Bridge protocol 1.30, and the `statelessClickVariants` capability; older hosts are refused before the request is encoded. Every event revalidates the normal-layer window owner, process generation, bounds, and point. Since macOS provides no application-level acknowledgment for routed pointer events, successful dispatch responses include `verified: false` and `effect: "unverifiable"`; canonical metadata retains `click_type`, exact target identity/receipt, and three dispatched units for middle or seven for triple. An unprovable or changed route is refused rather than redirected through the desktop-global event tap.
 
+`click.modifiers` accepts a nonempty unique array of `cmd`, `shift`, and `option`. It is deliberately foreground-only and requires `foreground: true` plus an explicit non-`latest` exact-window screenshot snapshot. Control and right contextual modifier-clicks are refused because restoring the prior foreground would dismiss their result. Bridge protocol 1.33 hosts must advertise `foregroundModifierClickSnapshotLease`; the host leaf then leases the snapshot and owns exact target preflight, one prebuilt modifier-bearing HID mouse sequence that never changes shared keyboard state, and compare-and-swap restoration as one global operation. Response metadata includes `modifiers`, `cursor_restoration`, and `focus_restoration`; restoration reports `preserved_newer_state` when concurrent user or application activity superseded Peekaboo's write.
+
 Default background-only MCP/Agent `type` requires an explicit fresh exact non-dialog snapshot receipt; an optional
 element ID must come from that snapshot. Snapshot typing cannot include competing app, PID, or window selectors;
 implicit-latest, selector-only, and targetless forms are refused before dispatch. Direct CLI and explicitly
 foreground-capable runtimes retain their documented process-targeted typing routes.
+
+`type.coords` adds atomic pixel-focus typing for exact screenshot snapshots. Supply `snapshot`, optional matching `coordinate_reference`, and `coordinate_space` (`global_display_points`, `image_pixels`, or `normalized`). It cannot be combined with `on`, app/PID/window selectors, or foreground delivery. Bridge protocol 1.33 retains the focus-only Accessibility write and every keyboard unit under one process lane and exact target receipt; successful dispatch units equal keyboard units plus the focus write, and any completed prefix is reported retry-unsafe. The focus prelude never presses a button or selects a row.
 
 Background-only raw `press` likewise requires an explicit fresh exact non-dialog snapshot. App/PID-only,
 window-selector-only, targetless, and foreground forms are refused by policy before dispatch. The exact target and
@@ -288,6 +292,28 @@ Use the shared physical pointer only with explicit foreground consent:
 {
   "coords": "300,220",
   "foreground": true
+}
+```
+
+Atomic background pixel-focus typing:
+
+```json
+{
+  "text": "hello",
+  "coords": "320,180",
+  "coordinate_space": "image_pixels",
+  "snapshot": "snapshot-id-from-exact-window-see"
+}
+```
+
+Explicit foreground modifier-click with restoration reporting:
+
+```json
+{
+  "on": "captured-element-id",
+  "snapshot": "snapshot-id-from-exact-window-see",
+  "foreground": true,
+  "modifiers": ["cmd", "shift"]
 }
 ```
 

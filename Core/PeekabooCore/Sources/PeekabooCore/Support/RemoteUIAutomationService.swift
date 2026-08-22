@@ -11,6 +11,8 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
     ExactWindowTargetedClickServiceProtocol,
     TargetedFocusedElementServiceProtocol,
     ExactWindowTargetedKeyboardServiceProtocol,
+    ExactWindowPixelFocusTypingServiceProtocol,
+    ForegroundModifierClickServiceProtocol,
     UIAutomationObservationActionResultProviding
 {
     let client: PeekabooBridgeClient
@@ -33,6 +35,11 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
     public let inspectAccessibilityTreeUnavailableReason: String?
     public let supportsExactWindowTargetedKeyboard: Bool
     public let exactWindowTargetedKeyboardUnavailableReason: String?
+    public let supportsExactWindowPixelFocusTyping: Bool
+    public let exactWindowPixelFocusTypingUnavailableReason: String?
+    public let supportsForegroundModifierClick: Bool
+    public let supportsForegroundModifierClickSnapshotLease: Bool
+    public let foregroundModifierClickUnavailableReason: String?
     public let supportsExactWindowHeldPointerLifecycle: Bool
 
     public init(
@@ -56,6 +63,10 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
         inspectAccessibilityTreeUnavailableReason: String? = nil,
         supportsExactWindowTargetedKeyboard: Bool = false,
         exactWindowTargetedKeyboardUnavailableReason: String? = nil,
+        supportsExactWindowPixelFocusTyping: Bool = false,
+        exactWindowPixelFocusTypingUnavailableReason: String? = nil,
+        supportsForegroundModifierClick: Bool = false,
+        foregroundModifierClickUnavailableReason: String? = nil,
         supportsExactWindowHeldPointerLifecycle: Bool = false)
     {
         self.client = client
@@ -78,6 +89,11 @@ public class RemoteUIAutomationService: DetectElementsRequestTimeoutAdjusting, T
         self.inspectAccessibilityTreeUnavailableReason = inspectAccessibilityTreeUnavailableReason
         self.supportsExactWindowTargetedKeyboard = supportsExactWindowTargetedKeyboard
         self.exactWindowTargetedKeyboardUnavailableReason = exactWindowTargetedKeyboardUnavailableReason
+        self.supportsExactWindowPixelFocusTyping = supportsExactWindowPixelFocusTyping
+        self.exactWindowPixelFocusTypingUnavailableReason = exactWindowPixelFocusTypingUnavailableReason
+        self.supportsForegroundModifierClick = supportsForegroundModifierClick
+        self.supportsForegroundModifierClickSnapshotLease = supportsForegroundModifierClick
+        self.foregroundModifierClickUnavailableReason = foregroundModifierClickUnavailableReason
         self.supportsExactWindowHeldPointerLifecycle = supportsExactWindowHeldPointerLifecycle
     }
 

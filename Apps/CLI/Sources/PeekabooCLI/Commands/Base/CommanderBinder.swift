@@ -94,6 +94,10 @@ enum CommanderCLIBinder {
             (commandValues.flag("middle") || commandValues.flag("triple"))
         options.requiresBackgroundStatelessClickVariants =
             options.requiresStatelessClickVariants && usesBackgroundInput
+        options.requiresForegroundModifierClickSnapshotLease = commandType == ClickCommand.self &&
+            commandValues.singleOption("modifiers") != nil
+        options.requiresExactWindowPixelFocusTyping = commandType == TypeCommand.self &&
+            commandValues.singleOption("at") != nil
         options.requiresProcessGenerationPinnedClicks = commandType == ClickCommand.self && usesBackgroundInput &&
             !options.requiresExactWindowTargetedClicks
         let servesDynamicTools = Self.isAgentExecutionCommand(commandType) || commandType == MCPCommand.Serve.self

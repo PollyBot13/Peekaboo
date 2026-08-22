@@ -16,6 +16,15 @@ struct TypeCommand: ActionOutputFormattable, ErrorHandlingCommand, OutputFormatt
     @Option(help: "Snapshot ID (or explicit 'latest'); no snapshot is inferred when omitted")
     var snapshot: String?
 
+    @Option(help: "Exact-window focus point in x,y form; requires a fresh screenshot snapshot")
+    var at: String?
+
+    @Option(
+        name: .customLong("coordinate-space"),
+        help: "Coordinate basis for --at: global_display_points, image_pixels, or normalized"
+    )
+    var coordinateSpaceOption: String?
+
     @Option(help: "Delay between keystrokes (bare values are milliseconds)")
     var delay: CLIDuration = .milliseconds(0)
 
@@ -71,6 +80,10 @@ struct TypeCommand: ActionOutputFormattable, ErrorHandlingCommand, OutputFormatt
         let startTime = Date()
         do {
             let actions = try self.buildActions()
+            if self.at != nil {
+                try await self.runPixelFocusType(actions: actions, startTime: startTime)
+                return
+            }
             let observation = await self.resolveObservationContext()
             do {
                 try await observation.validateIfExplicit(using: self.services.snapshots)
@@ -244,6 +257,149 @@ struct TypeCommand: ActionOutputFormattable, ErrorHandlingCommand, OutputFormatt
                 throw ValidationError("--wpm is only valid when --profile human")
             }
         }
+        if self.at == nil, self.coordinateSpaceOption != nil {
+            throw ValidationError("--coordinate-space requires --at")
+        }
+        if let at = self.at {
+            guard Self.parsePoint(at) != nil else {
+                throw ValidationError("Invalid coordinates format. Use: x,y")
+            }
+            guard !self.focusOptions.foreground else {
+                throw ValidationError("--at typing is an exact-window background operation; remove --foreground")
+            }
+            guard !self.focusOptions.hasForegroundFocusOverrides else {
+                throw ValidationError(
+                    "--at pixel typing owns exact-window background focus; remove foreground focus overrides"
+                )
+            }
+            guard !self.target.hasAnyTarget else {
+                throw ValidationError("--at derives its exact target from --snapshot; remove app/window selectors")
+            }
+            guard let snapshot = self.snapshot?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !snapshot.isEmpty,
+                  snapshot.lowercased() != "latest"
+            else {
+                throw ValidationError("--at requires one explicit fresh screenshot --snapshot ID")
+            }
+            if let coordinateSpaceOption,
+               CaptureCoordinateSpace(rawValue: coordinateSpaceOption) == nil {
+                throw ValidationError(
+                    "--coordinate-space must be global_display_points, image_pixels, or normalized"
+                )
+            }
+        }
+    }
+
+    private func runPixelFocusType(actions: [TypeAction], startTime: Date) async throws {
+        guard let rawPoint = self.at,
+              let point = Self.parsePoint(rawPoint)
+        else {
+            throw ValidationError("Invalid coordinates format. Use: x,y")
+        }
+        guard let snapshotID = self.snapshot else {
+            throw ValidationError("--at requires one explicit fresh screenshot --snapshot ID")
+        }
+        guard let service = self.services.automation as? any ExactWindowPixelFocusTypingServiceProtocol,
+              service.supportsExactWindowPixelFocusTyping
+        else {
+            throw ValidationError(
+                "This automation host cannot run atomic exact-window pixel-focus typing"
+            )
+        }
+        let receipt = try await Self.planPixelFocusReceipt(
+            snapshotID: snapshotID,
+            snapshots: self.services.snapshots
+        )
+        let authority: SnapshotTargetReceipt.CoordinateAuthority
+        do {
+            authority = try receipt.requireCoordinateAuthority()
+        } catch {
+            throw ValidationError("Snapshot '\(snapshotID)' has no capture-owned exact-window coordinates")
+        }
+        let mappedPoint: CGPoint
+        do {
+            mappedPoint = try CaptureCoordinateMapper.globalPoint(
+                for: point,
+                in: self.coordinateSpaceOption.flatMap(CaptureCoordinateSpace.init(rawValue:)) ??
+                    .globalDisplayPoints,
+                context: authority.context
+            )
+        } catch {
+            throw ValidationError(error.localizedDescription)
+        }
+        guard authority.sourceBounds.contains(mappedPoint), authority.target.bounds.contains(mappedPoint) else {
+            throw ValidationError("--at is outside the captured exact window")
+        }
+
+        let expectedTarget = DesktopTargetIdentity(exactWindow: authority.target)
+        let result: UIAutomationActionResult<TypeResult>
+        do {
+            result = try await service.typeActionsByFocusingPixelWithOutcome(
+                ExactWindowPixelFocusTypeRequest(
+                    point: mappedPoint,
+                    actions: actions,
+                    cadence: self.typingCadence,
+                    snapshotID: snapshotID,
+                    windowIdentity: authority.target.identity,
+                    windowBounds: authority.target.bounds
+                )
+            )
+            _ = try UIAutomationActionResultSemantics.requireAcceptedOutcome(
+                result,
+                policy: .confirmedOrDispatched(requiring: .background),
+                targetRequirement: .exact(expectedTarget),
+                operation: "Pixel-focus typing"
+            )
+            if result.outcome?.dispatchState.mutationDispatched == true {
+                self.resolvedRuntime.beginInteractionMutation()
+            }
+        } catch let failure as DesktopActionFailure {
+            if failure.outcome.dispatchState.mutationDispatched {
+                self.resolvedRuntime.beginInteractionMutation()
+            }
+            throw failure
+        }
+        await InteractionObservationInvalidator.invalidateAfterMutation(
+            targets: self.resolvedRuntime.interactionMutationTargets,
+            logger: self.logger,
+            reason: "pixel-focus type"
+        )
+        self.renderResult(
+            result.payload,
+            outcome: result.outcome,
+            targetIdentity: result.targetIdentity,
+            actions: actions,
+            startTime: startTime,
+            target: .exactWindow(authority.target)
+        )
+    }
+
+    static func planPixelFocusReceipt(
+        snapshotID: String,
+        snapshots: any SnapshotManagerProtocol
+    ) async throws -> SnapshotTargetReceipt {
+        do {
+            return try await SnapshotTargetReceiptPlanner(
+                snapshots: snapshots
+            ).plan(snapshotID: snapshotID).receipt
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ValidationError("Snapshot '\(snapshotID)' is stale or has inconsistent target metadata")
+        }
+    }
+
+    private static func parsePoint(_ value: String) -> CGPoint? {
+        let components = value.split(separator: ",", omittingEmptySubsequences: false).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard components.count == 2,
+              let x = Double(components[0]),
+              let y = Double(components[1]),
+              x.isFinite,
+              y.isFinite
+        else { return nil }
+        return CGPoint(x: x, y: y)
     }
 
     private func executeTypeActions(
@@ -383,6 +539,8 @@ extension TypeCommand: CommanderBindableCommand {
         // custom long name for safety.
         self.textOption = values.singleOption("textOption") ?? values.singleOption("text")
         self.snapshot = values.singleOption("snapshot")
+        self.at = values.singleOption("at")
+        self.coordinateSpaceOption = values.singleOption("coordinateSpaceOption")
         if let delay: CLIDuration = try values.decodeOption("delay", as: CLIDuration.self) {
             self.delay = delay
         }

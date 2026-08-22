@@ -295,6 +295,107 @@ public struct ExactWindowKeyboardTarget: Sendable, Codable, Equatable {
     }
 }
 
+/// One exact-window background text operation that first establishes renderer focus at a
+/// capture-owned point, then sends the requested keyboard actions without releasing the
+/// target's desktop-operation lane.
+public struct ExactWindowPixelFocusTypeRequest: Sendable, Codable {
+    public let point: CGPoint
+    public let actions: [TypeAction]
+    public let cadence: TypingCadence
+    public let snapshotID: String
+    public let windowIdentity: WindowMutationIdentity
+    public let windowBounds: CGRect
+
+    public init(
+        point: CGPoint,
+        actions: [TypeAction],
+        cadence: TypingCadence,
+        snapshotID: String,
+        windowIdentity: WindowMutationIdentity,
+        windowBounds: CGRect)
+    {
+        self.point = point
+        self.actions = actions
+        self.cadence = cadence
+        self.snapshotID = snapshotID
+        self.windowIdentity = windowIdentity
+        self.windowBounds = windowBounds
+    }
+}
+
+public enum PointerModifier: String, Sendable, Codable, CaseIterable {
+    case command
+    case shift
+    case option
+    case control
+}
+
+public enum SharedDesktopRestorationStatus: String, Sendable, Codable, Equatable {
+    case notNeeded = "not_needed"
+    case restored
+    /// The state no longer matched Peekaboo's last write, so newer user or application state won.
+    case preservedNewerState = "preserved_newer_state"
+}
+
+public struct ForegroundModifierClickRequest: Sendable, Codable {
+    private enum CodingKeys: String, CodingKey {
+        case point
+        case clickType
+        case modifiers
+        case snapshotID
+        case windowIdentity
+        case windowBounds
+    }
+
+    public let point: CGPoint
+    public let clickType: ClickType
+    public let modifiers: [PointerModifier]
+    public let snapshotID: String
+    public let windowIdentity: WindowMutationIdentity
+    public let windowBounds: CGRect
+
+    public init(
+        point: CGPoint,
+        clickType: ClickType,
+        modifiers: [PointerModifier],
+        snapshotID: String,
+        windowIdentity: WindowMutationIdentity,
+        windowBounds: CGRect)
+    {
+        self.point = point
+        self.clickType = clickType
+        self.modifiers = modifiers
+        self.snapshotID = snapshotID
+        self.windowIdentity = windowIdentity
+        self.windowBounds = windowBounds
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.point = try container.decode(CGPoint.self, forKey: .point)
+        self.clickType = try container.decode(ClickType.self, forKey: .clickType)
+        self.modifiers = try container.decode([PointerModifier].self, forKey: .modifiers)
+        // Pre-fix protocol 1.33 clients omitted this field. Preserve wire decoding so the
+        // host leaf can refuse the empty authority before focus or input instead of dropping the response.
+        self.snapshotID = try container.decodeIfPresent(String.self, forKey: .snapshotID) ?? ""
+        self.windowIdentity = try container.decode(WindowMutationIdentity.self, forKey: .windowIdentity)
+        self.windowBounds = try container.decode(CGRect.self, forKey: .windowBounds)
+    }
+}
+
+public struct ForegroundModifierClickResult: Sendable, Codable, Equatable {
+    public let cursorRestoration: SharedDesktopRestorationStatus
+    public let focusRestoration: SharedDesktopRestorationStatus
+
+    public init(
+        cursorRestoration: SharedDesktopRestorationStatus,
+        focusRestoration: SharedDesktopRestorationStatus)
+    {
+        self.cursorRestoration = cursorRestoration
+        self.focusRestoration = focusRestoration
+    }
+}
+
 // TypeAction is now in PeekabooFoundation
 
 // SpecialKey is now in PeekabooFoundation

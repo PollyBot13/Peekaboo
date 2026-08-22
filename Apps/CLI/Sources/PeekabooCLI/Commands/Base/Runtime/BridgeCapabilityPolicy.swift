@@ -214,6 +214,14 @@ enum BridgeCapabilityPolicy {
            !self.supportsStatelessClickVariants(for: handshake) {
             return false
         }
+        if options.requiresForegroundModifierClickSnapshotLease,
+           !self.supportsForegroundModifierClick(for: handshake) {
+            return false
+        }
+        if options.requiresExactWindowPixelFocusTyping,
+           !self.supportsExactWindowPixelFocusTyping(for: handshake) {
+            return false
+        }
         if options.requiresTargetedScroll, !self.supportsTargetedScroll(for: handshake) {
             return false
         }
@@ -335,6 +343,19 @@ enum BridgeCapabilityPolicy {
     ) -> Bool {
         handshake.supportedOperations.contains(operation) &&
             (handshake.enabledOperations ?? handshake.supportedOperations).contains(operation)
+    }
+
+    static func supportsForegroundModifierClick(for handshake: PeekabooBridgeHandshakeResponse) -> Bool {
+        handshake.negotiatedVersion >= PeekabooBridgeConstants.composedInputParityVersion &&
+            handshake.hostCapabilities?.contains(
+                PeekabooBridgeHostCapability.foregroundModifierClickSnapshotLease
+            ) == true &&
+            self.supportsOperation(.foregroundModifierClick, for: handshake)
+    }
+
+    static func supportsExactWindowPixelFocusTyping(for handshake: PeekabooBridgeHandshakeResponse) -> Bool {
+        handshake.negotiatedVersion >= PeekabooBridgeConstants.composedInputParityVersion &&
+            self.supportsOperation(.exactWindowPixelFocusType, for: handshake)
     }
 
     static func supportsTargetedHotkeys(for handshake: PeekabooBridgeHandshakeResponse) -> Bool {

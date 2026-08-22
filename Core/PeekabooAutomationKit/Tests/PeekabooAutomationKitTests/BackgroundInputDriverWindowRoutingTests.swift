@@ -125,16 +125,86 @@ struct BackgroundInputDriverWindowRoutingTests {
         }
     }
 
+    @Test
+    func `exact on screen route finds target behind full screen system rows`() throws {
+        let point = CGPoint(x: 50, y: 50)
+        let dock = Self.candidate(
+            windowID: 99,
+            processIdentifier: 999,
+            bounds: CGRect(x: 0, y: 0, width: 200, height: 200),
+            layer: 20)
+        let nameplate = Self.candidate(
+            windowID: 98,
+            processIdentifier: 998,
+            bounds: CGRect(x: 0, y: 0, width: 200, height: 200),
+            layer: 3)
+        let target = Self.candidate(
+            windowID: 42,
+            processIdentifier: 123,
+            bounds: CGRect(x: 0, y: 0, width: 200, height: 200))
+
+        let route = try #require(BackgroundInputDriver.exactOnScreenWindowRoute(
+            at: point,
+            windowID: target.windowID,
+            candidates: [dock, nameplate, target]))
+
+        #expect(route == target)
+    }
+
+    @Test
+    func `exact on screen route refuses an absent target`() {
+        let point = CGPoint(x: 50, y: 50)
+        let dock = Self.candidate(
+            windowID: 99,
+            processIdentifier: 999,
+            bounds: CGRect(x: 0, y: 0, width: 200, height: 200),
+            layer: 20)
+
+        #expect(BackgroundInputDriver.exactOnScreenWindowRoute(
+            at: point,
+            windowID: 42,
+            candidates: [dock]) == nil)
+    }
+
+    @Test
+    func `exact on screen route refuses offscreen and transparent targets`() {
+        let point = CGPoint(x: 50, y: 50)
+        let offscreen = Self.candidate(
+            windowID: 42,
+            processIdentifier: 123,
+            bounds: CGRect(x: 0, y: 0, width: 200, height: 200),
+            isOnScreen: false)
+        let transparent = Self.candidate(
+            windowID: 42,
+            processIdentifier: 123,
+            bounds: CGRect(x: 0, y: 0, width: 200, height: 200),
+            alpha: 0)
+
+        #expect(BackgroundInputDriver.exactOnScreenWindowRoute(
+            at: point,
+            windowID: 42,
+            candidates: [offscreen]) == nil)
+        #expect(BackgroundInputDriver.exactOnScreenWindowRoute(
+            at: point,
+            windowID: 42,
+            candidates: [transparent]) == nil)
+    }
+
     private static func candidate(
         windowID: CGWindowID,
         processIdentifier: pid_t,
-        bounds: CGRect) -> BackgroundInputDriver.MouseWindowRouteCandidate
+        bounds: CGRect,
+        layer: Int = 0,
+        alpha: CGFloat = 1,
+        isOnScreen: Bool = true) -> BackgroundInputDriver.MouseWindowRouteCandidate
     {
         BackgroundInputDriver.MouseWindowRouteCandidate(
             windowID: windowID,
             processIdentifier: processIdentifier,
-            layer: 0,
-            bounds: bounds)
+            layer: layer,
+            bounds: bounds,
+            alpha: alpha,
+            isOnScreen: isOnScreen)
     }
 
     private static func windowDictionary(

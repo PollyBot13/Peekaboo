@@ -99,4 +99,109 @@ struct StatelessClickRuntimeTests {
         #expect(!BridgeCapabilityPolicy.supportsExactWindowHeldPointerLifecycle(for: disabledOperation))
         #expect(BridgeCapabilityPolicy.supportsExactWindowHeldPointerLifecycle(for: capable))
     }
+
+    @Test
+    func `modifier click requires the host leaf snapshot lease capability`() throws {
+        let runtimeOptions = try CommanderCLIBinder.makeRuntimeOptions(
+            from: ParsedValues(
+                positional: [],
+                options: ["modifiers": ["cmd"], "snapshot": ["snapshot"]],
+                flags: ["foreground"]
+            ),
+            commandType: ClickCommand.self
+        )
+        #expect(runtimeOptions.requiresForegroundModifierClickSnapshotLease)
+
+        let operation = PeekabooBridgeOperation.foregroundModifierClick
+        let capability = [PeekabooBridgeHostCapability.foregroundModifierClickSnapshotLease]
+        let previous = BridgeTestFixtures.handshake(
+            negotiatedVersion: .init(major: 1, minor: 32),
+            supportedOperations: [operation],
+            enabledOperations: [operation],
+            hostCapabilities: capability
+        )
+        let missingCapability = BridgeTestFixtures.handshake(
+            negotiatedVersion: PeekabooBridgeConstants.composedInputParityVersion,
+            supportedOperations: [operation],
+            enabledOperations: [operation]
+        )
+        let disabled = BridgeTestFixtures.handshake(
+            negotiatedVersion: PeekabooBridgeConstants.composedInputParityVersion,
+            supportedOperations: [operation],
+            enabledOperations: [],
+            hostCapabilities: capability
+        )
+        let capable = BridgeTestFixtures.handshake(
+            negotiatedVersion: PeekabooBridgeConstants.composedInputParityVersion,
+            supportedOperations: [operation],
+            enabledOperations: [operation],
+            hostCapabilities: capability
+        )
+
+        #expect(!BridgeCapabilityPolicy.supportsForegroundModifierClick(for: previous))
+        #expect(!BridgeCapabilityPolicy.supportsForegroundModifierClick(for: missingCapability))
+        #expect(!BridgeCapabilityPolicy.supportsForegroundModifierClick(for: disabled))
+        #expect(BridgeCapabilityPolicy.supportsForegroundModifierClick(for: capable))
+
+        var required = CommandRuntimeOptions()
+        required.requiresForegroundModifierClickSnapshotLease = true
+        #expect(!BridgeCapabilityPolicy.supportsRemoteRequirements(for: missingCapability, options: required))
+        #expect(BridgeCapabilityPolicy.supportsRemoteRequirements(for: capable, options: required))
+        #expect(RuntimeHostResolver.prefersExactBuildScopedHost(
+            options: required,
+            explicitSocket: nil,
+            buildScopedDaemonSocketPath: "/tmp/daemon-current.sock"
+        ))
+    }
+
+    @Test
+    func `pixel focus typing requires its exact host operation`() throws {
+        let runtimeOptions = try CommanderCLIBinder.makeRuntimeOptions(
+            from: ParsedValues(
+                positional: ["hello"],
+                options: ["at": ["10,20"], "snapshot": ["snapshot"]],
+                flags: []
+            ),
+            commandType: TypeCommand.self
+        )
+        #expect(runtimeOptions.requiresExactWindowPixelFocusTyping)
+
+        let operation = PeekabooBridgeOperation.exactWindowPixelFocusType
+        let previous = BridgeTestFixtures.handshake(
+            negotiatedVersion: .init(major: 1, minor: 32),
+            supportedOperations: [operation],
+            enabledOperations: [operation]
+        )
+        let missing = BridgeTestFixtures.handshake(
+            negotiatedVersion: PeekabooBridgeConstants.composedInputParityVersion,
+            supportedOperations: [],
+            enabledOperations: []
+        )
+        let disabled = BridgeTestFixtures.handshake(
+            negotiatedVersion: PeekabooBridgeConstants.composedInputParityVersion,
+            supportedOperations: [operation],
+            enabledOperations: []
+        )
+        let capable = BridgeTestFixtures.handshake(
+            negotiatedVersion: PeekabooBridgeConstants.composedInputParityVersion,
+            supportedOperations: [operation],
+            enabledOperations: [operation]
+        )
+
+        #expect(!BridgeCapabilityPolicy.supportsExactWindowPixelFocusTyping(for: previous))
+        #expect(!BridgeCapabilityPolicy.supportsExactWindowPixelFocusTyping(for: missing))
+        #expect(!BridgeCapabilityPolicy.supportsExactWindowPixelFocusTyping(for: disabled))
+        #expect(BridgeCapabilityPolicy.supportsExactWindowPixelFocusTyping(for: capable))
+
+        var required = CommandRuntimeOptions()
+        required.requiresExactWindowPixelFocusTyping = true
+        #expect(!BridgeCapabilityPolicy.supportsRemoteRequirements(for: previous, options: required))
+        #expect(!BridgeCapabilityPolicy.supportsRemoteRequirements(for: missing, options: required))
+        #expect(BridgeCapabilityPolicy.supportsRemoteRequirements(for: capable, options: required))
+        #expect(RuntimeHostResolver.prefersExactBuildScopedHost(
+            options: required,
+            explicitSocket: nil,
+            buildScopedDaemonSocketPath: "/tmp/daemon-current.sock"
+        ))
+    }
 }

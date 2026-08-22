@@ -19,6 +19,40 @@ enum BackgroundInputDriver {
         let processIdentifier: pid_t
         let layer: Int
         let bounds: CGRect
+        let alpha: CGFloat
+        let isOnScreen: Bool
+
+        init(
+            windowID: CGWindowID,
+            processIdentifier: pid_t,
+            layer: Int,
+            bounds: CGRect,
+            alpha: CGFloat = 1,
+            isOnScreen: Bool = true)
+        {
+            self.windowID = windowID
+            self.processIdentifier = processIdentifier
+            self.layer = layer
+            self.bounds = bounds
+            self.alpha = alpha
+            self.isOnScreen = isOnScreen
+        }
+    }
+
+    struct PointerReceiverIdentity: Equatable {
+        let processIdentifier: pid_t
+        let windowID: CGWindowID
+        let accessibilityProcessIdentifier: pid_t
+
+        init(
+            processIdentifier: pid_t,
+            windowID: CGWindowID,
+            accessibilityProcessIdentifier: pid_t? = nil)
+        {
+            self.processIdentifier = processIdentifier
+            self.windowID = windowID
+            self.accessibilityProcessIdentifier = accessibilityProcessIdentifier ?? processIdentifier
+        }
     }
 
     struct KeyboardEventPlan {
@@ -51,12 +85,7 @@ enum BackgroundInputDriver {
         at point: CGPoint,
         button: MouseButton) -> (element: any AutomationElementRepresenting, action: PositionalClickAction)?
     {
-        guard let hit = candidates.first else { return nil }
-        // Trust the hit-test element regardless of its reported frame (coordinate-space quirks must
-        // not veto the element macOS resolved for the point); spatially filter the rest.
-        let spatiallyValid = [hit] + candidates.dropFirst().filter { element in
-            element.frame?.contains(point) == true
-        }
+        let spatiallyValid = self.spatiallyValidCandidates(candidates, at: point)
 
         let requiredAction = button == .right ? AXActionNames.kAXShowMenuAction : AXActionNames.kAXPressAction
         if let actionable = spatiallyValid.first(where: {
@@ -92,6 +121,33 @@ enum BackgroundInputDriver {
         }
         self.logger.debug("No actionable background positional click target resolved")
         return nil
+    }
+
+    /// Picks only a writable focus target at one hit-tested point.
+    ///
+    /// Composed pixel-focus typing must not reuse normal click resolution: that resolver deliberately
+    /// prefers pressable controls and selectable rows before editable fields. A focus prelude instead
+    /// admits only the narrow text-entry roles whose AXFocused attribute can be set.
+    @MainActor
+    static func positionalFocusTarget(
+        inCandidates candidates: [any AutomationElementRepresenting],
+        at point: CGPoint) -> (any AutomationElementRepresenting)?
+    {
+        self.spatiallyValidCandidates(candidates, at: point)
+            .first(where: self.canFocusForPositionalClick)
+    }
+
+    @MainActor
+    private static func spatiallyValidCandidates(
+        _ candidates: [any AutomationElementRepresenting],
+        at point: CGPoint) -> [any AutomationElementRepresenting]
+    {
+        guard let hit = candidates.first else { return [] }
+        // Trust the hit-test element regardless of its reported frame (coordinate-space quirks must
+        // not veto the element macOS resolved for the point); spatially filter the rest.
+        return [hit] + candidates.dropFirst().filter { element in
+            element.frame?.contains(point) == true
+        }
     }
 
     /// Coordinate clicks may focus text-entry controls that expose no press action. Keep this
@@ -820,8 +876,86 @@ enum BackgroundInputDriver {
                 windowID: windowID,
                 processIdentifier: processIdentifier,
                 layer: layer,
-                bounds: bounds)
+                bounds: bounds,
+                alpha: (window[kCGWindowAlpha as String] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 1,
+                isOnScreen: (window[kCGWindowIsOnscreen as String] as? Bool) ?? (exactWindowID == nil))
         }
+    }
+
+    /// Finds the requested exact target in the current on-screen WindowServer catalog.
+    ///
+    /// Catalog order cannot identify the pointer receiver: macOS publishes click-through Dock and
+    /// Nameplate rows ahead of ordinary application windows. The system-wide Accessibility hit test
+    /// is authoritative for receiver identity; this lookup independently proves only that the exact
+    /// requested WindowServer row remains visible and contains the dispatch point.
+    static func exactOnScreenWindowRoute(
+        at point: CGPoint,
+        windowID: CGWindowID,
+        candidates: [MouseWindowRouteCandidate]) -> MouseWindowRouteCandidate?
+    {
+        guard point.x.isFinite,
+              point.y.isFinite,
+              windowID != kCGNullWindowID
+        else { return nil }
+        return candidates.first { candidate in
+            candidate.windowID == windowID &&
+                candidate.isOnScreen &&
+                candidate.alpha.isFinite &&
+                candidate.alpha > 0 &&
+                candidate.bounds.minX.isFinite &&
+                candidate.bounds.minY.isFinite &&
+                candidate.bounds.maxX.isFinite &&
+                candidate.bounds.maxY.isFinite &&
+                candidate.bounds.width > 0 &&
+                candidate.bounds.height > 0 &&
+                candidate.bounds.contains(point)
+        }
+    }
+
+    static func exactOnScreenWindowRoute(
+        at point: CGPoint,
+        windowID: CGWindowID) -> MouseWindowRouteCandidate?
+    {
+        self.exactOnScreenWindowRoute(
+            at: point,
+            windowID: windowID,
+            candidates: self.mouseWindowRouteCandidates(exactWindowID: nil))
+    }
+
+    /// Resolves the system-wide Accessibility hit-test receiver and its exact containing window.
+    @MainActor
+    static func accessibilityPointerReceiver(at point: CGPoint) -> PointerReceiverIdentity? {
+        guard point.x.isFinite,
+              point.y.isFinite,
+              let element = Element.elementAtPoint(point)
+        else { return nil }
+        let axElement = element.underlyingElement
+        guard let windowID = AXWindowResolver().windowID(from: axElement) else { return nil }
+        var processIdentifier: pid_t = 0
+        guard AXUIElementGetPid(axElement, &processIdentifier) == .success else { return nil }
+        return self.pointerReceiverIdentity(
+            accessibilityProcessIdentifier: processIdentifier,
+            windowID: windowID,
+            windowIdentity: SystemIdentityResolver.windowIdentity(windowID))
+    }
+
+    static func pointerReceiverIdentity(
+        accessibilityProcessIdentifier: pid_t?,
+        windowID: CGWindowID?,
+        windowIdentity: SystemWindowIdentity?) -> PointerReceiverIdentity?
+    {
+        guard let accessibilityProcessIdentifier,
+              accessibilityProcessIdentifier > 0,
+              let windowID,
+              windowID != kCGNullWindowID,
+              let windowIdentity,
+              windowIdentity.windowID == windowID,
+              windowIdentity.ownerProcessIdentifier > 0
+        else { return nil }
+        return PointerReceiverIdentity(
+            processIdentifier: windowIdentity.ownerProcessIdentifier,
+            windowID: windowID,
+            accessibilityProcessIdentifier: accessibilityProcessIdentifier)
     }
 
     private static func windowID(from value: Any?) -> CGWindowID? {
@@ -880,11 +1014,88 @@ extension BackgroundInputDriver {
                 delivery: .init(mechanism: .accessibilityValue, mode: .background),
                 evidence: .deliveryAccepted)
         case .focus:
+            try Task.checkCancellation()
             try element.setAutomationFocused(true)
             return .dispatchedUnverified(
                 delivery: .init(mechanism: .accessibilityValue, mode: .background),
                 evidence: .deliveryAccepted)
         }
+    }
+
+    /// Establishes background focus at one exact-window point without pressing or selecting it.
+    @MainActor
+    static func focus(
+        at point: CGPoint,
+        exactWindow: UIAutomationTarget.ExactWindow) async throws -> UIInputExecutionResult.Action
+    {
+        let targetProcessIdentifier = exactWindow.identity.ownerProcessIdentifier
+        guard targetProcessIdentifier > 0, self.isProcessAlive(targetProcessIdentifier) else {
+            throw PeekabooError.invalidInput("Target process identifier is not running: \(targetProcessIdentifier)")
+        }
+        guard point.x.isFinite, point.y.isFinite, exactWindow.bounds.contains(point) else {
+            throw PeekabooError.invalidInput("Background pixel-focus point is outside the exact target window")
+        }
+        guard AXIsProcessTrusted() else {
+            throw PeekabooError.permissionDeniedAccessibility
+        }
+
+        guard let targetWindowID = CGWindowID(exactly: exactWindow.identity.windowID) else {
+            throw PeekabooError.snapshotStale("Exact-window pixel focus has an invalid window identifier")
+        }
+        _ = try self.resolveTargetWindowID(
+            at: point,
+            targetProcessIdentifier: targetProcessIdentifier,
+            exactWindowID: targetWindowID,
+            candidates: self.mouseWindowRouteCandidates(exactWindowID: targetWindowID))
+
+        let candidates = self.hitTestCandidates(at: point, targetProcessIdentifier: targetProcessIdentifier)
+        guard let element = self.positionalFocusTarget(inCandidates: candidates, at: point) else {
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .operationUnsupported,
+                message: "Background pixel focus is unavailable at the requested point.",
+                hint: "Target a writable text field or use explicit foreground typing.")
+        }
+        try self.assertBelongsToTargetWindow(element, targetWindowID: targetWindowID, at: point)
+
+        return try await self.performExactWindowFocusAction(
+            on: element,
+            exactWindow: exactWindow)
+    }
+
+    /// Revalidates the complete capture-time identity immediately before the AX focus write.
+    ///
+    /// The earlier point/window lookup proves where the hit test ran, but a process generation or
+    /// window bounds can still change while Accessibility resolves the editable element.
+    @MainActor
+    static func performExactWindowFocusAction(
+        on element: any AutomationElementRepresenting,
+        exactWindow: UIAutomationTarget.ExactWindow,
+        exactWindowIdentityValidator: (WindowMutationIdentity, CGRect) -> Bool = {
+            SystemIdentityResolver.validateWindowMutationIdentity($0, expectedBounds: $1)
+        }) async throws -> UIInputExecutionResult.Action
+    {
+        guard exactWindowIdentityValidator(exactWindow.identity, exactWindow.bounds) else {
+            throw PeekabooError.snapshotStale(
+                "Exact-window pixel-focus receipt changed before the Accessibility focus write")
+        }
+
+        let outcome = try await self.performPositionalClickAction(.focus, on: element)
+        guard element.focusedState == true,
+              let focusedElement = element.focusedElementIdentity
+        else {
+            throw DesktopActionFailure.indeterminate(
+                delivery: outcome.delivery,
+                evidence: .completionUnknown,
+                unitCount: outcome.dispatchState.unitCount ?? .one,
+                message: "Background pixel focus was dispatched but could not be confirmed.",
+                hint: "Observe the exact target before deciding whether to retry typing.")
+        }
+        return UIInputExecutionResult.Action(
+            outcome: outcome,
+            actionName: AXAttributeNames.kAXFocusedAttribute,
+            anchorPoint: element.anchorPoint,
+            elementRole: element.role,
+            focusedElement: focusedElement)
     }
 
     @MainActor

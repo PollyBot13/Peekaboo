@@ -184,6 +184,16 @@ extension PeekabooBridgeServer {
         {
             advertisedCapabilities.remove(PeekabooBridgeHostCapability.setValueResultTargetBinding)
         }
+        if !supportsAttestedOperationReceipts ||
+            negotiated < PeekabooBridgeConstants.composedInputParityVersion ||
+            !self.services.snapshots.supportsSnapshotMutationLeases ||
+            (self.services.automation as? any ForegroundModifierClickServiceProtocol)?
+            .supportsForegroundModifierClickSnapshotLease != true ||
+            !advertisedOps.contains(.foregroundModifierClick) ||
+            !enabledOps.contains(.foregroundModifierClick)
+        {
+            advertisedCapabilities.remove(PeekabooBridgeHostCapability.foregroundModifierClickSnapshotLease)
+        }
         if supportsAttestedOperationReceipts {
             advertisedCapabilities.insert(PeekabooBridgeHostCapability.attestedOperationReceipts)
         }
@@ -341,6 +351,19 @@ extension PeekabooBridgeServer {
         {
             operations.remove(.exactWindowTargetedTypeActions)
             operations.remove(.exactWindowTargetedHotkey)
+        }
+        if (self.services.automation as? any ExactWindowPixelFocusTypingServiceProtocol)?
+            .supportsExactWindowPixelFocusTyping != true
+        {
+            operations.remove(.exactWindowPixelFocusType)
+        }
+        if !self.services.snapshots.supportsSnapshotMutationLeases ||
+            (self.services.automation as? any ForegroundModifierClickServiceProtocol)?
+            .supportsForegroundModifierClick != true ||
+            (self.services.automation as? any ForegroundModifierClickServiceProtocol)?
+            .supportsForegroundModifierClickSnapshotLease != true
+        {
+            operations.remove(.foregroundModifierClick)
         }
         if (self.services.automation as? any ExactWindowHeldPointerLifecycleServiceProtocol)?
             .supportsExactWindowHeldPointerLifecycle != true

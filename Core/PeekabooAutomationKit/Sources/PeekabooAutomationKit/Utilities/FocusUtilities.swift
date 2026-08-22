@@ -115,7 +115,167 @@ func focusTargetIdentityMatches(
 private struct FocusWindowDispatchContext {
     let attachedDialog: AttachedDialogFocusReceipt?
     let expectedIdentity: WindowMutationIdentity?
+    let dispatchGuard: FocusDispatchGuard?
     let onDispatch: ((FocusDispatchRecord) -> Void)?
+}
+
+enum FocusDispatchStage: Equatable, Sendable {
+    case applicationActivation
+    case setMainWindow
+    case raiseWindow
+    case spaceTransition
+    case unspecified
+}
+
+@MainActor
+final class FocusDispatchGuard {
+    private let validateOwnership: @MainActor (FocusDispatchStage) throws -> Void
+    private let validateAcceptedActivation: @MainActor () throws -> Void
+    private let acceptedDispatch: @MainActor (FocusDispatchStage) throws -> Void
+    private let completeDispatch: @MainActor (FocusDispatchStage) throws -> Void
+    let requiresStrictDispatchOwnership: Bool
+    private(set) var acceptedApplicationActivationDispatch = false
+    private(set) var completedStrictTerminalDispatch = false
+
+    init(validateOwnership: @escaping @MainActor () throws -> Void = {}) {
+        self.requiresStrictDispatchOwnership = false
+        self.validateOwnership = { _ in try validateOwnership() }
+        self.validateAcceptedActivation = validateOwnership
+        self.acceptedDispatch = { _ in }
+        self.completeDispatch = { _ in }
+    }
+
+    init(
+        requiresStrictDispatchOwnership: Bool,
+        validateOwnership: @escaping @MainActor (FocusDispatchStage) throws -> Void,
+        validateAcceptedActivation: (@MainActor () throws -> Void)? = nil,
+        acceptedDispatch: @escaping @MainActor (FocusDispatchStage) throws -> Void = { _ in },
+        completeDispatch: @escaping @MainActor (FocusDispatchStage) throws -> Void)
+    {
+        self.requiresStrictDispatchOwnership = requiresStrictDispatchOwnership
+        self.validateOwnership = validateOwnership
+        self.validateAcceptedActivation = validateAcceptedActivation ?? {
+            try validateOwnership(.applicationActivation)
+        }
+        self.acceptedDispatch = acceptedDispatch
+        self.completeDispatch = completeDispatch
+    }
+
+    func validate(_ stage: FocusDispatchStage = .unspecified) throws {
+        try self.validateOwnership(stage)
+    }
+
+    func callAsFunction() throws {
+        try self.validate()
+    }
+
+    func validateAcceptedActivationSettlement() throws {
+        try self.validateAcceptedActivation()
+    }
+
+    func didAcceptDispatch(_ stage: FocusDispatchStage) throws {
+        if stage == .applicationActivation {
+            self.acceptedApplicationActivationDispatch = true
+        }
+        try self.acceptedDispatch(stage)
+    }
+
+    func didCompleteDispatch(_ stage: FocusDispatchStage = .unspecified) throws {
+        try self.completeDispatch(stage)
+        if self.requiresStrictDispatchOwnership, stage == .raiseWindow {
+            self.completedStrictTerminalDispatch = true
+        }
+    }
+}
+
+@MainActor
+enum FocusAcceptedActivationSettlement {
+    typealias Sleep = @MainActor (Duration) async throws -> Void
+
+    static func wait(
+        dispatchGuard: FocusDispatchGuard?,
+        pollCount: Int,
+        interval: Duration,
+        isSettled: @MainActor () -> Bool,
+        sleep: Sleep = { try await Task.sleep(for: $0) }) async throws -> Bool
+    {
+        guard pollCount > 0 else { return false }
+
+        for _ in 0..<pollCount {
+            if isSettled() {
+                return true
+            }
+            try dispatchGuard?.validateAcceptedActivationSettlement()
+            try await sleep(interval)
+        }
+        if isSettled() {
+            return true
+        }
+        try dispatchGuard?.validateAcceptedActivationSettlement()
+        return false
+    }
+}
+
+@MainActor
+enum FocusRaiseSettlement {
+    static func run(
+        attemptCount: Int,
+        requiresStrictDispatchOwnership: Bool,
+        prepareAttempt: () throws -> Void,
+        dispatchRaise: () throws -> Void,
+        verifyFocus: () async throws -> Void,
+        completeRaise: () throws -> Void,
+        sleepBeforeRetry: () async throws -> Void,
+        fallbackError: @autoclosure () -> any Error) async throws
+    {
+        guard attemptCount > 0 else { throw fallbackError() }
+        var lastError: (any Error)?
+
+        for attempt in 1...attemptCount {
+            try prepareAttempt()
+            var raiseDefinitelyReturned = false
+            do {
+                try dispatchRaise()
+                raiseDefinitelyReturned = true
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if requiresStrictDispatchOwnership {
+                    throw error
+                }
+            }
+
+            if raiseDefinitelyReturned, !requiresStrictDispatchOwnership {
+                do {
+                    try completeRaise()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // Non-strict completion errors historically defer to focus verification.
+                }
+            }
+
+            do {
+                try await verifyFocus()
+            } catch {
+                lastError = error
+                if requiresStrictDispatchOwnership, raiseDefinitelyReturned {
+                    throw error
+                }
+                if attempt < attemptCount {
+                    try await sleepBeforeRetry()
+                }
+                continue
+            }
+
+            if raiseDefinitelyReturned, requiresStrictDispatchOwnership {
+                try completeRaise()
+            }
+            return
+        }
+
+        throw lastError ?? fallbackError()
+    }
 }
 
 enum FocusDispatchRecord: Equatable, Sendable {
@@ -476,6 +636,7 @@ public final class FocusManagementService {
         windowID: CGWindowID,
         options: FocusOptions = FocusOptions(),
         expectedIdentity: WindowMutationIdentity? = nil,
+        dispatchGuard: FocusDispatchGuard? = nil,
         onDispatch: ((FocusDispatchRecord) -> Void)? = nil) async throws
     {
         try await self.focusWindowWithOwnedLane(
@@ -483,6 +644,7 @@ public final class FocusManagementService {
             options: options,
             attachedDialog: nil,
             expectedIdentity: expectedIdentity,
+            dispatchGuard: dispatchGuard,
             onDispatch: onDispatch)
     }
 
@@ -505,6 +667,7 @@ public final class FocusManagementService {
                 parentBounds: target.bounds,
                 dialog: dialog),
             expectedIdentity: target.identity,
+            dispatchGuard: nil,
             onDispatch: nil)
     }
 
@@ -631,6 +794,7 @@ public final class FocusManagementService {
         options: FocusOptions,
         attachedDialog: AttachedDialogFocusReceipt?,
         expectedIdentity: WindowMutationIdentity?,
+        dispatchGuard: FocusDispatchGuard?,
         onDispatch: ((FocusDispatchRecord) -> Void)?) async throws
     {
         // Verify window exists before any focus work starts.
@@ -662,6 +826,7 @@ public final class FocusManagementService {
                 windowID: windowID,
                 bringToCurrentSpace: options.bringToCurrentSpace,
                 expectedIdentity: expectedIdentity,
+                dispatchGuard: dispatchGuard,
                 onDispatch: onDispatch)
             try self.requireExpectedFocusIdentity(expectedIdentity, windowID: windowID)
         }
@@ -677,24 +842,48 @@ public final class FocusManagementService {
 
         let runningApp = initialHandle.app.application
 
+        var activationAccepted = false
         if !runningApp.isActive {
             try self.requireExpectedFocusIdentity(
                 expectedIdentity,
                 windowID: windowID,
                 element: initialHandle.element)
-            _ = try FocusDispatchAccounting.acceptingBool(
+            try dispatchGuard?.validate(.applicationActivation)
+            activationAccepted = try FocusDispatchAccounting.acceptingBool(
                 delivery: .init(mechanism: .nativeFramework, mode: .foreground),
                 onDispatch: onDispatch,
                 operation: { runningApp.activate() })
+            if activationAccepted {
+                try dispatchGuard?.didAcceptDispatch(.applicationActivation)
+            }
         }
 
-        try await self.waitForCondition(
-            timeout: 3.0,
-            interval: 0.1,
-            condition: {
-                runningApp.isActive ||
-                    NSWorkspace.shared.frontmostApplication?.processIdentifier == runningApp.processIdentifier
-            })
+        let activationSettled: Bool
+        if activationAccepted {
+            activationSettled = try await FocusAcceptedActivationSettlement.wait(
+                dispatchGuard: dispatchGuard,
+                pollCount: 30,
+                interval: .milliseconds(100),
+                isSettled: {
+                    runningApp.isActive ||
+                        NSWorkspace.shared.frontmostApplication?.processIdentifier == runningApp.processIdentifier
+                })
+        } else {
+            try await self.waitForCondition(
+                timeout: 3.0,
+                interval: 0.1,
+                condition: {
+                    runningApp.isActive ||
+                        NSWorkspace.shared.frontmostApplication?.processIdentifier == runningApp.processIdentifier
+                })
+            activationSettled = true
+        }
+        guard activationSettled else {
+            throw FocusError.timeoutWaitingForCondition
+        }
+        if activationAccepted {
+            try dispatchGuard?.didCompleteDispatch(.applicationActivation)
+        }
 
         guard let refreshedHandle = self.windowIdentityService.findWindow(byID: windowID, in: runningApp) ??
             self.windowIdentityService.findWindow(byID: windowID)
@@ -729,6 +918,7 @@ public final class FocusManagementService {
             context: FocusWindowDispatchContext(
                 attachedDialog: attachedDialog,
                 expectedIdentity: expectedIdentity,
+                dispatchGuard: dispatchGuard,
                 onDispatch: onDispatch))
     }
 
@@ -738,6 +928,7 @@ public final class FocusManagementService {
         windowID: CGWindowID,
         bringToCurrentSpace: Bool,
         expectedIdentity: WindowMutationIdentity?,
+        dispatchGuard: FocusDispatchGuard?,
         onDispatch: ((FocusDispatchRecord) -> Void)?) async throws
     {
         switch FocusSpaceActionPlan.make(
@@ -745,6 +936,7 @@ public final class FocusManagementService {
             expectedIdentity: expectedIdentity)
         {
         case let .moveToCurrentSpace(.some(identity)):
+            try dispatchGuard?.validate(.spaceTransition)
             let result = try self.spaceService.moveWindowToCurrentSpaceResult(
                 windowID: windowID,
                 expectedIdentity: identity)
@@ -756,12 +948,14 @@ public final class FocusManagementService {
                 onDispatch: onDispatch)
 
         case .moveToCurrentSpace(.none):
+            try dispatchGuard?.validate(.spaceTransition)
             try FocusDispatchAccounting.submittingThrowing(
                 delivery: .init(mechanism: .nativeFramework, mode: .foreground),
                 onDispatch: onDispatch,
                 operation: { try self.spaceService.moveWindowToCurrentSpace(windowID: windowID) })
 
         case let .switchToWindowSpace(.some(identity)):
+            try dispatchGuard?.validate(.spaceTransition)
             let result = try await self.spaceService.switchToWindowSpaceResult(
                 windowID: windowID,
                 expectedIdentity: identity)
@@ -775,11 +969,13 @@ public final class FocusManagementService {
         case .switchToWindowSpace(.none):
             let isActive = self.spaceService.getSpacesForWindow(windowID: windowID).first?.isActive
             if FocusDispatchAccounting.shouldAccountSpaceSwitch(isActive: isActive) {
+                try dispatchGuard?.validate(.spaceTransition)
                 try await FocusDispatchAccounting.submittingAsync(
                     delivery: .init(mechanism: .nativeFramework, mode: .foreground),
                     onDispatch: onDispatch,
                     operation: { try await self.spaceService.switchToWindowSpace(windowID: windowID) })
             } else {
+                try dispatchGuard?.validate(.spaceTransition)
                 try await self.spaceService.switchToWindowSpace(windowID: windowID)
             }
         }
@@ -821,60 +1017,57 @@ public final class FocusManagementService {
         options: FocusOptions,
         context: FocusWindowDispatchContext) async throws
     {
-        var lastError: (any Error)?
-
-        for attempt in 1...options.retryCount {
-            // Chrome and other multi-window apps can raise a window without updating AXFocusedWindow.
-            // Ask AX to make it main as well, then require both AX and Workspace to confirm the result.
-            try self.requireExpectedFocusIdentity(
-                context.expectedIdentity,
-                windowID: windowID,
-                element: windowElement)
-            _ = try FocusDispatchAccounting.acceptingBool(
-                delivery: .init(mechanism: .accessibilityValue, mode: .foreground),
-                onDispatch: context.onDispatch,
-                operation: {
-                    windowElement.setValue(true, forAttribute: AXAttributeNames.kAXMainAttribute)
-                })
-            do {
+        try await FocusRaiseSettlement.run(
+            attemptCount: options.retryCount,
+            requiresStrictDispatchOwnership: context.dispatchGuard?.requiresStrictDispatchOwnership == true,
+            prepareAttempt: {
+                // Chrome and other multi-window apps can raise a window without updating AXFocusedWindow.
+                // Ask AX to make it main as well, then require both AX and Workspace to confirm the result.
                 try self.requireExpectedFocusIdentity(
                     context.expectedIdentity,
                     windowID: windowID,
                     element: windowElement)
+                try context.dispatchGuard?.validate(.setMainWindow)
+                let madeMain = try FocusDispatchAccounting.acceptingBool(
+                    delivery: .init(mechanism: .accessibilityValue, mode: .foreground),
+                    onDispatch: context.onDispatch,
+                    operation: {
+                        windowElement.setValue(true, forAttribute: AXAttributeNames.kAXMainAttribute)
+                    })
+                if madeMain {
+                    // Strict completion/ownership sentinels must escape immediately after an accepted
+                    // set-main dispatch.
+                    try context.dispatchGuard?.didCompleteDispatch(.setMainWindow)
+                }
+            },
+            dispatchRaise: {
+                try self.requireExpectedFocusIdentity(
+                    context.expectedIdentity,
+                    windowID: windowID,
+                    element: windowElement)
+                try context.dispatchGuard?.validate(.raiseWindow)
                 _ = try FocusDispatchAccounting.submittingThrowing(
                     delivery: .init(mechanism: .accessibilityAction, mode: .foreground),
                     onDispatch: context.onDispatch,
                     operation: { try windowElement.performAction(.raise) })
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                // If raise action fails, try to make it main
-                // Note: Setting main window through AX API requires finding parent app
-                // This is handled by the activate() call above
-            }
-
-            // Verify focus
-            do {
+            },
+            verifyFocus: {
                 try await self.verifyWindowFocus(
                     windowElement,
                     windowID: windowID,
                     timeout: options.timeout,
                     attachedDialog: context.attachedDialog,
                     expectedIdentity: context.expectedIdentity)
-
-                // Successfully focused window
-                return
-            } catch {
-                lastError = error
-                // Focus attempt failed: \(error.localizedDescription)
-
-                if attempt < options.retryCount {
-                    try await Task.sleep(nanoseconds: 500_000_000) // 0.5s between retries
-                }
-            }
-        }
-
-        throw lastError ?? FocusError.focusVerificationFailed(windowID)
+            },
+            completeRaise: {
+                // Accepted AXRaise is terminal only after the exact focus observation settles.
+                // Keeping this outside verification handling lets strict sentinels escape.
+                try context.dispatchGuard?.didCompleteDispatch(.raiseWindow)
+            },
+            sleepBeforeRetry: {
+                try await Task.sleep(nanoseconds: 500_000_000) // 0.5s between retries
+            },
+            fallbackError: FocusError.focusVerificationFailed(windowID))
     }
 
     private func verifyWindowFocus(
