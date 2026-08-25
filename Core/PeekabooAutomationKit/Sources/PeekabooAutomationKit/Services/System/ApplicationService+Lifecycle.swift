@@ -1074,6 +1074,30 @@ extension ApplicationService {
         _ = try await self.unhideApplicationResult(identifier: identifier)
     }
 
+    static func dispatchApplicationAccessibilityHide(
+        isSupported: () -> Bool,
+        checkCancellation: () throws -> Void = { try Task.checkCancellation() },
+        submit: () throws -> Void) throws
+    {
+        guard isSupported() else {
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .operationUnsupported,
+                message: "The application does not expose an AXHide action.")
+        }
+        try self.checkApplicationDispatchCancellation(
+            operation: "Hide application",
+            checkCancellation)
+        try submit()
+    }
+
+    static func submitNativeApplicationVisibility(_ submit: () -> Bool) -> Bool {
+        // NSRunningApplication can return false even though the asynchronous visibility request
+        // takes effect. The invocation is therefore a dispatched unit; exact state polling owns
+        // the terminal outcome instead of the immediate advisory Boolean.
+        _ = submit()
+        return true
+    }
+
     func requestApplicationVisibility(
         _ application: NSRunningApplication,
         hidden: Bool) throws -> ApplicationVisibilityAttempt
@@ -1118,6 +1142,20 @@ extension ApplicationService {
             }
             // The typed AX refusal above proves zero dispatch. Cancellation before the native
             // fallback therefore remains a pre-dispatch refusal instead of inventing an AX unit.
+            try Self.checkApplicationDispatchCancellation(operation: "Hide application fallback")
+            guard self.applicationNativeVisibilityHandler(application, true) else {
+                return .rejected
+            }
+            return .accepted(ApplicationActionDispatch(
+                delivery: DesktopActionOutcome.Delivery(
+                    mechanism: .nativeFramework,
+                    mode: .background),
+                unitCount: .one))
+        } catch let error as AccessibilitySystemError
+            where error.axError == .actionUnsupported || error.axError == .apiDisabled
+        {
+            // These AX errors prove the action was rejected before dispatch, so native AppKit
+            // fallback cannot duplicate a hide that may already have happened.
             try Self.checkApplicationDispatchCancellation(operation: "Hide application fallback")
             guard self.applicationNativeVisibilityHandler(application, true) else {
                 return .rejected
