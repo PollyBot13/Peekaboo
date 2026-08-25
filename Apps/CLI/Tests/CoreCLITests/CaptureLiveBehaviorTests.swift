@@ -94,15 +94,24 @@ struct CaptureLiveBehaviorTests {
             Self.window(id: 101, title: "Draft", index: 0),
             Self.window(id: 102, title: "Draft", index: 1),
         ]
+        let expectedMessage =
+            "Capture selector test window title 'Draft' is ambiguous " +
+            "(id=101 index=0 'Draft'; id=102 index=1 'Draft'). " +
+            "Select one --window-id or --window-index explicitly."
 
         for surface in SelectorSurface.allCases {
             let selector = try Self.selector(for: surface, title: "Draft")
-            #expect(throws: ExactWindowSelectorResolutionError.self) {
-                _ = try ExactWindowSelectorResolver.select(
-                    from: windows,
-                    selector: selector,
-                    operation: "Capture selector test"
-                )
+            for inventory in [windows, Array(windows.reversed())] {
+                do {
+                    _ = try ExactWindowSelectorResolver.select(
+                        from: inventory,
+                        selector: selector,
+                        operation: "Capture selector test"
+                    )
+                    Issue.record("Expected duplicate exact title selection to fail")
+                } catch let error as ExactWindowSelectorResolutionError {
+                    #expect(error.message == expectedMessage)
+                }
             }
         }
     }
@@ -114,16 +123,64 @@ struct CaptureLiveBehaviorTests {
             Self.window(id: 101, title: "Draft One", index: 0),
             Self.window(id: 102, title: "Draft Two", index: 1),
         ]
+        let expectedMessage =
+            "Capture selector test window title 'Draft' is ambiguous " +
+            "(id=101 index=0 'Draft One'; id=102 index=1 'Draft Two'). " +
+            "Select one --window-id or --window-index explicitly."
 
         for surface in SelectorSurface.allCases {
             let selector = try Self.selector(for: surface, title: "Draft")
-            #expect(throws: ExactWindowSelectorResolutionError.self) {
-                _ = try ExactWindowSelectorResolver.select(
-                    from: windows,
+            for inventory in [windows, Array(windows.reversed())] {
+                do {
+                    _ = try ExactWindowSelectorResolver.select(
+                        from: inventory,
+                        selector: selector,
+                        operation: "Capture selector test"
+                    )
+                    Issue.record("Expected duplicate partial title selection to fail")
+                } catch let error as ExactWindowSelectorResolutionError {
+                    #expect(error.message == expectedMessage)
+                }
+            }
+        }
+    }
+
+    @Test
+    @MainActor
+    func `capture selectors ignore unrelated conflicting duplicates`() throws {
+        let selected = Self.window(id: 101, title: "Draft", index: 0)
+        let firstConflict = Self.window(id: 202, title: "Other A", index: 1)
+        let secondConflict = Self.window(id: 202, title: "Other B", index: 2)
+        let inventories = [
+            [selected, firstConflict, secondConflict],
+            [secondConflict, firstConflict, selected],
+        ]
+        for surface in SelectorSurface.allCases {
+            let selector = try Self.selector(for: surface, title: "Draft")
+            for inventory in inventories {
+                let result = try ExactWindowSelectorResolver.select(
+                    from: inventory,
                     selector: selector,
                     operation: "Capture selector test"
                 )
+                #expect(result == selected)
             }
+        }
+    }
+
+    @Test
+    @MainActor
+    func `capture selectors canonicalize repeated stable inventory rows`() throws {
+        let window = Self.window(id: 101, title: "Draft", index: 0)
+
+        for surface in SelectorSurface.allCases {
+            let selector = try Self.selector(for: surface, title: "Draft")
+            let selected = try ExactWindowSelectorResolver.select(
+                from: [window, window],
+                selector: selector,
+                operation: "Capture selector test"
+            )
+            #expect(selected == window)
         }
     }
 

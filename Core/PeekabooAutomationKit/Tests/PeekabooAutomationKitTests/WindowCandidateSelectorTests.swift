@@ -6,6 +6,49 @@ import Testing
 
 struct WindowCandidateSelectorTests {
     @Test
+    func `explicit compatibility selection does not require a mutation receipt`() throws {
+        let receiptless = AutomationTestFixtures.window(includesMutationIdentity: false)
+
+        let selected = try DesktopTargetPlanning.WindowCandidateSelector.selectExplicitCandidate(
+            candidates: [receiptless],
+            selector: .id(receiptless.windowID))
+
+        #expect(selected == receiptless)
+        #expect(throws: DesktopTargetPlanningError.missingWindowIdentity(windowID: receiptless.windowID)) {
+            _ = try DesktopTargetPlanning.WindowCandidateSelector.select(
+                candidates: [receiptless],
+                selector: .id(receiptless.windowID),
+                policy: .explicit)
+        }
+    }
+
+    @Test
+    func `unrelated conflicting duplicate does not poison explicit selection`() throws {
+        let selected = AutomationTestFixtures.window(windowID: 201, title: "Selected", index: 0)
+        let unrelated = AutomationTestFixtures.window(windowID: 202, title: "Other", index: 1)
+        let conflicting = AutomationTestFixtures.window(windowID: 202, title: "Conflict", index: 2)
+
+        for candidates in [
+            [selected, unrelated, conflicting],
+            [conflicting, unrelated, selected],
+        ] {
+            for selector: InteractionTargetSelector.WindowSelector in [
+                .id(selected.windowID),
+                .title(selected.title),
+                .index(selected.index),
+            ] {
+                #expect(try DesktopTargetPlanning.WindowCandidateSelector.selectExplicitCandidate(
+                    candidates: candidates,
+                    selector: selector) == selected)
+                #expect(try DesktopTargetPlanning.WindowCandidateSelector.select(
+                    candidates: candidates,
+                    selector: selector,
+                    policy: .explicit) == selected)
+            }
+        }
+    }
+
+    @Test
     func `unique exact title wins before partial while duplicate exact refuses deterministically`() throws {
         let windows = AutomationTestFixtures.duplicateTitleWindows()
         let selected = try DesktopTargetPlanning.WindowCandidateSelector.select(
@@ -197,6 +240,11 @@ struct WindowCandidateSelectorTests {
                     selector: .title(matching.title),
                     policy: .explicit)
             }
+            #expect(throws: expected) {
+                _ = try DesktopTargetPlanning.WindowCandidateSelector.selectExplicitCandidate(
+                    candidates: candidates,
+                    selector: .title(matching.title))
+            }
         }
     }
 
@@ -212,6 +260,11 @@ struct WindowCandidateSelectorTests {
                     candidates: candidates,
                     selector: .index(matching.index),
                     policy: .explicit)
+            }
+            #expect(throws: expected) {
+                _ = try DesktopTargetPlanning.WindowCandidateSelector.selectExplicitCandidate(
+                    candidates: candidates,
+                    selector: .index(matching.index))
             }
         }
     }
