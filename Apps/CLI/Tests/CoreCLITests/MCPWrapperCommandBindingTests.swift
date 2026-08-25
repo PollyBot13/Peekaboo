@@ -6,6 +6,24 @@ import Testing
 
 struct MCPWrapperCommandBindingTests {
     @Test
+    func `MCP server runtime binding exposes foreground opt in`() throws {
+        let flag = try #require(MCPCommand.Serve.commanderSignature().flags.first {
+            $0.label == "allowForeground"
+        })
+        let command = try CommanderCLIBinder.instantiateCommand(
+            ofType: MCPCommand.Serve.self,
+            parsedValues: ParsedValues(
+                positional: [],
+                options: [:],
+                flags: ["allowForeground"]
+            )
+        )
+
+        #expect(flag.names.contains(.long("allow-foreground")))
+        #expect(command.allowForeground)
+    }
+
+    @Test
     func `Browser command binding`() throws {
         let parsed = ParsedValues(
             positional: ["navigate"],
@@ -144,5 +162,12 @@ struct MCPWrapperCommandBindingTests {
         #expect(context.executionPolicy == .backgroundOnly)
         #expect(nestedAgentContext.capturePreflightRefusal == refusal)
         #expect(nestedAgentContext.executionPolicy == .backgroundOnly)
+
+        let foregroundContext = MCPCommand.Serve.makeToolContext(
+            services: services,
+            snapshotMutationCoordinator: nil,
+            executionPolicy: .foregroundAllowed
+        )
+        #expect(foregroundContext.executionPolicy == .foregroundAllowed)
     }
 }
