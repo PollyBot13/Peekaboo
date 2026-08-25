@@ -144,10 +144,48 @@ final class AXTreeCollectorBudgetTests: XCTestCase {
 
         let message = info.automationToolRemediationMessage(budget: nil)
 
+        XCTAssertTrue(message.contains("Retry once"))
         XCTAssertTrue(message.contains("app_target"))
         XCTAssertTrue(message.contains("window_id"))
+        XCTAssertTrue(message.contains("transient sheet"))
+        XCTAssertTrue(message.contains("without window_id"))
+        XCTAssertTrue(message.contains("read-only dialog elements"))
+        XCTAssertTrue(message.contains("does not provide a reusable snapshot or mutation authority"))
+        XCTAssertTrue(message.contains("screenshot/OCR evidence"))
         XCTAssertFalse(message.contains("increase the timeout"))
         XCTAssertFalse(message.contains("--"))
+    }
+
+    func testCommandLineIncompleteRemediationDistinguishesTransientSheetsFromOtherFailures() {
+        let info = DetectionTruncationInfo(incompleteAccessibilityRead: true)
+
+        let message = info.remediationMessage(budget: nil)
+
+        XCTAssertTrue(message.contains("Retry once"))
+        XCTAssertTrue(message.contains("transient sheet"))
+        XCTAssertTrue(message.contains("owning process or app tree"))
+        XCTAssertTrue(message.contains("read-only dialog elements"))
+        XCTAssertTrue(message.contains("does not provide a reusable snapshot or mutation authority"))
+        XCTAssertTrue(message.contains("screenshot/OCR evidence"))
+        XCTAssertTrue(message.contains("increase the timeout only when the app is slow"))
+    }
+
+    func testIncompleteApplicationScopedFallbackDoesNotRecommendRepeatingTheAppTreeRead() {
+        let info = DetectionTruncationInfo(incompleteAccessibilityRead: true)
+
+        let commandLine = info.remediationMessage(budget: nil, applicationScopedFallback: true)
+        let automation = info.automationToolRemediationMessage(
+            budget: nil,
+            applicationScopedFallback: true)
+
+        XCTAssertTrue(commandLine.contains("already inspected the owning process or app tree"))
+        XCTAssertTrue(commandLine.contains("Do not repeat that fallback"))
+        XCTAssertTrue(commandLine.contains("screenshot/OCR evidence instead"))
+        XCTAssertFalse(commandLine.contains("inspect its owning process or app tree"))
+        XCTAssertTrue(automation.contains("already inspected the owning app_target without window_id"))
+        XCTAssertTrue(automation.contains("Do not repeat that fallback"))
+        XCTAssertTrue(automation.contains("screenshot/OCR evidence instead"))
+        XCTAssertFalse(automation.contains("inspect the owning app_target without window_id"))
     }
 
     func testMaxDepthOneStopsAtRoot() throws {
