@@ -1,9 +1,10 @@
 import CoreGraphics
 import Foundation
 import PeekabooAutomationKit
-import PeekabooBridge
+import PeekabooBridgeTestSupport
 import PeekabooFoundation
 import Testing
+@testable import PeekabooBridge
 @testable import PeekabooCore
 
 @MainActor
@@ -284,6 +285,54 @@ struct BridgeStrictBackgroundOperationTests {
         #expect(failure.outcome.dispatchState == .none)
         #expect(failure.outcome.retrySafety == .safe)
         #expect(failure.causeDescription == "candidate_window_ids=700,701")
+    }
+
+    @Test
+    func `remote blank child recovery hint survives server envelope and bridge wire`() async throws {
+        let hint = "Window ID 21723 did not retain a structural dialog. " +
+            "If it is a blank-title transient sheet CGWindow, use the titled parent AX window ID for PID 42 " +
+            "from window list."
+        let localFailure = DesktopActionFailure.preDispatchRefusal(
+            reason: .targetUnavailable,
+            message: "No dialog matched the selected target.",
+            hint: hint)
+        let serverEnvelope = PeekabooBridgeServer.bridgeErrorEnvelope(
+            for: localFailure,
+            operation: .targetedDialogListElements)
+        let protocolVersion = PeekabooBridgeProtocolVersion(major: 1, minor: 28)
+        let peer = try ScriptedBridgePeer(responses: [
+            .handshake(BridgeTestFixtures.handshake(
+                negotiatedVersion: protocolVersion,
+                supportedOperations: [.targetedDialogListElements])),
+            .error(serverEnvelope),
+        ])
+        let client = PeekabooBridgeClient(socketPath: peer.socketPath, requestTimeoutSec: 1)
+        _ = try await client.handshake(
+            client: .init(
+                bundleIdentifier: "dev.peekaboo.dialog-recovery-test",
+                teamIdentifier: nil,
+                processIdentifier: getpid()),
+            protocolVersion: protocolVersion)
+        let remote = RemoteDialogService(
+            client: client,
+            capabilities: .init(targetedList: true))
+
+        let failure: DesktopActionFailure
+        do {
+            _ = try await remote.listDialogElements(target: .init(processIdentifier: 42, windowID: 21723))
+            Issue.record("Expected the server refusal to survive the Bridge wire")
+            await peer.stop()
+            return
+        } catch let error as DesktopActionFailure {
+            failure = error
+        }
+        await peer.waitUntilFinished()
+
+        #expect(failure.outcome.route == .bridge)
+        #expect(failure.outcome.state == .refused)
+        #expect(failure.outcome.refusalReason == .targetUnavailable)
+        #expect(failure.outcome.dispatchState == .none)
+        #expect(failure.hint == hint)
     }
 
     @Test
