@@ -94,11 +94,7 @@ extension PeekabooBridgeBrowserConnectionReceipt {
               processIdentifier > 0,
               let processStartIdentity = self.processStartIdentity,
               processStartIdentity > 0,
-              self.processStartIdentityDecimal == String(processStartIdentity),
-              self.browserURL == nil,
-              self.webSocketDebuggerURL == nil,
-              self.devToolsBrowserID == nil,
-              self.protocolVersion == nil
+              self.processStartIdentityDecimal == String(processStartIdentity)
         else {
             return nil
         }
@@ -112,7 +108,37 @@ extension PeekabooBridgeBrowserConnectionReceipt {
               self.processStartIdentity == nil,
               self.processStartIdentityDecimal == nil,
               self.bundleIdentifier == nil,
-              let browserURL = self.browserURL,
+              self.channel == nil || self.canonicalChannelIdentity != nil,
+              self.hasCanonicalDevToolsIdentity
+        else {
+            return false
+        }
+        return true
+    }
+
+    var isCanonicalProcessBoundTarget: Bool {
+        guard let channelIdentity = self.canonicalChannelIdentity,
+              self.localProcessIdentity != nil,
+              self.bundleIdentifier == channelIdentity.bundleIdentifier,
+              self.hasCanonicalDevToolsIdentity
+        else {
+            return false
+        }
+        return true
+    }
+
+    var isCanonicalLocalProcessTarget: Bool {
+        guard let channelIdentity = self.canonicalChannelIdentity else { return false }
+        return self.localProcessIdentity != nil &&
+            self.bundleIdentifier == channelIdentity.bundleIdentifier &&
+            self.browserURL == nil &&
+            self.webSocketDebuggerURL == nil &&
+            self.devToolsBrowserID == nil &&
+            self.protocolVersion == nil
+    }
+
+    private var hasCanonicalDevToolsIdentity: Bool {
+        guard let browserURL = self.browserURL,
               Self.isNonEmpty(self.webSocketDebuggerURL),
               let webSocketDebuggerURL = self.webSocketDebuggerURL,
               let devToolsBrowserID = self.devToolsBrowserID,
@@ -129,14 +155,19 @@ extension PeekabooBridgeBrowserConnectionReceipt {
         return true
     }
 
-    var isCanonicalTarget: Bool {
-        self.localProcessIdentity != nil || self.isCanonicalExternalTarget
+    public var isCanonicalTarget: Bool {
+        self.isCanonicalProcessBoundTarget || self.isCanonicalExternalTarget ||
+            self.isCanonicalLocalProcessTarget
+    }
+
+    var isCanonicalExecutionTarget: Bool {
+        self.isCanonicalProcessBoundTarget || self.isCanonicalExternalTarget
     }
 
     func matchesConnectRequest(_ request: PeekabooBridgeBrowserChannelRequest) -> Bool {
         guard request.channel.map({ $0 == self.channel }) ?? true else { return false }
         guard let requestedBrowserURL = request.browserURL else {
-            return self.isCanonicalTarget
+            return self.isCanonicalProcessBoundTarget
         }
         guard self.isCanonicalExternalTarget,
               let requestedEndpoint = BrowserLoopbackEndpoint(
@@ -152,6 +183,14 @@ extension PeekabooBridgeBrowserConnectionReceipt {
 
     private static func isNonEmpty(_ value: String?) -> Bool {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private var canonicalChannelIdentity: ChromeChannelIdentity? {
+        guard let channel,
+              let identity = ChromeChannelIdentity(rawValue: channel),
+              channel == identity.rawValue
+        else { return nil }
+        return identity
     }
 }
 
@@ -221,7 +260,8 @@ public struct PeekabooBridgeBrowserExecuteRequest: Codable, Sendable, Equatable 
         } ? .readOnly : .mutating
     }
 
-    var isReadOnly: Bool {
+    /// Canonical classification used by Bridge and provider adapters to select receipt-bound read routing.
+    public var isReadOnly: Bool {
         self.actionSemantics == .readOnly
     }
 

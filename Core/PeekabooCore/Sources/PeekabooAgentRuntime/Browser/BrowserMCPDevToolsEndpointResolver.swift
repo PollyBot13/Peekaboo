@@ -1,4 +1,5 @@
 import Foundation
+import PeekabooAutomationKit
 import PeekabooFoundation
 
 struct BrowserMCPDevToolsEndpoint: Sendable, Equatable {
@@ -7,12 +8,30 @@ struct BrowserMCPDevToolsEndpoint: Sendable, Equatable {
     let browserID: String
     let browserVersion: String
     let protocolVersion: String
+    let listenerIdentity: DarwinProcessLoopbackListenerIdentity?
+
+    init(
+        browserURL: String,
+        webSocketDebuggerURL: String,
+        browserID: String,
+        browserVersion: String,
+        protocolVersion: String,
+        listenerIdentity: DarwinProcessLoopbackListenerIdentity? = nil)
+    {
+        self.browserURL = browserURL
+        self.webSocketDebuggerURL = webSocketDebuggerURL
+        self.browserID = browserID
+        self.browserVersion = browserVersion
+        self.protocolVersion = protocolVersion
+        self.listenerIdentity = listenerIdentity
+    }
 }
 
 struct BrowserMCPDevToolsEndpointResolver: Sendable {
     typealias Fetch = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    typealias Resolve = @Sendable (String) async throws -> BrowserMCPDevToolsEndpoint
 
-    let resolve: @Sendable (String) async throws -> BrowserMCPDevToolsEndpoint
+    let resolve: Resolve
 
     static let live = BrowserMCPDevToolsEndpointResolver { rawBrowserURL in
         try await Self.resolveEndpoint(rawBrowserURL) { request in
@@ -86,13 +105,19 @@ final class BrowserMCPNoRedirectURLSessionDelegate: NSObject, URLSessionTaskDele
     }
 }
 
-private enum BrowserMCPNoRedirectURLSession {
+enum BrowserMCPNoRedirectURLSession {
     static let shared: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let configuration = Self.makeConfiguration()
         return URLSession(
             configuration: configuration,
             delegate: BrowserMCPNoRedirectURLSessionDelegate(),
             delegateQueue: nil)
     }()
+
+    static func makeConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.connectionProxyDictionary = [:]
+        return configuration
+    }
 }

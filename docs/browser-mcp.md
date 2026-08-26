@@ -20,14 +20,30 @@ Use Peekaboo native tools for macOS UI, browser chrome, menus, dialogs, permissi
 
 ## Permission flow
 
-Chrome DevTools MCP `--auto-connect` attaches to an already-running Chrome profile. It requires:
+Peekaboo attaches to an already-running Chrome profile. It requires:
 
 1. Chrome 144 or newer.
 2. Chrome running locally.
 3. Remote debugging enabled at `chrome://inspect/#remote-debugging`.
 4. User approval in Chrome's remote debugging permission prompt.
 
-Peekaboo does not approve that prompt automatically. The browser tool reports instructions when it is disconnected or when connection fails.
+Peekaboo recognizes running channels by exact Chrome bundle identifier, so app-owned helper or XPC service names cannot
+be mistaken for another browser process. Native channel mode also requires the live process to satisfy Google's
+Apple-anchored code-signing requirement for Team ID `EQHXZ8M8AV`. Peekaboo pins its exact signed channel identifier,
+Team ID, and CDHash to the PID generation before opening the approval-gated WebSocket, then requires the same identity
+after `Browser.getVersion` and around every later listener revalidation. Peekaboo does not approve the prompt
+automatically. Once Chrome publishes
+`DevToolsActivePort`, channel connect reads that owner-controlled file without following symlinks, proves that its one
+exact loopback listener belongs to the detected Chrome PID and process generation, and opens the exact published
+WebSocket. That native connection remains
+pending while Chrome shows its approval prompt, has a bounded 60-second wait, sends CDP `Browser.getVersion`, and then
+revalidates the process-owned listener. Peekaboo then closes the native probe and passes its exact WebSocket URL identity
+as `--wsEndpoint` to Chrome DevTools MCP; the separately owned MCP child opens the second and final WebSocket used for
+execution. A new explicit foreground channel connect therefore creates exactly two legitimate WebSocket connections,
+and Chrome may show one approval dialog for each. Once the child is connected, status, repeated connect, and browser
+execution revalidate the active-port file, kernel listener, PID generation, and bundle without opening another native
+WebSocket or prompting again. Peekaboo never uses legacy HTTP discovery for channel mode or asks the MCP child to
+rediscover an ambient browser.
 
 ## Privacy defaults
 
@@ -35,8 +51,7 @@ Peekaboo starts Chrome DevTools MCP with:
 
 ```bash
 npx -y chrome-devtools-mcp@1.6.0 \
-  --auto-connect \
-  --channel=<stable|beta|dev|canary> \
+  --wsEndpoint=ws://127.0.0.1:<port>/devtools/browser/<id> \
   --experimentalPageIdRouting \
   --no-usage-statistics \
   --no-performance-crux
@@ -57,9 +72,13 @@ The CLI exposes the safer request-carried equivalent:
 peekaboo browser connect --browser-url http://127.0.0.1:9222 --foreground --json
 ```
 
-Only loopback HTTP endpoints are accepted. Peekaboo resolves `/json/version`, pins the returned browser WebSocket
+Only loopback HTTP endpoints are accepted. This explicit-URL mode resolves `/json/version`, pins the returned browser WebSocket
 identity, probes `list_pages` before reporting connected, and revalidates that identity before every later tool call.
+It is the compatibility path for custom or non-Google-signed debuggable browsers; unlike native channel discovery, it
+does not claim a Google code-signing identity or process-bound channel receipt.
 When multiple Chrome processes share one channel, channel-only connection refuses and requires this exact endpoint.
+Channel discovery reads only the standard current-user profile for the chosen Chrome channel; a headless or custom
+profile cannot substitute an arbitrary authority file for a detected GUI browser.
 
 The tool can expose page content, cookies/session-backed data visible to the page, console messages, network requests, screenshots, and traces to the active agent/MCP client. Do not enable it for browser profiles containing sensitive data unless that exposure is acceptable.
 
@@ -82,14 +101,16 @@ Browser MCP state is owned by `BrowserMCPService` through `BrowserMCPSessionMana
 - The daemon owns the `chrome-devtools-mcp` child process and per-page snapshot UID state.
 - Separate CLI invocations require the same current-build reusable daemon. Peekaboo.app and older Bridge hosts are not
   eligible for browser session routing because they cannot attest the exact persistent connection receipt.
-- Channel `--auto-connect` and isolated-profile children remain available for unbound and protocol 1.28 browser calls,
-  but they are not eligible for protocol 1.29 receipt-bound execution because the MCP child cannot yet attest which
-  browser it actually selected.
+- Native channel connections and explicit loopback URLs both resolve to an exact WebSocket and are eligible for
+  receipt-bound execution. Isolated-profile children remain unbound because the child does not report a pinnable
+  browser identity.
 - Child-process loss, PID reuse, endpoint restart, or an attempted retarget fails closed with reconnect guidance. Peekaboo
   never silently rediscovers another same-channel profile.
-- Receipt-bound execution requires an explicit CLI or environment DevTools URL, resolves it to a complete WebSocket
-  browser identity, and compares that identity inside the browser execution gate before the first call. Protocol 1.29
-  signs the full explicit endpoint receipt; it never infers the MCP child's attachment from ambient Chrome processes.
+- Receipt-bound execution resolves a complete WebSocket browser identity and compares that identity inside the browser
+  execution gate before the first call. Channel receipts additionally carry the owning PID, process generation, and
+  exact Chrome bundle identity. Bridge protocol 1.34 and the `nativeBrowserConnectionBinding` capability gate this
+  combined process-and-DevTools contract; downgraded hosts may still use an explicit loopback `browser_url` but cannot
+  perform channel discovery or accept a process-bound browser receipt.
   Multi-call responses retain exact completed and dispatched-or-accepted counts;
   a later failure returns a typed retry-unsafe outcome so callers resume only after observation, never by replaying the
   whole batch.

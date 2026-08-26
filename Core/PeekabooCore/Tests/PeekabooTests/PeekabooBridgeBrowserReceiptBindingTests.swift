@@ -7,6 +7,84 @@ import Testing
 @Suite(.serialized)
 struct PeekabooBridgeBrowserReceiptBindingTests {
     @Test
+    func `browser request read classification is shared across Bridge adapters`() {
+        #expect(PeekabooBridgeBrowserExecuteRequest(
+            toolName: "list_pages",
+            arguments: [:]).isReadOnly)
+        #expect(!PeekabooBridgeBrowserExecuteRequest(
+            toolName: "click",
+            arguments: [:]).isReadOnly)
+    }
+
+    @Test
+    func `process bound DevTools receipt is canonical for native binding protocol`() {
+        let receipt = PeekabooBridgeBrowserConnectionReceipt(
+            channel: "stable",
+            processIdentifier: 42,
+            processStartIdentity: 10042,
+            bundleIdentifier: "com.google.Chrome",
+            browserURL: "http://127.0.0.1:9222/",
+            webSocketDebuggerURL: "ws://127.0.0.1:9222/devtools/browser/browser-a",
+            devToolsBrowserID: "browser-a",
+            browserVersion: "Chrome/151.0",
+            protocolVersion: "1.3")
+
+        #expect(receipt.isCanonicalProcessBoundTarget)
+        #expect(receipt.isCanonicalTarget)
+        #expect(receipt.matchesConnectRequest(.init(channel: "stable")))
+        #expect(!receipt.isCanonicalExternalTarget)
+    }
+
+    @Test
+    func `process bound browser receipts require exact canonical channel bundle pairs`() {
+        let invalidPairs: [(String?, String?)] = [
+            (nil, "com.google.Chrome"),
+            ("", "com.google.Chrome"),
+            ("stable", nil),
+            ("stable", ""),
+            ("stable", "com.google.Chrome.helper"),
+            ("stable", "COM.GOOGLE.CHROME"),
+            ("stable", "com.google.Chrome.canary"),
+            ("canary", "com.google.Chrome"),
+            ("unknown", "com.google.Chrome"),
+        ]
+
+        for (channel, bundleIdentifier) in invalidPairs {
+            let receipt = PeekabooBridgeBrowserConnectionReceipt(
+                channel: channel,
+                processIdentifier: 42,
+                processStartIdentity: 10042,
+                bundleIdentifier: bundleIdentifier,
+                browserURL: "http://127.0.0.1:9222/",
+                webSocketDebuggerURL: "ws://127.0.0.1:9222/devtools/browser/browser-a",
+                devToolsBrowserID: "browser-a",
+                browserVersion: "Chrome/151.0",
+                protocolVersion: "1.3")
+            #expect(!receipt.isCanonicalProcessBoundTarget)
+            #expect(!receipt.isCanonicalTarget)
+        }
+    }
+
+    @Test
+    func `external browser receipt permits nil or one supported canonical channel only`() {
+        func receipt(channel: String?) -> PeekabooBridgeBrowserConnectionReceipt {
+            PeekabooBridgeBrowserConnectionReceipt(
+                channel: channel,
+                browserURL: "http://127.0.0.1:9222/",
+                webSocketDebuggerURL: "ws://127.0.0.1:9222/devtools/browser/browser-a",
+                devToolsBrowserID: "browser-a",
+                browserVersion: "Chrome/151.0",
+                protocolVersion: "1.3")
+        }
+
+        #expect(receipt(channel: nil).isCanonicalExternalTarget)
+        #expect(receipt(channel: "stable").isCanonicalExternalTarget)
+        #expect(!receipt(channel: "STABLE").isCanonicalExternalTarget)
+        #expect(!receipt(channel: "unknown").isCanonicalExternalTarget)
+        #expect(!receipt(channel: "").isCanonicalExternalTarget)
+    }
+
+    @Test
     func `binding a result aware mutation to status forbids reconnect and retarget`() {
         let requests = [
             PeekabooBridgeBrowserExecuteRequest(
@@ -344,13 +422,16 @@ struct PeekabooBridgeBrowserReceiptBindingTests {
             allowlistedTeams: [],
             allowlistedBundles: [],
             permissionStatusEvaluator: { _ in Self.permissions })
-        let request = PeekabooBridgeRequest.browserExecute(.init(
+        let payload = PeekabooBridgeBrowserExecuteRequest(
             toolName: "click",
             arguments: [:],
             channel: "stable",
-            expectedConnectionReceipt: Self.localReceipt))
-        return try await PeekabooBridgeRequestContext.$usesAttestedOperationResultSemantics.withValue(true) {
-            try await server.handleAuthorized(request, peer: nil, permissions: Self.permissions)
+            expectedConnectionReceipt: Self.localReceipt)
+        let request = PeekabooBridgeRequest.browserExecute(payload.binding(to: Self.localReceipt))
+        return try await PeekabooBridgeRequestContext.$negotiatedSessionCapabilities.withValue(.current) {
+            try await PeekabooBridgeRequestContext.$usesAttestedOperationResultSemantics.withValue(true) {
+                try await server.handleAuthorized(request, peer: nil, permissions: Self.permissions)
+            }
         }
     }
 
@@ -359,7 +440,11 @@ struct PeekabooBridgeBrowserReceiptBindingTests {
         processIdentifier: 42,
         processStartIdentity: 10042,
         bundleIdentifier: "com.google.Chrome",
-        browserVersion: "Chrome/151.0")
+        browserURL: "http://127.0.0.1:9222/",
+        webSocketDebuggerURL: "ws://127.0.0.1:9222/devtools/browser/browser-a",
+        devToolsBrowserID: "browser-a",
+        browserVersion: "Chrome/151.0",
+        protocolVersion: "1.3")
 
     private static let permissions = PermissionsStatus(
         screenRecording: true,

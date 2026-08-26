@@ -9,6 +9,8 @@ import PeekabooFoundation
 import Testing
 @testable import PeekabooBridge
 
+// swiftlint:disable file_length
+// swiftlint:disable:next type_body_length
 struct PeekabooBridgeTests {
     private struct BridgeDateEnvelope: Codable {
         let date: Date
@@ -1986,8 +1988,11 @@ final class StubServices: PeekabooBridgeServiceProviding {
     var browserActionFailure: DesktopActionFailure?
     var browserRawIsError = false
     var browserStatusError: (any Error)?
+    var browserConnectFailure: DesktopActionFailure?
+    var browserConnectError: (any Error)?
     var browserExecutionError: (any Error)?
     var browserExecutionErrorAfterDispatch: (any Error)?
+    var browserExecutionReceiptOverride: PeekabooBridgeBrowserConnectionReceipt?
     var browserCompletedCallCount: Int?
     var browserDispatchedCallCount: Int?
     var preservesBrowserReceiptChannel = false
@@ -2003,7 +2008,11 @@ final class StubServices: PeekabooBridgeServiceProviding {
         processIdentifier: 42,
         processStartIdentity: 10042,
         bundleIdentifier: "com.google.Chrome",
-        browserVersion: "144.0")
+        browserURL: "http://127.0.0.1:9222/",
+        webSocketDebuggerURL: "ws://127.0.0.1:9222/devtools/browser/browser-a",
+        devToolsBrowserID: "browser-a",
+        browserVersion: "Chrome/144.0",
+        protocolVersion: "1.3")
 
     init(
         applications: any ApplicationServiceProtocol = StubApplicationService(),
@@ -2093,7 +2102,7 @@ final class StubServices: PeekabooBridgeServiceProviding {
                 content: response.content,
                 isError: actionFailure != nil || response.isError,
                 meta: response.meta),
-            connectionReceipt: expectedConnectionReceipt,
+            connectionReceipt: self.browserExecutionReceiptOverride ?? expectedConnectionReceipt,
             completedCallCount: self.browserCompletedCallCount ?? request.resolvedCalls.count,
             dispatchedCallCount: self.browserDispatchedCallCount ?? request.resolvedCalls.count,
             actionFailure: actionFailure)

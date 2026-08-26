@@ -8,6 +8,10 @@ import TachikomaMCP
 
 @MainActor
 extension PeekabooServices: PeekabooBridgeBrowserConnectionResultProviding {
+    public var supportsNativeBrowserConnectionBinding: Bool {
+        self.browser.supportsNativeBrowserConnectionBinding
+    }
+
     public func browserStatus(channel: String?) async throws -> PeekabooBridgeBrowserStatus {
         let status = try await self.browser.status(channel: Self.browserChannel(from: channel))
         return Self.bridgeStatus(from: status)
@@ -114,6 +118,14 @@ extension PeekabooServices: PeekabooBridgeBrowserConnectionResultProviding {
                 reason: .operationUnsupported,
                 message: "The browser provider cannot atomically bind execution to a connection receipt.",
                 hint: "Update the runtime host before retrying target-attested browser execution.")
+        }
+        if request.isReadOnly {
+            return try PeekabooBridgeBrowserExecutionResult(
+                response: Self.bridgeToolResponse(from: result.response),
+                connectionReceipt: Self.bridgeReceipt(from: result.connectionReceipt),
+                completedCallCount: result.completedCallCount,
+                dispatchedCallCount: result.dispatchedCallCount,
+                actionFailure: result.actionFailure)
         }
         let projected = try result.projectingMutationProgress(for: calls)
         return try PeekabooBridgeBrowserExecutionResult(

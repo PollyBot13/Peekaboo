@@ -154,23 +154,9 @@ public enum BrowserMCPChannel: String, Sendable, CaseIterable, Codable {
     case dev
     case canary
 
-    static func infer(bundleIdentifier: String, applicationName: String) -> Self? {
-        let bundle = bundleIdentifier.lowercased()
-        let name = applicationName.lowercased()
-
-        if bundle == "com.google.chrome" || name == "google chrome" {
-            return .stable
-        }
-        if bundle.contains("chrome.beta") || name.contains("chrome beta") {
-            return .beta
-        }
-        if bundle.contains("chrome.dev") || name.contains("chrome dev") {
-            return .dev
-        }
-        if bundle.contains("chrome.canary") || name.contains("canary") {
-            return .canary
-        }
-        return nil
+    static func infer(bundleIdentifier: String?, applicationName _: String) -> Self? {
+        guard let identity = ChromeChannelIdentity(exactBundleIdentifier: bundleIdentifier) else { return nil }
+        return Self(rawValue: identity.rawValue)
     }
 }
 
@@ -186,6 +172,8 @@ enum BrowserMCPLaunchTarget: Sendable, Equatable {
 }
 
 public protocol BrowserMCPClientProviding: AnyObject, Sendable {
+    var supportsNativeBrowserConnectionBinding: Bool { get }
+
     @MainActor
     func status(channel: BrowserMCPChannel?) async -> BrowserMCPStatus
     @MainActor
@@ -203,6 +191,12 @@ public protocol BrowserMCPClientProviding: AnyObject, Sendable {
         _ calls: [BrowserMCPMappedCall],
         channel: BrowserMCPChannel?,
         expectedConnectionReceipt: BrowserMCPConnectionReceipt) async throws -> BrowserMCPExecutionResult
+}
+
+extension BrowserMCPClientProviding {
+    public var supportsNativeBrowserConnectionBinding: Bool {
+        false
+    }
 }
 
 /// Additive browser client surface for callers that need canonical desktop-action semantics.
@@ -288,21 +282,28 @@ extension BrowserMCPClientProviding {
 public final class BrowserMCPService: BrowserMCPClientProviding, BrowserMCPActionResultProviding,
     BrowserMCPConnectionResultProviding, @unchecked Sendable
 {
+    public let supportsNativeBrowserConnectionBinding: Bool
+
     private static let serverName = "chrome-devtools"
 
     @MainActor private var sessionManager: BrowserMCPSessionManager?
 
     public init() {
+        self.supportsNativeBrowserConnectionBinding = BrowserMCPEnvironmentOptions(
+            environment: ProcessInfo.processInfo.environment).supportsNativeBrowserConnectionBinding
         self.sessionManager = nil
     }
 
     @MainActor
     public init(manager: TachikomaMCPClientManager) {
-        self.sessionManager = BrowserMCPSessionManager(serverName: Self.serverName, manager: manager)
+        let sessionManager = BrowserMCPSessionManager(serverName: Self.serverName, manager: manager)
+        self.supportsNativeBrowserConnectionBinding = sessionManager.supportsNativeBrowserConnectionBinding
+        self.sessionManager = sessionManager
     }
 
     @MainActor
     init(sessionManager: BrowserMCPSessionManager) {
+        self.supportsNativeBrowserConnectionBinding = sessionManager.supportsNativeBrowserConnectionBinding
         self.sessionManager = sessionManager
     }
 
@@ -487,6 +488,15 @@ public final class BrowserMCPService: BrowserMCPClientProviding, BrowserMCPActio
             expectedConnectionReceipt: expectedConnectionReceipt)
     }
 
+    /// Legacy low-level configuration factory retained for source compatibility.
+    ///
+    /// Passing neither an exact WebSocket nor an explicit isolated/URL environment option selects
+    /// upstream ambient auto-connect. Peekaboo product sessions never call this path: standard
+    /// channels resolve and attest `DevToolsActivePort`, then use an exact WebSocket configuration.
+    @available(
+        *,
+        deprecated,
+        message: "Use chromeDevToolsConfig(webSocketEndpoint:) or isolatedChromeDevToolsConfig(channel:headless:)")
     public static func chromeDevToolsConfig(
         channel: BrowserMCPChannel?,
         webSocketEndpoint: String? = nil,
@@ -508,6 +518,23 @@ public final class BrowserMCPService: BrowserMCPClientProviding, BrowserMCPActio
         return self.chromeDevToolsConfig(
             target: target,
             headless: self.environmentFlag("PEEKABOO_BROWSER_MCP_HEADLESS", environment: environment))
+    }
+
+    /// Creates a Chrome DevTools MCP configuration that can attach only to one pre-resolved WebSocket.
+    public static func chromeDevToolsConfig(webSocketEndpoint: String) -> MCPServerConfig {
+        self.chromeDevToolsConfig(
+            target: .exactWebSocket(webSocketEndpoint),
+            headless: false)
+    }
+
+    /// Creates an explicitly isolated Chrome profile for deterministic tests and opt-in standalone use.
+    public static func isolatedChromeDevToolsConfig(
+        channel: BrowserMCPChannel,
+        headless: Bool = false) -> MCPServerConfig
+    {
+        self.chromeDevToolsConfig(
+            target: .isolated(channel),
+            headless: headless)
     }
 
     private static func successOutcome(dispatchedCallCount: Int) -> DesktopActionOutcome {
@@ -583,7 +610,7 @@ public final class BrowserMCPService: BrowserMCPClientProviding, BrowserMCPActio
             description = "Chrome DevTools automation for the running \(channel.rawValue) Chrome profile"
         }
 
-        if headless {
+        if headless, case .isolated = target {
             args.append("--headless")
         }
 
@@ -600,16 +627,13 @@ public final class BrowserMCPService: BrowserMCPClientProviding, BrowserMCPActio
             description: description)
     }
 
-    private static func chromeDevToolsConfig(browserURL: String, headless: Bool) -> MCPServerConfig {
+    private static func chromeDevToolsConfig(browserURL: String, headless _: Bool) -> MCPServerConfig {
         var args = [
             "-y",
             "chrome-devtools-mcp@1.6.0",
             "--experimentalPageIdRouting",
             "--browserUrl=\(browserURL)",
         ]
-        if headless {
-            args.append("--headless")
-        }
         args.append("--no-usage-statistics")
         args.append("--no-performance-crux")
         return MCPServerConfig(
@@ -684,6 +708,9 @@ public enum BrowserMCPConnectionError: LocalizedError, Equatable {
     case processIdentityUnavailable(Int32)
     case explicitEndpointUnsupported
     case invalidEndpoint(String)
+    case channelEndpointUnavailable(BrowserMCPChannel, String)
+    case permissionBearingConnectionFailed(String)
+    case permissionBearingConnectionCancelled
     case connectionProbeFailed(String)
     case connectionLost(String)
     case expectedConnectionReceiptMismatch
@@ -704,6 +731,14 @@ public enum BrowserMCPConnectionError: LocalizedError, Equatable {
             "This browser client cannot carry an explicit DevTools endpoint."
         case let .invalidEndpoint(reason):
             "Invalid browser_url: \(reason)"
+        case let .channelEndpointUnavailable(channel, reason):
+            "The running \(channel.rawValue) Chrome channel did not expose a usable standard-profile DevTools " +
+                "WebSocket: \(reason). Enable remote debugging and approve Chrome's prompt, or use one exact " +
+                "loopback browser_url for a custom profile."
+        case let .permissionBearingConnectionFailed(reason):
+            "The permission-bearing Chrome connection did not complete: \(reason)"
+        case .permissionBearingConnectionCancelled:
+            "The permission-bearing Chrome connection was cancelled after it started."
         case let .connectionProbeFailed(reason):
             "Chrome DevTools MCP started, but its exact read-only connection probe failed: \(reason)"
         case let .connectionLost(reason):

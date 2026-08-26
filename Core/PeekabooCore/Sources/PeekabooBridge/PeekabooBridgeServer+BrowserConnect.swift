@@ -7,15 +7,7 @@ extension PeekabooBridgeServer {
     func handleBrowserConnect(
         _ payload: PeekabooBridgeBrowserChannelRequest) async throws -> PeekabooBridgeHandledResponse
     {
-        guard let provider = self.services as? any PeekabooBridgeBrowserConnectionResultProviding else {
-            throw DesktopActionFailure.preDispatchRefusal(
-                reason: .operationUnsupported,
-                message: "The Bridge browser provider cannot report canonical connection outcomes.",
-                hint: "Update the runtime host before retrying browser connect.")
-        }
-        let result = try await provider.browserConnectResult(
-            channel: payload.channel,
-            browserURL: payload.browserURL)
+        let result = try await self.browserConnectionResult(payload)
         guard result.payload.isConnected,
               let receipt = result.payload.connectionReceipt,
               let outcome = result.outcome
@@ -56,11 +48,52 @@ extension PeekabooBridgeServer {
                 target: self.browserTargetDisposition(receipt)))
     }
 
+    func browserConnectionResult(
+        _ payload: PeekabooBridgeBrowserChannelRequest) async throws
+        -> DesktopActionResult<PeekabooBridgeBrowserStatus>
+    {
+        guard let provider = self.services as? any PeekabooBridgeBrowserConnectionResultProviding else {
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .operationUnsupported,
+                message: "The Bridge browser provider cannot report canonical connection outcomes.",
+                hint: "Update the runtime host before retrying browser connect.")
+        }
+        return try await provider.browserConnectResult(
+            channel: payload.channel,
+            browserURL: payload.browserURL)
+    }
+
+    func legacyBrowserConnectionStatus(
+        _ payload: PeekabooBridgeBrowserChannelRequest) async throws -> PeekabooBridgeBrowserStatus
+    {
+        if self.services is any PeekabooBridgeBrowserConnectionResultProviding {
+            return try await self.browserConnectionResult(payload).payload
+        }
+        return try await self.services.browserConnect(
+            channel: payload.channel,
+            browserURL: payload.browserURL)
+    }
+
     func browserTargetDisposition(
         _ receipt: PeekabooBridgeBrowserConnectionReceipt) throws
         -> PeekabooBridgeHandledResponse.Mutation.TargetDisposition
     {
+        if receipt.isCanonicalProcessBoundTarget,
+           PeekabooBridgeRequestContext.negotiatedSessionCapabilities?
+               .nativeBrowserConnectionBinding != true
+        {
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .runtimeIncompatible,
+                message: "Process-bound browser receipts require native browser connection binding.",
+                hint: "Update both Peekaboo client and Bridge host before retrying.")
+        }
         if let processIdentity = receipt.localProcessIdentity {
+            guard receipt.isCanonicalLocalProcessTarget || receipt.isCanonicalProcessBoundTarget else {
+                throw DesktopActionFailure.preDispatchRefusal(
+                    reason: .targetUnavailable,
+                    message: "The browser connection has an incomplete process-bound DevTools identity.",
+                    hint: "Reconnect the intended browser and retry with its full connection receipt.")
+            }
             guard
                 self.processStartIdentityProvider(processIdentity.processIdentifier)
                 == processIdentity.processStartIdentity
@@ -88,6 +121,7 @@ extension PeekabooBridgeServer {
             receipt: PeekabooBridgeBrowserConnectionReceipt,
             disposition: PeekabooBridgeHandledResponse.Mutation.TargetDisposition)
     {
+        let expectedReceipt = try Self.validatedBrowserExecutionReceipt(payload)
         let status: PeekabooBridgeBrowserStatus
         do {
             status = try await self.services.browserStatus(channel: payload.channel)
@@ -130,12 +164,6 @@ extension PeekabooBridgeServer {
                 message: "The connected browser channel changed before execution.",
                 hint: "Refresh browser status and retry against its exact channel.")
         }
-        guard let expectedReceipt = payload.expectedConnectionReceipt else {
-            throw DesktopActionFailure.preDispatchRefusal(
-                reason: .invalidRequest,
-                message: "Attested browser execution requires an expected connection receipt.",
-                hint: "Refresh browser status and bind the request to its complete connection receipt.")
-        }
         guard expectedReceipt == receipt else {
             throw DesktopActionFailure.preDispatchRefusal(
                 reason: .targetUnavailable,
@@ -143,6 +171,23 @@ extension PeekabooBridgeServer {
                 hint: "Refresh browser status and retry against its complete connection receipt.")
         }
         return try (receipt, self.browserTargetDisposition(receipt))
+    }
+
+    static func validatedBrowserExecutionReceipt(
+        _ payload: PeekabooBridgeBrowserExecuteRequest) throws
+        -> PeekabooBridgeBrowserConnectionReceipt
+    {
+        guard let receipt = payload.expectedConnectionReceipt,
+              receipt.isCanonicalExecutionTarget,
+              payload.channel == nil || payload.channel == receipt.channel,
+              payload.connectionPolicy == .requireExistingLiveReceipt
+        else {
+            throw DesktopActionFailure.preDispatchRefusal(
+                reason: .invalidRequest,
+                message: "Browser execution requires one complete existing-connection-only receipt.",
+                hint: "Refresh browser status and bind the request to its exact connection before retrying.")
+        }
+        return receipt
     }
 
     private static func invalidBrowserConnectOutcome(_ outcome: DesktopActionOutcome) -> DesktopActionFailure {
